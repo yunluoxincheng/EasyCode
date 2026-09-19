@@ -53,6 +53,8 @@ export interface SessionMeta {
 export interface SessionData {
   meta: SessionMeta;
   messages: ChatMessage[];
+  /** 会话累计 token 用量与步数（引擎累计并持久化） */
+  usage?: { input: number; output: number; steps: number };
 }
 
 /** 会话审批模式：ask=写文件/执行命令需人工批准；yolo=自动放行 */

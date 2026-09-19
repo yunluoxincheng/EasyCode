@@ -189,7 +189,22 @@ export class AgentServer {
         messages: rt.data.messages,
         signal: rt.controller.signal,
         approval: rt.approval,
-        emit: this.emitterFor(id),
+        emit: (event) => {
+          if (event.type === 'step_end') {
+            // 累计会话用量并随事件下发（持久化在会话文件中）
+            const u = rt.data.usage ?? { input: 0, output: 0, steps: 0 };
+            u.input += event.usage?.inputTokens ?? 0;
+            u.output += event.usage?.outputTokens ?? 0;
+            u.steps += 1;
+            rt.data.usage = u;
+            this.emitterFor(id)({
+              ...event,
+              sessionUsage: { input: u.input, output: u.output, steps: u.steps },
+            });
+            return;
+          }
+          this.emitterFor(id)(event);
+        },
         reasoningEffort: rt.data.meta.reasoningEffort ?? '',
       });
       if (result.reason === 'error' && result.errorMessage) {

@@ -17,7 +17,12 @@ export type AgentEvent =
     }
   | { type: 'approval_request'; requestId: string; toolName: string; input: unknown }
   | { type: 'approval_resolved'; requestId: string; approved: boolean }
-  | { type: 'step_end'; usage?: Usage }
+  | {
+      type: 'step_end';
+      usage?: Usage;
+      /** 本会话累计（输入/输出/步数），由引擎累计 */
+      sessionUsage?: { input: number; output: number; steps: number };
+    }
   | { type: 'error'; message: string }
   | { type: 'done'; reason: 'completed' | 'aborted' | 'error' };
 

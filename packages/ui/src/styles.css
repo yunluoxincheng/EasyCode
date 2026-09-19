@@ -1088,3 +1088,30 @@ select:focus-visible,
 /* 常规页开关行 */
 .auto-scroll-row { display: flex; align-items: center; gap: 10px; }
 .auto-scroll-text { font-size: 12.5px; color: var(--dim); }
+
+
+/* ---------------- 用量明细 popover ---------------- */
+
+.usage-wrap { position: relative; }
+.usage-chip { cursor: pointer; }
+.usage-chip:hover { border-color: var(--green-dim); color: var(--text); }
+.usage-caret { color: var(--green); font-size: 9px; margin-left: 4px; }
+.usage-pop {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  width: 260px;
+  background: var(--panel);
+  border: 1px solid var(--border2);
+  border-radius: var(--radius);
+  box-shadow: 0 14px 36px rgba(0, 0, 0, .55);
+  z-index: 90;
+  padding: 10px 12px;
+}
+.usage-pop-title { font-size: 10px; letter-spacing: 1.5px; color: var(--faint); margin-bottom: 8px; }
+.usage-pop-title::before { content: '// '; }
+.usage-table { width: 100%; border-collapse: collapse; font-size: 12px; font-family: var(--font); }
+.usage-table td { padding: 4px 6px; border-bottom: 1px dashed var(--border); }
+.usage-table td:first-child { color: var(--faint); }
+.usage-table td:last-child { text-align: right; color: var(--text); }
+.usage-table tr.hl td { color: var(--green); }

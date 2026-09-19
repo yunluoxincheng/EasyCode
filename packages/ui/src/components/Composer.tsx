@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useStore } from '../useStore.js';
 import { ProjectSwitcher } from './ProjectSwitcher.js';
 import { ModelEffortPicker } from './ModelEffortPicker.js';
+import { UsageChip } from './UsageChip.js';
 
 export function Composer() {
   const store = useStore();
@@ -46,11 +47,7 @@ export function Composer() {
         </div>
         {session && <ProjectSwitcher />}
         {session && <ModelEffortPicker />}
-        {store.lastUsage && (
-          <span className="chip usage-chip">
-            ↑{store.lastUsage.inputTokens ?? '?'} ↓{store.lastUsage.outputTokens ?? '?'} tk
-          </span>
-        )}
+        {session && <UsageChip />}
         <span className="spacer" />
         {store.running && <span className="running-dot" title="Agent 运行中" />}
       </div>
