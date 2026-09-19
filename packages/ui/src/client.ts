@@ -56,6 +56,12 @@ export class IpcAgentClient implements AgentClient {
   getApprovalMode(id: string) {
     return this.invoke<ApprovalMode>('get-approval-mode', { id });
   }
+  setSessionModel(id: string, model: string) {
+    return this.invoke<SessionMeta>('set-session-model', { id, model });
+  }
+  setSessionEffort(id: string, effort: string) {
+    return this.invoke<SessionMeta>('set-session-effort', { id, effort });
+  }
   setSessionWorkspace(id: string, workspace: string) {
     return this.invoke<SessionMeta>('set-session-workspace', { id, workspace });
   }
@@ -134,6 +140,8 @@ export function createDemoClient(): AgentClient {
         server.setApprovalMode(id, mode);
       }),
     getApprovalMode: (id) => wrap(() => server.getApprovalMode(id)),
+    setSessionModel: (id, model) => wrap(() => server.setSessionModel(id, model)),
+    setSessionEffort: (id, effort) => wrap(() => server.setSessionEffort(id, effort)),
     setSessionWorkspace: (id, workspace) => wrap(() => server.setSessionWorkspace(id, workspace)),
     getSettings: () => wrap(() => server.getSettings()),
     updateSettings: (patch) => wrap(() => server.updateSettings(patch)),

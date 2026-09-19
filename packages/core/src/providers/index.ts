@@ -7,6 +7,8 @@ export interface StreamRequest {
   tools: ToolSpec[];
   system?: string;
   temperature?: number;
+  /** 思考强度（minimal/low/medium/high/max）；'' 或缺省 = 跟随供应商默认。是否生效取决于供应商 */
+  reasoningEffort?: string;
 }
 
 /** Provider 流式回调事件（文本/思考实时流出；工具调用在轮次结束后经 blocks 返回） */

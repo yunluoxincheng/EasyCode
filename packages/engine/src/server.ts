@@ -173,7 +173,12 @@ export class AgentServer {
     rt.running = true;
     rt.controller = new AbortController();
     try {
-      const provider = this.createProvider(rt.data.meta.providerId, rt.data.meta.model);
+      const entry = this.settings.providers[rt.data.meta.providerId];
+      const firstEnabled = (entry?.models ?? []).find((m) => m.enabled !== false)?.name ?? 'default';
+      const provider = this.createProvider(
+        rt.data.meta.providerId,
+        rt.data.meta.model || firstEnabled,
+      );
       const result = await runAgentLoop({
         provider,
         tools: createBuiltinTools(),
@@ -184,6 +189,7 @@ export class AgentServer {
         signal: rt.controller.signal,
         approval: rt.approval,
         emit: this.emitterFor(id),
+        reasoningEffort: rt.data.meta.reasoningEffort ?? '',
       });
       if (result.reason === 'error' && result.errorMessage) {
         this.events.emit({ sessionId: id, event: { type: 'error', message: result.errorMessage } });
@@ -217,6 +223,25 @@ export class AgentServer {
 
   getApprovalMode(id: string): ApprovalMode {
     return this.requireSession(id).approval.modeValue;
+  }
+
+  /** 会话级模型覆盖（'' = 跟随供应商默认，即第一个启用模型） */
+  async setSessionModel(id: string, model: string): Promise<SessionMeta> {
+    const rt = this.requireSession(id);
+    if (rt.running) throw new Error('会话运行中，暂不能切换模型');
+    rt.data.meta.model = model.trim();
+    rt.data.meta.updatedAt = new Date().toISOString();
+    await this.persistSession(rt);
+    return rt.data.meta;
+  }
+
+  /** 会话级思考强度（'' = 跟随供应商默认） */
+  async setSessionEffort(id: string, effort: string): Promise<SessionMeta> {
+    const rt = this.requireSession(id);
+    rt.data.meta.reasoningEffort = effort.trim();
+    rt.data.meta.updatedAt = new Date().toISOString();
+    await this.persistSession(rt);
+    return rt.data.meta;
   }
 
   /** 绑定/更换会话的工作区（传空串表示解绑，纯对话） */

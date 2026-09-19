@@ -18,6 +18,8 @@ export interface LoopOptions {
   approval: ApprovalManager;
   emit(event: AgentEvent): void;
   maxSteps?: number;
+  /** 思考强度（'' = 供应商默认），透传给 Provider */
+  reasoningEffort?: string;
 }
 
 export interface LoopResult {
@@ -41,6 +43,7 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
     approval,
     emit,
     maxSteps = 25,
+    reasoningEffort,
   } = options;
 
   try {
@@ -52,6 +55,7 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
         messages,
         tools: tools.listSpecs(),
         system: systemPrompt,
+        reasoningEffort: reasoningEffort || undefined,
       };
       const turn = await provider.stream(request, {
         signal,

@@ -24,6 +24,10 @@ export interface AgentClient {
   abort(id: string): Promise<void>;
   setApprovalMode(id: string, mode: ApprovalMode): Promise<void>;
   getApprovalMode(id: string): Promise<ApprovalMode>;
+  /** 会话级模型覆盖；'' = 跟随供应商默认 */
+  setSessionModel(id: string, model: string): Promise<SessionMeta>;
+  /** 会话级思考强度；'' = 跟随供应商默认 */
+  setSessionEffort(id: string, effort: string): Promise<SessionMeta>;
   /** 绑定/更换会话工作区；空串 = 解绑为纯对话 */
   setSessionWorkspace(id: string, workspace: string): Promise<SessionMeta>;
   getSettings(): Promise<Settings>;

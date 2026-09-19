@@ -171,6 +171,20 @@ export class AppStore {
     return providerLabel(id, this.settings?.providers[id]);
   }
 
+  /** 会话级模型覆盖（'' = 供应商默认） */
+  async setSessionModel(id: string, model: string): Promise<void> {
+    const meta = await this.client.setSessionModel(id, model);
+    this.sessions = this.sessions.map((s) => (s.id === id ? meta : s));
+    this.notify();
+  }
+
+  /** 会话级思考强度（'' = 供应商默认） */
+  async setSessionEffort(id: string, effort: string): Promise<void> {
+    const meta = await this.client.setSessionEffort(id, effort);
+    this.sessions = this.sessions.map((s) => (s.id === id ? meta : s));
+    this.notify();
+  }
+
   /** 为会话绑定/更换工作区 */
   async bindWorkspace(id: string, workspace: string): Promise<void> {
     const meta = await this.client.setSessionWorkspace(id, workspace);

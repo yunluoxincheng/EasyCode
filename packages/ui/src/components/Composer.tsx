@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useStore } from '../useStore.js';
 import { ProjectSwitcher } from './ProjectSwitcher.js';
+import { ModelEffortPicker } from './ModelEffortPicker.js';
 
 export function Composer() {
   const store = useStore();
@@ -44,11 +45,7 @@ export function Composer() {
           </button>
         </div>
         {session && <ProjectSwitcher />}
-        {session && (
-          <span className="chip model-chip" title={session.workspaceRoot || undefined}>
-            {store.providerLabelOf(session.providerId)} · {session.model}
-          </span>
-        )}
+        {session && <ModelEffortPicker />}
         {store.lastUsage && (
           <span className="chip usage-chip">
             ↑{store.lastUsage.inputTokens ?? '?'} ↓{store.lastUsage.outputTokens ?? '?'} tk

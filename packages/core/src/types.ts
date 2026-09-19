@@ -44,6 +44,8 @@ export interface SessionMeta {
   workspaceRoot: string;
   providerId: string;
   model: string;
+  /** 思考强度；'' = 跟随供应商默认。生效与否取决于供应商是否支持 reasoning_effort */
+  reasoningEffort?: string;
   createdAt: string;
   updatedAt: string;
 }

@@ -81,6 +81,8 @@ const handlers: Record<string, Handler> = {
     return null;
   },
   'get-approval-mode': (args) => server.getApprovalMode(args.id),
+  'set-session-model': (args) => server.setSessionModel(args.id, args.model),
+  'set-session-effort': (args) => server.setSessionEffort(args.id, args.effort),
   'set-session-workspace': (args) => server.setSessionWorkspace(args.id, args.workspace),
   'get-settings': () => server.getSettings(),
   'update-settings': (args) => server.updateSettings(args.patch),

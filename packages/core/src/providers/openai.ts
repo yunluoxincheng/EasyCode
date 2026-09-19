@@ -64,6 +64,7 @@ export class OpenAICompatibleProvider implements Provider {
       stream_options: { include_usage: true },
     };
     if (request.temperature !== undefined) body.temperature = request.temperature;
+    if (request.reasoningEffort) body.reasoning_effort = request.reasoningEffort;
     if (request.tools.length > 0) {
       body.tools = request.tools.map((t) => ({
         type: 'function',

@@ -256,6 +256,8 @@ export async function createTauriClient(): Promise<AgentClient> {
       server.setApprovalMode(id, mode);
     },
     getApprovalMode: async (id) => server.getApprovalMode(id),
+    setSessionModel: async (id, model) => server.setSessionModel(id, model),
+    setSessionEffort: async (id, effort) => server.setSessionEffort(id, effort),
     setSessionWorkspace: async (id, workspace) => server.setSessionWorkspace(id, workspace),
     getSettings: () => server.getSettings(),
     updateSettings: (patch) => server.updateSettings(patch),

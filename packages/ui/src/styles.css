@@ -941,3 +941,74 @@ select:focus-visible,
   word-break: break-all;
   text-align: left;
 }
+
+/* ---------------- 模型/思考强度 picker（ChatGPT 同款 popover） ---------------- */
+
+.me-picker { position: relative; display: flex; gap: 8px; }
+.effort-chip.on { color: var(--green); border-color: var(--green-dim); }
+.me-pop {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  right: 0;
+  width: 260px;
+  background: var(--panel);
+  border: 1px solid var(--border2);
+  border-radius: var(--radius);
+  box-shadow: 0 14px 36px rgba(0, 0, 0, .55);
+  z-index: 90;
+  overflow: hidden auto;
+  max-height: 340px;
+  padding: 4px;
+}
+.me-section { font-size: 10px; letter-spacing: 1.5px; color: var(--faint); padding: 7px 10px 3px; }
+.me-section::before { content: '// '; }
+.me-opt {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  color: var(--dim);
+  font-family: var(--font);
+  font-size: 12.5px;
+  padding: 7px 10px;
+  cursor: pointer;
+  border-radius: var(--radius);
+}
+.me-opt:hover { background: var(--panel2); color: var(--text); }
+.me-opt.on { color: var(--green); }
+.me-opt-name { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.me-check { color: var(--green); width: 14px; text-align: center; }
+.me-empty { padding: 10px; color: var(--faint); font-size: 12px; }
+
+/* 思考强度滑杆 */
+.effort-pop { width: 300px; padding: 12px 16px 10px; overflow: visible; }
+.effort-current { text-align: center; margin-bottom: 10px; }
+.effort-big { display: block; color: var(--accent, #4da3ff); color: var(--green); font-size: 20px; font-weight: 700; letter-spacing: 2px; }
+.effort-hint { display: block; color: var(--faint); font-size: 10.5px; margin-top: 2px; }
+.effort-slider {
+  width: 100%;
+  appearance: none;
+  -webkit-appearance: none;
+  height: 6px;
+  border-radius: 3px;
+  background: linear-gradient(90deg, var(--green-dim), var(--green));
+  outline: none;
+  margin: 6px 0 4px;
+}
+.effort-slider::-webkit-slider-thumb {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #eafff2;
+  border: 2px solid var(--green);
+  box-shadow: 0 0 10px rgba(74, 222, 128, .5);
+  cursor: pointer;
+}
+.effort-ticks { display: flex; justify-content: space-between; }
+.effort-ticks span { color: var(--faint); font-size: 10px; font-family: var(--font); }
+.effort-ticks span.on { color: var(--green); font-weight: 700; }
