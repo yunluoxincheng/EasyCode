@@ -7,8 +7,9 @@ import type { ProviderEntry, ProviderModel, Settings } from '@easycode/engine';
 import type { SettingsSection } from '../store.js';
 
 const KIND_LABELS: Record<Exclude<ProviderEntry['kind'], 'mock'>, string> = {
-  'openai-compatible': 'OpenAI 兼容 (/chat/completions)',
-  'anthropic': 'Anthropic (/v1/messages)',
+  'anthropic': 'Anthropic Messages (/v1/messages)',
+  'openai-compatible': 'Chat Completions (/chat/completions)',
+  'responses': 'Responses (/responses)',
 };
 const MOCK_LABEL = '演示协议 (Mock，无需网络)';
 
@@ -271,7 +272,6 @@ export function SettingsPage() {
                     <>
                       <div className="pd-head">
                         <span className="pd-title">{providerLabel(id, p)}</span>
-                        <span className="pd-id">{id}</span>
                         <span className="spacer" />
                         <button
                           className={`switch ${p.enabled !== false ? 'on' : ''}`}

@@ -51,9 +51,6 @@ export function Sidebar() {
       });
     }
   }
-  if (free.length > 0) {
-    groups.push({ key: '__free', label: '不在项目中', folder: null, projectId: null, sessions: free });
-  }
 
   const base = (p: string): string => p.split(/[\\/]/).filter(Boolean).pop() ?? p;
 
@@ -86,6 +83,28 @@ export function Sidebar() {
         </button>
 
         <div className="nav-mini-label">会话</div>
+        {free.map((session) => (
+          <div
+            key={session.id}
+            className={`session-item ${session.id === store.activeId ? 'active' : ''}`}
+            onClick={() => store.selectSession(session.id)}
+          >
+            <span className="session-title">{session.title}</span>
+            <span className="session-meta">
+              {store.providerLabelOf(session.providerId)} · {session.model}
+            </span>
+            <button
+              className="session-delete"
+              title="删除会话"
+              onClick={(e) => {
+                e.stopPropagation();
+                if (!store.running) store.deleteSession(session.id);
+              }}
+            >
+              ✕
+            </button>
+          </div>
+        ))}
         {groups.map((g) => (
           <div key={g.key} className="session-group">
             <div

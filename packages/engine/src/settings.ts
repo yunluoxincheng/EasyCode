@@ -17,7 +17,7 @@ export interface ProviderModel {
 
 /** Provider 配置（kind 决定适配器） */
 export interface ProviderEntry {
-  kind: 'openai-compatible' | 'anthropic' | 'mock';
+  kind: 'openai-compatible' | 'anthropic' | 'responses' | 'mock';
   baseURL: string;
   apiKey?: string;
   /** 该供应商可用的模型列表 */

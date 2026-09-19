@@ -15,6 +15,7 @@ export { runCommandTool } from './tools/shell.js';
 export * from './providers/index.js';
 export { OpenAICompatibleProvider } from './providers/openai.js';
 export { AnthropicProvider } from './providers/anthropic.js';
+export { ResponsesProvider } from './providers/responses.js';
 export { MockProvider } from './providers/mock.js';
 // 循环与工具函数
 export { runAgentLoop } from './loop.js';

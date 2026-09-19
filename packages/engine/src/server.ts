@@ -2,6 +2,7 @@ import {
   AgentEvent,
   ApprovalManager,
   AnthropicProvider,
+  ResponsesProvider,
   ChatMessage,
   Emitter,
   Host,
@@ -290,6 +291,8 @@ export class AgentServer {
         return new MockProvider(providerId);
       case 'anthropic':
         return new AnthropicProvider(providerId, { ...entry, model });
+      case 'responses':
+        return new ResponsesProvider(providerId, { ...entry, model });
       case 'openai-compatible':
       default:
         return new OpenAICompatibleProvider(providerId, { ...entry, model });
