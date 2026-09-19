@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>EasyCode — UI 原型选择（15 风格）</title>
+<style>
+:root{
+  --bg:#0b0c10; --card:#14161c; --border:#262a33; --text:#e6e8ef; --dim:#8b90a0;
+  --sans:-apple-system,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:var(--sans);min-height:100vh;padding:42px 36px}
+header{max-width:1400px;margin:0 auto 30px}
+h1{font-size:25px;font-weight:700;letter-spacing:.3px}
+h1 em{font-style:normal;background:linear-gradient(90deg,#7c8cff,#4dd0e1);-webkit-background-clip:text;background-clip:text;color:transparent}
+header p{color:var(--dim);margin-top:8px;font-size:13.5px;line-height:1.7}
+header p b{color:var(--text)}
+.grid{max-width:1400px;margin:0 auto;display:grid;grid-template-columns:repeat(3,1fr);gap:20px}
+@media (max-width:1150px){.grid{grid-template-columns:repeat(2,1fr)}}
+@media (max-width:760px){.grid{grid-template-columns:1fr}}
+.card{background:var(--card);border:1px solid var(--border);border-radius:14px;overflow:hidden;
+  text-decoration:none;color:var(--text);display:block;transition:transform .15s,border-color .15s}
+.card:hover{transform:translateY(-3px);border-color:#3d434f}
+.thumb{position:relative;height:246px;overflow:hidden;border-bottom:1px solid var(--border)}
+.thumb iframe{width:1440px;height:940px;border:0;transform:scale(.27);transform-origin:0 0;pointer-events:none}
+.meta{padding:13px 15px 15px}
+.meta .no{font-size:10px;letter-spacing:2px;color:var(--dim)}
+.meta h2{font-size:14.5px;margin:3px 0 5px}
+.meta p{font-size:12px;color:var(--dim);line-height:1.6}
+.tags{margin-top:8px;display:flex;gap:5px;flex-wrap:wrap}
+.tags span{font-size:10px;color:var(--dim);border:1px solid var(--border);border-radius:999px;padding:1px 8px}
+.foot{max-width:1400px;margin:24px auto 0;color:var(--dim);font-size:12.5px;line-height:1.8}
+.foot b{color:var(--text)}
+</style>
+</head>
+<body>
+<header>
+  <h1>EasyCode <em>UI 原型</em> — 15 种风格</h1>
+  <p>全部原型使用<b>完全相同的界面内容</b>（会话侧栏 / 时间线 / 思考折叠 / 工具卡片 / 审批卡片 / Diff / 输入区），只有视觉语言不同。点击卡片打开全尺寸页面，右上角 <b>①—⑮</b> 可互相切换。</p>
+</header>
+
+<div class="grid">
+  <a class="card" href="1-terminal.html">
+    <div class="thumb"><iframe src="1-terminal.html" loading="lazy" title="终端风"></iframe></div>
+    <div class="meta"><div class="no">01 · 暗色</div><h2>终端风 · Terminal</h2>
+      <p>等宽字体、tmux 顶栏、[OK]/[WAIT] 标记、扫描线。硬核极客。</p>
+      <div class="tags"><span>Warp/NeoVim</span><span>荧光绿</span></div></div>
+  </a>
+  <a class="card" href="2-paper.html">
+    <div class="thumb"><iframe src="2-paper.html" loading="lazy" title="暖纸杂志风"></iframe></div>
+    <div class="meta"><div class="no">02 · 暖色亮底</div><h2>暖纸 · Warm Paper</h2>
+      <p>米色纸底、衬线标题、赤陶橙、印章徽标、票据审批卡。人文安静。</p>
+      <div class="tags"><span>claude.ai</span><span>编辑部</span></div></div>
+  </a>
+  <a class="card" href="3-brutal.html">
+    <div class="thumb"><iframe src="3-brutal.html" loading="lazy" title="新粗野风"></iframe></div>
+    <div class="meta"><div class="no">03 · 亮底重墨</div><h2>新粗野 · Neo-Brutalism</h2>
+      <p>粗黑描边、硬投影、亮黄钴蓝撞色、按压反馈。大胆张扬。</p>
+      <div class="tags"><span>Gumroad</span><span>潮流</span></div></div>
+  </a>
+  <a class="card" href="4-ide.html">
+    <div class="thumb"><iframe src="4-ide.html" loading="lazy" title="IDE 工作台"></iframe></div>
+    <div class="meta"><div class="no">04 · 暗色高密度</div><h2>IDE 工作台 · Workbench</h2>
+      <p>活动栏、标签页、文件树、状态栏。VS Code 原生扩展感。</p>
+      <div class="tags"><span>VS Code</span><span>重度编码</span></div></div>
+  </a>
+  <a class="card" href="5-hud.html">
+    <div class="thumb"><iframe src="5-hud.html" loading="lazy" title="霓虹控制台"></iframe></div>
+    <div class="meta"><div class="no">05 · 深空暗色</div><h2>霓虹控制台 · Cyber HUD</h2>
+      <p>近黑蓝底、青色辉光、切角面板、SYS//OK 读数。科幻驾驶舱。</p>
+      <div class="tags"><span>HUD</span><span>赛博</span></div></div>
+  </a>
+  <a class="card" href="6-clay.html">
+    <div class="thumb"><iframe src="6-clay.html" loading="lazy" title="软糖风"></iframe></div>
+    <div class="meta"><div class="no">06 · 海盐粉彩</div><h2>软糖 · Pastel Clay</h2>
+      <p>海盐蓝绿底、奶油蓬松阴影、超大圆角、果冻图标。清爽亲和。</p>
+      <div class="tags"><span>Claymorphism</span><span>圆润</span></div></div>
+  </a>
+  <a class="card" href="7-swiss.html">
+    <div class="thumb"><iframe src="7-swiss.html" loading="lazy" title="瑞士格"></iframe></div>
+    <div class="meta"><div class="no">07 · 暗色理性</div><h2>瑞士格 · Swiss</h2>
+      <p>深炭底、发丝分隔线、单点红、N°01 编号、无装饰排版。冷静克制。</p>
+      <div class="tags"><span>International Style</span><span>网格</span></div></div>
+  </a>
+  <a class="card" href="8-noir.html">
+    <div class="thumb"><iframe src="8-noir.html" loading="lazy" title="暗夜优雅"></iframe></div>
+    <div class="meta"><div class="no">08 · 暗色华丽</div><h2>暗夜优雅 · Noir</h2>
+      <p>墨黑底、象牙衬线、香槟金点缀、双线金框审批卡。奢侈品杂志感。</p>
+      <div class="tags"><span>luxury</span><span>衬线</span></div></div>
+  </a>
+  <a class="card" href="9-bento.html">
+    <div class="thumb"><iframe src="9-bento.html" loading="lazy" title="便当盒"></iframe></div>
+    <div class="meta"><div class="no">09 · 暗色模块化</div><h2>便当盒 · Bento</h2>
+      <p>大圆角磁贴、顶部数据格、一切皆悬浮卡片。Apple 发布会风。</p>
+      <div class="tags"><span>Bento Grid</span><span>磁贴</span></div></div>
+  </a>
+  <a class="card" href="10-blueprint.html">
+    <div class="thumb"><iframe src="10-blueprint.html" loading="lazy" title="工程蓝图"></iframe></div>
+    <div class="meta"><div class="no">10 · 青图暗色</div><h2>工程蓝图 · Blueprint</h2>
+      <p>青图蓝底、白色线框、FIG./SEC. 标注、图签表格。工程制图感。</p>
+      <div class="tags"><span>Cyanotype</span><span>制图</span></div></div>
+  </a>
+  <a class="card" href="11-eink.html">
+    <div class="thumb"><iframe src="11-eink.html" loading="lazy" title="墨水极简"></iframe></div>
+    <div class="meta"><div class="no">11 · 全灰阶</div><h2>墨水极简 · e-ink</h2>
+      <p>零彩色、发丝边框、黑白反转块、无阴影。墨水屏专注模式。</p>
+      <div class="tags"><span>Kindle</span><span>灰度</span></div></div>
+  </a>
+  <a class="card" href="12-zen.html">
+    <div class="thumb"><iframe src="12-zen.html" loading="lazy" title="和风禅意"></iframe></div>
+    <div class="meta"><div class="no">12 · 米白留白</div><h2>和风 · Zen</h2>
+      <p>和纸米白、墨字、一点朱红、界栏式工具区、下划线输入。禅意。</p>
+      <div class="tags"><span>侘寂</span><span>留白</span></div></div>
+  </a>
+  <a class="card" href="13-win98.html">
+    <div class="thumb"><iframe src="13-win98.html" loading="lazy" title="复古90s"></iframe></div>
+    <div class="meta"><div class="no">13 · 复古趣味</div><h2>复古 90s · Retro GUI</h2>
+      <p>青色桌面、灰浮雕窗口、假标题栏菜单栏、黑底控制台。怀旧。</p>
+      <div class="tags"><span>Win98</span><span>像素</span></div></div>
+  </a>
+  <a class="card" href="14-scholar.html">
+    <div class="thumb"><iframe src="14-scholar.html" loading="lazy" title="学术复古"></iframe></div>
+    <div class="meta"><div class="no">14 · 米黄暖底</div><h2>学术复古 · Scholar</h2>
+      <p>Solarized 米黄、EXHIBIT 编号、红色批注章、双线刊头。老书房。</p>
+      <div class="tags"><span>Solarized</span><span>手稿</span></div></div>
+  </a>
+  <a class="card" href="15-material.html">
+    <div class="thumb"><iframe src="15-material.html" loading="lazy" title="Material 3"></iframe></div>
+    <div class="meta"><div class="no">15 · 亮色系统</div><h2>Material 3 · 动态色</h2>
+      <p>导航栏胶囊指示、tonal 色面、药丸按钮、蓝色种子 M3。安卓官方感。</p>
+      <div class="tags"><span>Google</span><span>Android</span></div></div>
+  </a>
+</div>
+
+<div class="foot">
+  <b>如何选择：</b>打开全尺寸页面滚动看完整时间线（思考折叠、工具卡片、审批 Diff、命令输出都在里面）。选中后告诉我编号，我会把该风格落到真实应用的 <b>styles.css</b> 并保持组件结构不变；也可以混搭（如「⑨ 的布局 + ② 的配色」）。
+</div>
+</body>
+</html>

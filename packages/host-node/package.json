@@ -1,0 +1,23 @@
+{
+  "name": "@easycode/host-node",
+  "version": "0.1.0",
+  "description": "Node.js 宿主能力实现（文件系统 / 子进程 / 路径）",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@easycode/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.1"
+  }
+}

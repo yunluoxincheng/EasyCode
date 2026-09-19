@@ -1,0 +1,15 @@
+{
+  "name": "@easycode/desktop-tauri",
+  "version": "0.1.0",
+  "description": "EasyCode Tauri 桌面壳（v0.2）：Rust 实现宿主能力，WebView 内运行引擎",
+  "private": true,
+  "scripts": {
+    "tauri": "tauri",
+    "tauri:build": "tauri build --debug --no-bundle",
+    "tauri:bundle": "tauri build",
+    "dev": "tauri dev"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0"
+  }
+}

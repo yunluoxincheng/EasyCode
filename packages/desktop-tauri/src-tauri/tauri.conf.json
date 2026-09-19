@@ -1,0 +1,39 @@
+{
+  "productName": "EasyCode",
+  "version": "0.1.0",
+  "identifier": "com.easycode.desktop",
+  "build": {
+    "frontendDist": "../../ui/dist",
+    "devUrl": "http://localhost:5183",
+    "beforeDevCommand": "pnpm --filter @easycode/ui run dev",
+    "beforeBuildCommand": "pnpm --filter @easycode/ui run build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "EasyCode",
+        "width": 1280,
+        "height": 820,
+        "minWidth": 880,
+        "minHeight": 560,
+        "center": true,
+        "decorations": false,
+        "backgroundColor": "#0a0e0b"
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico",
+      "icons/icon.png"
+    ]
+  }
+}

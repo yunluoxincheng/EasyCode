@@ -1,0 +1,27 @@
+{
+  "name": "@easycode/engine",
+  "version": "0.1.0",
+  "description": "EasyCode 会话引擎：组装 core + Host，提供会话服务、设置与 CLI",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "easycode": "dist/bin.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@easycode/core": "workspace:*",
+    "@easycode/host-node": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.1"
+  }
+}

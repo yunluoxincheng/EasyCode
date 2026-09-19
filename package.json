@@ -1,0 +1,26 @@
+{
+  "name": "easycode",
+  "version": "0.1.0",
+  "private": true,
+  "description": "轻量、高度模块化的桌面端 Coding Agent",
+  "type": "module",
+  "scripts": {
+    "build": "pnpm -r run build",
+    "test": "pnpm --filter @easycode/core run build && node --test packages/core/dist/test/loop.test.js",
+    "dev:ui": "pnpm --filter @easycode/ui run dev",
+    "start": "pnpm --filter @easycode/desktop run start",
+    "cli": "node packages/engine/dist/bin.js"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "electron",
+      "esbuild"
+    ]
+  }
+}

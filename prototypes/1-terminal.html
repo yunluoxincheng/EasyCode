@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>EasyCode 原型 ① — 终端风</title>
+<style>
+:root{
+  --bg:#0a0e0b; --panel:#0e130f; --panel2:#121813; --border:#1e2b21;
+  --text:#c8d6c9; --dim:#6d8271; --faint:#46584a;
+  --green:#4ade80; --green-dim:#2f7a4d; --amber:#fbbf24; --red:#f87171;
+  --mono:'Cascadia Code','JetBrains Mono',Consolas,'Courier New',monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{background:var(--bg);color:var(--text);font-family:var(--mono);font-size:13px;line-height:1.65;overflow:hidden}
+body::after{content:'';position:fixed;inset:0;pointer-events:none;z-index:99;
+  background:repeating-linear-gradient(0deg,rgba(255,255,255,.014) 0 1px,transparent 1px 3px)}
+
+/* tmux 风顶栏 */
+.titlebar{display:flex;align-items:center;gap:14px;height:28px;padding:0 12px;
+  background:#060907;border-bottom:1px solid var(--border);color:var(--dim);font-size:11px}
+.titlebar .seg{padding:0 8px;border-right:1px solid var(--border)}
+.titlebar .seg:last-child{border-right:none;margin-left:auto}
+.titlebar .on{color:var(--green)}
+
+.app{display:flex;height:calc(100% - 28px)}
+
+/* 侧栏 */
+aside{width:236px;min-width:236px;background:var(--panel);border-right:1px solid var(--border);
+  display:flex;flex-direction:column}
+.brand{padding:16px 14px 12px;border-bottom:1px solid var(--border)}
+.brand .logo{font-size:15px;letter-spacing:1px;color:var(--green);font-weight:700}
+.brand .logo::before{content:'▚ '}
+.brand .sub{color:var(--faint);font-size:11px;margin-top:2px}
+.newbtn{margin:12px 12px 6px;padding:8px;border:1px dashed var(--green-dim);color:var(--green);
+  background:none;font-family:var(--mono);font-size:12px;cursor:pointer;text-align:center}
+.newbtn:hover{background:rgba(74,222,128,.06);border-style:solid}
+.sess{padding:10px 8px;flex:1;overflow-y:auto}
+.sess .label{color:var(--faint);font-size:10px;letter-spacing:2px;margin:4px 8px 6px}
+.sess a{display:block;padding:7px 10px;color:var(--dim);text-decoration:none;
+  border-left:2px solid transparent;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sess a:hover{color:var(--text);background:var(--panel2)}
+.sess a.on{color:var(--green);border-left-color:var(--green);background:var(--panel2)}
+.sess a .m{display:block;font-size:10.5px;color:var(--faint)}
+.sidefoot{border-top:1px solid var(--border);padding:10px 12px;font-size:11px;color:var(--faint)}
+.sidefoot .path{color:var(--dim);word-break:break-all;margin-bottom:6px}
+.sidefoot a{color:var(--dim);text-decoration:none}
+.sidefoot a:hover{color:var(--green)}
+
+/* 主区 */
+main{flex:1;display:flex;flex-direction:column;min-width:0}
+.transcript{flex:1;overflow-y:auto;padding:22px 26px 10px}
+
+/* 用户消息 = 提示符行 */
+.user{margin-bottom:18px}
+.user .prompt{color:var(--green);margin-right:8px}
+.user .text{color:#e6efe6}
+
+.block{border:1px solid var(--border);background:var(--panel);margin:10px 0}
+.block>summary{list-style:none;cursor:pointer;display:flex;align-items:center;gap:10px;
+  padding:7px 12px;font-size:12px;color:var(--dim);user-select:none}
+.block>summary::-webkit-details-marker{display:none}
+.block>summary:hover{background:var(--panel2)}
+.block>summary .chev{margin-left:auto;color:var(--faint)}
+.block[open]>summary .chev::after{content:'▾'}
+.block:not([open])>summary .chev::after{content:'▸'}
+.st{font-weight:700;letter-spacing:1px}
+.st.ok{color:var(--green)} .st.run{color:var(--amber)} .st.wait{color:var(--amber)} .st.err{color:var(--red)}
+.block b{color:var(--text);font-weight:700}
+.block .arg{color:var(--dim)}
+.block .ms{color:var(--faint);font-size:11px}
+.block .out{padding:10px 14px;border-top:1px solid var(--border);color:var(--dim);
+  white-space:pre-wrap;word-break:break-word;max-height:280px;overflow:auto;font-size:12px}
+.block .out b{color:var(--green)}
+
+.think{border:1px dashed var(--border);color:var(--faint);margin:10px 0;font-size:12px}
+.think>summary{list-style:none;cursor:pointer;padding:6px 12px}
+.think>summary::-webkit-details-marker{display:none}
+.think>summary::before{content:'· thinking · ';color:var(--green-dim);letter-spacing:1px}
+.think .out{padding:0 12px 8px}
+
+.md{margin:8px 0 18px;color:#dce8dc}
+.md p{margin:6px 0}
+.md pre{border:1px solid var(--border);background:#070a08;padding:12px 14px;overflow-x:auto;
+  color:var(--text);font-size:12px;margin:10px 0}
+.md pre .kw{color:#7dd3fc} .md pre .fn{color:var(--green)} .md pre .cm{color:var(--faint)}
+.md code{color:var(--green)}
+.md ul{margin:6px 0 6px 20px}
+.md li{margin:3px 0}
+.md li::marker{color:var(--green)}
+
+/* 审批 */
+.aproval{border:1px solid var(--amber);background:rgba(251,191,36,.05);margin:12px 0}
+.aproval .head{display:flex;align-items:center;gap:10px;padding:8px 12px;
+  border-bottom:1px solid rgba(251,191,36,.25);color:var(--amber);font-size:12px}
+.aproval .head .st{letter-spacing:1px}
+.aproval .body{padding:10px 14px}
+.aproval .file{color:var(--text);margin-bottom:8px}
+.diff{border:1px solid var(--border);background:#070a08;font-size:12px;overflow-x:auto}
+.diff .add,.diff .del{display:block;padding:0 12px;white-space:pre}
+.diff .add{background:rgba(74,222,128,.08);color:#86efac}
+.diff .del{background:rgba(248,113,113,.08);color:#fca5a5}
+.aproval .acts{display:flex;justify-content:flex-end;gap:10px;padding:10px 12px}
+.btn{font-family:var(--mono);font-size:12px;padding:6px 16px;cursor:pointer;
+  border:1px solid var(--border);background:none;color:var(--dim)}
+.btn:hover{color:var(--text);border-color:var(--dim)}
+.btn.ok{border-color:var(--green-dim);color:var(--green)}
+.btn.ok:hover{background:rgba(74,222,128,.08)}
+
+/* Composer */
+.composer{border-top:1px solid var(--border);background:var(--panel);padding:12px 20px 14px}
+.cbar{display:flex;align-items:center;gap:8px;margin-bottom:8px;font-size:11px;color:var(--faint)}
+.cbar .chip{border:1px solid var(--border);padding:1px 9px;color:var(--dim)}
+.cbar .chip.mode{color:var(--green);border-color:var(--green-dim)}
+.cbar .sp{flex:1}
+.cbar .live{color:var(--green)}
+.cbar .live::before{content:'●';margin-right:5px;animation:pulse 1.2s infinite}
+@keyframes pulse{50%{opacity:.2}}
+.cin{display:flex;gap:10px;align-items:stretch}
+.cin .ps{color:var(--green);align-self:flex-end;padding-bottom:9px}
+.cin textarea{flex:1;background:#070a08;border:1px solid var(--border);color:var(--text);
+  font-family:var(--mono);font-size:13px;padding:9px 12px;resize:none;outline:none;height:64px}
+.cin textarea:focus{border-color:var(--green-dim)}
+.cin textarea::placeholder{color:var(--faint)}
+.cin .send{align-self:flex-end}
+.cursor{display:inline-block;width:8px;height:15px;background:var(--green);vertical-align:-2px;animation:blink 1s steps(1) infinite}
+@keyframes blink{50%{opacity:0}}
+
+/* 风格切换器 */
+.switch{position:fixed;right:14px;top:38px;display:flex;gap:4px;background:rgba(6,9,7,.9);
+  border:1px solid var(--border);padding:4px;z-index:100}
+.switch a{color:var(--dim);text-decoration:none;font-size:11px;padding:3px 8px}
+.switch a:hover{color:var(--green)} .switch a.cur{color:var(--green);background:var(--panel2)}
+</style>
+</head>
+<body>
+<div class="titlebar">
+  <span class="seg on">0:easycode*</span>
+  <span class="seg">1:logs</span>
+  <span class="seg">easycode@workspace</span>
+  <span class="seg">─ 询问模式 ─</span>
+  <span class="seg">2026-09-18 23:59</span>
+</div>
+<div class="app">
+  <aside>
+    <div class="brand"><div class="logo">EASYCODE</div><div class="sub">lightweight coding agent</div></div>
+    <button class="newbtn">[ + 新建会话 ]</button>
+    <nav class="sess">
+      <div class="label">// SESSIONS</div>
+      <a class="on" href="#">重构日期格式化函数<span class="m">zhipu · glm-4.6</span></a>
+      <a href="#">修复登录页 CSS 溢出<span class="m">deepseek · deepseek-chat</span></a>
+      <a href="#">为本项目补 README<span class="m">demo · mock-1</span></a>
+    </nav>
+    <div class="sidefoot">
+      <div class="path">⌂ E:\AllProjects\demo-app</div>
+      <a href="#">[ ⚙ 设置 ]</a>
+    </div>
+  </aside>
+
+  <main>
+    <section class="transcript">
+      <div class="user"><span class="prompt">❯</span><span class="text">帮我把 utils.ts 里的 formatDate 重构成支持 IANA 时区参数，并补上单元测试</span></div>
+
+      <details class="think"><summary>思考过程展开</summary><div class="out">先查看现有实现和测试目录结构，确认导出方式，再做兼容改造，避免破坏旧调用。</div></details>
+
+      <div class="md"><p>我先看一下项目结构和现有的日期工具实现。</p></div>
+
+      <details class="block" open>
+        <summary><span class="st ok">[ OK ]</span><b>list_dir</b><span class="arg">.</span><span class="ms">2ms</span><span class="chev"></span></summary>
+        <pre class="out">[目录] src/
+[目录] tests/
+[文件] package.json   1.2KB
+[文件] tsconfig.json  640B</pre>
+      </details>
+
+      <details class="block">
+        <summary><span class="st ok">[ OK ]</span><b>read_file</b><span class="arg">src/utils/date.ts</span><span class="ms">3ms</span><span class="chev"></span></summary>
+        <pre class="out">  10 <span class="cm">// 旧实现：隐式 UTC，本地时区显示会偏差</span>
+  11 export function formatDate(date: Date): string {
+  12   return date.toISOString().slice(0, 10);
+  13 }</pre>
+      </details>
+
+      <div class="md">
+        <p>现有实现直接用 <code>toISOString().slice(0,10)</code>，会丢时区。计划用 <code>Intl.DateTimeFormat</code> 重写，并保持旧签名兼容：</p>
+        <pre><span class="kw">export function</span> <span class="fn">formatDate</span>(date: Date, timeZone = <span class="cm">'Asia/Shanghai'</span>): string {
+  <span class="kw">return new</span> Intl.DateTimeFormat(<span class="cm">'sv-SE'</span>, { timeZone }).format(date);
+}</pre>
+      </div>
+
+      <div class="aproval">
+        <div class="head"><span class="st wait">[ WAIT ]</span>edit_file · 等待你的批准</div>
+        <div class="body">
+          <div class="file">src/utils/date.ts</div>
+          <div class="diff">
+            <span class="del">- export function formatDate(date: Date): string {</span>
+            <span class="del">-   return date.toISOString().slice(0, 10);</span>
+            <span class="del">- }</span>
+            <span class="add">+ export function formatDate(date: Date, timeZone = 'Asia/Shanghai'): string {</span>
+            <span class="add">+   return new Intl.DateTimeFormat('sv-SE', { timeZone }).format(date);</span>
+            <span class="add">+ }</span>
+          </div>
+        </div>
+        <div class="acts"><button class="btn">[ 拒绝 ]</button><button class="btn ok">[ 批准执行 ]</button></div>
+      </div>
+
+      <details class="block">
+        <summary><span class="st ok">[ OK ]</span><b>run_command</b><span class="arg">pnpm vitest run tests/date.test.ts</span><span class="ms">2.1s</span><span class="chev"></span></summary>
+        <pre class="out">✓ tests/date.test.ts (12 tests) 812ms
+Test Files  1 passed (1)
+     Tests  12 passed (12)</pre>
+      </details>
+
+      <div class="md">
+        <p>完成，改动如下：</p>
+        <ul>
+          <li><code>formatDate</code> 新增可选 <code>timeZone</code> 参数，默认 Asia/Shanghai，旧调用不受影响</li>
+          <li>新增 <code>tests/date.test.ts</code>，12 个用例全部通过</li>
+          <li>边界：夏令时切换日用 <code>sv-SE</code> locale 保证 YYYY-MM-DD 输出稳定</li>
+        </ul>
+        <p>可以继续让我把 <code>parseDate</code> 也一并处理<span class="cursor"></span></p>
+      </div>
+    </section>
+
+    <div class="composer">
+      <div class="cbar">
+        <span class="chip mode">🛡 询问</span>
+        <span class="chip">zhipu · glm-4.6</span>
+        <span class="chip">↑1.2k ↓380 tk</span>
+        <span class="sp"></span>
+        <span class="live">agent running</span>
+      </div>
+      <div class="cin">
+        <span class="ps">❯</span>
+        <textarea placeholder="描述任务，Enter 发送，Shift+Enter 换行…"></textarea>
+        <button class="btn ok send">[ 发送 ]</button>
+      </div>
+    </div>
+  </main>
+</div>
+
+<nav class="switch">
+  <a class="cur" href="1-terminal.html">①终端</a><a href="2-paper.html">②暖纸</a><a href="3-brutal.html">③粗野</a><a href="4-ide.html">④工作台</a><a href="5-hud.html">⑤霓虹</a><a href="6-clay.html">⑥软糖</a><a href="7-swiss.html">⑦瑞士</a><a href="8-noir.html">⑧暗夜</a><a href="9-bento.html">⑨便当</a><a href="10-blueprint.html">⑩蓝图</a><a href="11-eink.html">⑪墨水</a><a href="12-zen.html">⑫禅</a><a href="13-win98.html">⑬90s</a><a href="14-scholar.html">⑭学术</a><a href="15-material.html">⑮M3</a><a href="index.html">⌂</a>
+</nav>
+</body>
+</html>

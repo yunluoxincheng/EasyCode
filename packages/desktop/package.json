@@ -1,0 +1,21 @@
+{
+  "name": "@easycode/desktop",
+  "version": "0.1.0",
+  "description": "EasyCode 桌面壳（Electron）：只做装配与 IPC 桥，零业务逻辑",
+  "type": "module",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node scripts/copy-preload.mjs",
+    "start": "electron .",
+    "dev": "electron ."
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.3",
+    "electron": "^33.0.0"
+  },
+  "dependencies": {
+    "@easycode/core": "workspace:*",
+    "@easycode/engine": "workspace:*",
+    "@easycode/host-node": "workspace:*"
+  }
+}

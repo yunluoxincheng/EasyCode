@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>EasyCode 原型 ⑫ — 和风禅意</title>
+<style>
+:root{
+  --bg:#f6f4ee; --washi:#fbfaf5; --hair:#e5e1d5; --hair2:#d6d1c2;
+  --ink:#22201b; --dim:#8a857a; --faint:#b5afa2;
+  --shu:#c73e2d; /* 朱红 */
+  --serif:Georgia,'Times New Roman','Noto Serif SC','Source Han Serif SC','STZhongsong','SimSun',serif;
+  --sans:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+  --mono:'Cascadia Code',Consolas,monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{background:var(--bg);color:var(--ink);font-family:var(--serif);font-size:14.5px;line-height:1.85;overflow:hidden}
+.app{display:flex;height:100%}
+
+aside{width:244px;min-width:244px;border-right:1px solid var(--hair);background:var(--washi);
+  display:flex;flex-direction:column}
+.brand{padding:30px 22px 20px;border-bottom:1px solid var(--hair);text-align:center}
+.brand .mark{width:12px;height:12px;border-radius:50%;background:var(--shu);margin:0 auto 12px}
+.brand .name{font-size:20px;letter-spacing:6px;font-weight:600}
+.brand .sub{font-size:10.5px;color:var(--faint);letter-spacing:3px;margin-top:6px}
+.newbtn{margin:18px 26px 10px;padding:10px;background:none;border:1px solid var(--hair2);
+  color:var(--ink);font-family:var(--serif);font-size:13.5px;letter-spacing:3px;cursor:pointer}
+.newbtn:hover{border-color:var(--shu);color:var(--shu)}
+.sess{flex:1;overflow-y:auto;padding:4px 20px}
+.sess .label{font-size:10px;letter-spacing:4px;color:var(--faint);margin:16px 0 8px;text-align:center}
+.sess a{display:block;padding:10px 6px;text-decoration:none;color:var(--dim);border-bottom:1px solid var(--hair);
+  position:relative;transition:color .15s}
+.sess a:last-child{border-bottom:none}
+.sess a:hover{color:var(--ink)}
+.sess a.on{color:var(--ink)}
+.sess a.on::before{content:'';display:inline-block;width:7px;height:7px;border-radius:50%;
+  background:var(--shu);margin-right:9px;vertical-align:2px}
+.sess a .t{display:block;font-size:14px;letter-spacing:.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sess a.on .t{margin-left:-16px}
+.sess a .m{display:block;font-family:var(--sans);font-size:10.5px;color:var(--faint);margin-top:2px}
+.sidefoot{border-top:1px solid var(--hair);padding:16px 22px;text-align:center}
+.sidefoot .path{font-family:var(--sans);font-size:11px;color:var(--faint);margin-bottom:8px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sidefoot a{font-size:13px;color:var(--dim);text-decoration:none;letter-spacing:2px}
+.sidefoot a:hover{color:var(--shu)}
+
+main{flex:1;display:flex;flex-direction:column;min-width:0}
+.transcript{flex:1;overflow-y:auto;padding:34px 52px 12px;max-width:880px;width:100%;margin:0 auto}
+
+.user{margin:0 0 26px;text-align:right}
+.user .who{font-family:var(--sans);font-size:10px;letter-spacing:3px;color:var(--faint);margin-bottom:4px}
+.user .text{font-size:15.5px;line-height:1.9}
+.user .text::before{content:'「';color:var(--hair2)}
+.user .text::after{content:'」';color:var(--hair2)}
+
+.think{margin:6px 0 20px;text-align:center}
+.think>summary{list-style:none;cursor:pointer;font-size:12px;color:var(--faint);letter-spacing:2px}
+.think>summary::-webkit-details-marker{display:none}
+.think>summary::before{content:'·· ';color:var(--hair2)}
+.think>summary::after{content:' ··';color:var(--hair2)}
+.think>summary:hover{color:var(--shu)}
+.think .out{font-size:13px;color:var(--dim);max-width:560px;margin:8px auto 0;
+  padding:8px 18px;border-top:1px solid var(--hair);border-bottom:1px solid var(--hair)}
+
+.md{margin:8px 0 24px;text-align:justify}
+.md p{margin:10px 0}
+.md p.lead{text-align:center;font-size:16.5px;letter-spacing:3px;margin:18px 0 12px}
+.md pre{background:var(--washi);border:1px solid var(--hair);padding:16px 20px;overflow-x:auto;
+  font-family:var(--mono);font-size:12.5px;line-height:1.7;margin:14px 0;text-align:left;color:var(--ink)}
+.md pre .kw{color:var(--shu)} .md pre .fn{color:#4a6b8a} .md pre .cm{color:var(--faint)}
+.md code{font-family:var(--mono);font-size:13px;background:var(--washi);border-bottom:1px solid var(--hair2);
+  padding:0 3px;color:var(--ink)}
+.md pre code{background:none;border:none;color:inherit}
+.md ul{margin:8px 0 8px 24px;list-style:none}
+.md li{margin:8px 0;position:relative;padding-left:6px}
+.md li::before{content:'・';position:absolute;left:-14px;color:var(--shu)}
+
+/* 工具 = 界栏 */
+.block{border-top:1px solid var(--hair2);border-bottom:1px solid var(--hair2);margin:16px 0}
+.block>summary{list-style:none;cursor:pointer;display:flex;align-items:baseline;gap:14px;
+  padding:11px 4px;user-select:none;font-family:var(--sans)}
+.block>summary::-webkit-details-marker{display:none}
+.block>summary:hover .nm{color:var(--shu)}
+.block .cap{font-size:10px;letter-spacing:3px;color:var(--faint)}
+.block .nm{font-family:var(--mono);font-size:12.5px;font-weight:700;color:var(--ink)}
+.block .arg{font-family:var(--mono);font-size:11.5px;color:var(--faint);flex:1;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.block .ms{font-family:var(--mono);font-size:10.5px;color:var(--faint)}
+.block .out{padding:10px 4px 14px;color:var(--dim);font-family:var(--mono);font-size:12.5px;
+  white-space:pre-wrap;word-break:break-word;max-height:280px;overflow:auto}
+
+/* 审批 = 朱印界框 */
+.aproval{border:1px solid var(--shu);padding:18px 24px 16px;margin:24px 40px;position:relative;background:var(--washi)}
+.aproval::before{content:'待 批';position:absolute;top:-11px;left:22px;background:var(--bg);
+  padding:0 10px;font-size:12px;letter-spacing:6px;color:var(--shu)}
+.aproval .body{font-family:var(--sans)}
+.aproval .file{font-family:var(--mono);font-size:12.5px;margin-bottom:10px}
+.diff{border:1px solid var(--hair);background:#fff;font-family:var(--mono);font-size:12.5px}
+.diff .add{display:block;background:#f4ede4;color:#4a6b3a;padding:1px 12px;white-space:pre}
+.diff .del{display:block;background:#f7ebe8;color:#a08575;padding:1px 12px;white-space:pre;text-decoration:line-through}
+.aproval .acts{display:flex;justify-content:flex-end;gap:14px;margin-top:14px}
+.btn{background:none;border:none;color:var(--dim);font-family:var(--serif);font-size:14px;
+  letter-spacing:3px;cursor:pointer;padding:4px 8px}
+.btn:hover{color:var(--ink)}
+.btn.ok{border:1px solid var(--shu);color:var(--shu)}
+.btn.ok:hover{background:var(--shu);color:#fff}
+
+.composer{padding:6px 52px 24px}
+.cwrap{max-width:880px;margin:0 auto}
+.cbar{display:flex;justify-content:center;gap:22px;font-family:var(--sans);font-size:10.5px;
+  letter-spacing:2px;color:var(--faint);margin-bottom:14px}
+.cbar .mode{color:var(--shu)}
+.cbar .live{color:var(--ink)}
+.cbar .live::before{content:'●';margin-right:5px;color:var(--shu);animation:pulse 1.6s infinite;font-size:9px}
+@keyframes pulse{50%{opacity:.15}}
+.cin{display:flex;gap:16px;align-items:flex-end;border-bottom:1px solid var(--hair2);padding-bottom:10px}
+.cin:focus-within{border-bottom-color:var(--shu)}
+.cin textarea{flex:1;background:none;border:none;outline:none;resize:none;color:var(--ink);
+  font-family:var(--serif);font-size:15px;height:52px;padding:8px 0}
+.cin textarea::placeholder{color:var(--faint)}
+.cin .send{background:none;border:none;color:var(--shu);font-family:var(--serif);font-size:15px;
+  letter-spacing:3px;cursor:pointer;padding:8px 4px}
+.cin .send:hover{opacity:.7}
+.hint{text-align:center;font-family:var(--sans);font-size:10px;letter-spacing:2px;color:var(--faint);margin-top:12px}
+
+.switch{position:fixed;right:14px;top:14px;display:flex;gap:2px;background:var(--washi);
+  border:1px solid var(--hair);padding:3px;z-index:100}
+.switch a{color:var(--dim);text-decoration:none;font-size:10.5px;padding:3px 8px;font-family:var(--sans)}
+.switch a:hover{color:var(--shu)}
+.switch a.cur{color:#fff;background:var(--shu)}
+</style>
+</head>
+<body>
+<div class="app">
+  <aside>
+    <div class="brand">
+      <div class="mark"></div>
+      <div class="name">易码</div>
+      <div class="sub">EASYCODE · v0.1</div>
+    </div>
+    <button class="newbtn">新 会 话</button>
+    <nav class="sess">
+      <div class="label">— 会话 —</div>
+      <a class="on" href="#"><span class="t">重构日期格式化函数</span><span class="m">zhipu · glm-4.6</span></a>
+      <a href="#"><span class="t">修复登录页 CSS 溢出</span><span class="m">deepseek · deepseek-chat</span></a>
+      <a href="#"><span class="t">为本项目补 README</span><span class="m">demo · mock-1</span></a>
+    </nav>
+    <div class="sidefoot">
+      <div class="path">E:\AllProjects\demo-app</div>
+      <a href="#">⚙ 设置</a>
+    </div>
+  </aside>
+
+  <main>
+    <section class="transcript">
+      <div class="user"><div class="who">你 · 23:41</div><div class="text">帮我把 utils.ts 里的 formatDate 重构成支持 IANA 时区参数，并补上单元测试</div></div>
+
+      <details class="think"><summary>思考过程</summary><div class="out">先查看现有实现和测试目录结构，确认导出方式，再做兼容改造，避免破坏旧调用。</div></details>
+
+      <div class="md"><p>我先看一下项目结构和现有的日期工具实现。</p></div>
+
+      <details class="block" open>
+        <summary><span class="cap">工具 一</span><span class="nm">list_dir</span><span class="arg">.</span><span class="ms">2ms</span></summary>
+        <pre class="out">[目录] src/
+[目录] tests/
+[文件] package.json   1.2KB
+[文件] tsconfig.json  640B</pre>
+      </details>
+
+      <details class="block">
+        <summary><span class="cap">工具 二</span><span class="nm">read_file</span><span class="arg">src/utils/date.ts</span><span class="ms">3ms</span></summary>
+        <pre class="out">  10 // 旧实现：隐式 UTC，本地时区显示会偏差
+  11 export function formatDate(date: Date): string {
+  12   return date.toISOString().slice(0, 10);
+  13 }</pre>
+      </details>
+
+      <div class="md">
+        <p>现有实现直接用 <code>toISOString().slice(0,10)</code>，会丢时区。计划用 <code>Intl.DateTimeFormat</code> 重写，并保持旧签名兼容：</p>
+        <pre><span class="kw">export function</span> <span class="fn">formatDate</span>(date: Date, timeZone = 'Asia/Shanghai'): string {
+  <span class="kw">return new</span> Intl.DateTimeFormat('sv-SE', { timeZone }).format(date);
+}</pre>
+      </div>
+
+      <div class="aproval">
+        <div class="body">
+          <div class="file">src/utils/date.ts — edit_file</div>
+          <div class="diff">
+            <span class="del">- export function formatDate(date: Date): string {</span>
+            <span class="del">-   return date.toISOString().slice(0, 10);</span>
+            <span class="del">- }</span>
+            <span class="add">+ export function formatDate(date: Date, timeZone = 'Asia/Shanghai'): string {</span>
+            <span class="add">+   return new Intl.DateTimeFormat('sv-SE', { timeZone }).format(date);</span>
+            <span class="add">+ }</span>
+          </div>
+        </div>
+        <div class="acts"><button class="btn">拒绝</button><button class="btn ok">批准执行</button></div>
+      </div>
+
+      <details class="block">
+        <summary><span class="cap">工具 三</span><span class="nm">run_command</span><span class="arg">pnpm vitest run tests/date.test.ts</span><span class="ms">2.1s</span></summary>
+        <pre class="out">✓ tests/date.test.ts (12 tests) 812ms
+Test Files  1 passed (1)
+     Tests  12 passed (12)</pre>
+      </details>
+
+      <div class="md">
+        <p class="lead">完成 · 改动如下</p>
+        <ul>
+          <li><code>formatDate</code> 新增可选 <code>timeZone</code> 参数，默认 Asia/Shanghai，旧调用不受影响</li>
+          <li>新增 <code>tests/date.test.ts</code>，12 个用例全部通过</li>
+          <li>边界：夏令时切换日用 <code>sv-SE</code> locale 保证 YYYY-MM-DD 输出稳定</li>
+        </ul>
+        <p style="text-align:center;color:var(--dim)">可以继续让我把 <code>parseDate</code> 也一并处理。</p>
+      </div>
+    </section>
+
+    <div class="composer">
+      <div class="cwrap">
+        <div class="cbar">
+          <span class="mode">询问</span><span>zhipu · glm-4.6</span><span>↑1.2k ↓380</span>
+          <span class="live">运行中</span>
+        </div>
+        <div class="cin">
+          <textarea placeholder="描述任务……"></textarea>
+          <button class="send">发送 →</button>
+        </div>
+        <div class="hint">ENTER 发送 · SHIFT+ENTER 换行 · 操作仅限工作区</div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<nav class="switch">
+  <a href="1-terminal.html">①终端</a><a href="2-paper.html">②暖纸</a><a href="3-brutal.html">③粗野</a><a href="4-ide.html">④工作台</a><a href="5-hud.html">⑤霓虹</a><a href="6-clay.html">⑥软糖</a><a href="7-swiss.html">⑦瑞士</a><a href="8-noir.html">⑧暗夜</a><a href="9-bento.html">⑨便当</a><a href="10-blueprint.html">⑩蓝图</a><a href="11-eink.html">⑪墨水</a><a class="cur" href="12-zen.html">⑫禅</a><a href="13-win98.html">⑬90s</a><a href="14-scholar.html">⑭学术</a><a href="15-material.html">⑮M3</a><a href="index.html">⌂</a>
+</nav>
+</body>
+</html>
