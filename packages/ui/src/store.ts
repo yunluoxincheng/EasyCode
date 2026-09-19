@@ -56,7 +56,6 @@ export class AppStore {
   createProjectOpen = false;
   projectSwitcherOpen = false;
   projectSearch = '';
-  updatePanelOpen = false;
 
   private listeners = new Set<() => void>();
   private seq = 0;

@@ -13,6 +13,7 @@
     "@easycode/engine": "workspace:*",
     "@easycode/host-tauri": "workspace:*",
     "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/plugin-opener": "^2.0.0",
     "@tauri-apps/plugin-process": "^2.0.0",
     "@tauri-apps/plugin-updater": "^2.11.0",
     "gpt-tokenizer": "^4.0.0",

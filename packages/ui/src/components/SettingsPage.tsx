@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useMemo, useState } from 'react';
 import { useStore } from '../useStore.js';
+import { updater } from '../updater.js';
 import { TerminalSelect } from './TerminalSelect.js';
-import { UpdateSection } from './UpdateSection.js';
 import { ModelConfigDialog } from './ModelConfigDialog.js';
 import { PROVIDER_PRESETS, providerLabel, validWebSearchBackend } from '@easycode/engine';
 import type {
@@ -793,10 +793,9 @@ export function SettingsPage() {
           <>
             <h1 className="page-title">关于</h1>
             <div className="about-panel">
-              <div className="about-brand">▚ EASYCODE</div>
               <table className="about-table">
                 <tbody>
-                  <tr><td>版本</td><td>v0.1.0</td></tr>
+                  <tr><td>版本</td><td>{updater.currentVersion ? `v${updater.currentVersion}` : '开发版'}</td></tr>
                   <tr><td>定位</td><td>轻量、模块化的桌面 Coding Agent</td></tr>
                   <tr>
                     <td>运行环境</td>
@@ -812,8 +811,6 @@ export function SettingsPage() {
                   <tr><td>数据目录</td><td>会话与设置保存在本机用户数据目录</td></tr>
                 </tbody>
               </table>
-              <p className="hint">Agent 能力：读写文件 · 目录浏览 · 正则搜索 · 执行命令 · 审批门 · 流式输出</p>
-              <UpdateSection />
             </div>
           </>
         )}

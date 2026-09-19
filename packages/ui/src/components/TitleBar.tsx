@@ -1,5 +1,6 @@
 import React from 'react';
 import { useStore } from '../useStore.js';
+import { HelpButton } from './HelpMenu.js';
 
 type Env = 'tauri' | 'electron' | 'web';
 
@@ -51,6 +52,7 @@ export function TitleBar(): React.ReactElement {
       <div className="titlebar-right" data-tauri-drag-region>
         {store.running && <span className="titlebar-live">● AGENT RUNNING</span>}
       </div>
+      <HelpButton />
       {hasControls && (
         <div className="titlebar-controls">
           <button className="tbtn" title="最小化" onClick={() => void winControl('min')}>─</button>
