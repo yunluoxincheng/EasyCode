@@ -3,13 +3,12 @@ import { useStore } from './useStore.js';
 import { Sidebar } from './components/Sidebar.js';
 import { Transcript } from './components/Transcript.js';
 import { Composer } from './components/Composer.js';
-import { NewSessionDialog } from './components/NewSessionDialog.js';
+import { CreateProjectDialog } from './components/CreateProjectDialog.js';
 import { SettingsPage } from './components/SettingsPage.js';
 import { TitleBar, ResizeEdges } from './components/TitleBar.js';
 
 export function App() {
   const store = useStore();
-  const [showNewSession, setShowNewSession] = useState(false);
 
   useEffect(() => {
     store.init();
@@ -24,14 +23,14 @@ export function App() {
         <SettingsPage />
       ) : (
         <div className="app">
-          <Sidebar onNewSession={() => setShowNewSession(true)} />
+          <Sidebar />
           <section className="main">
             <Transcript />
             <Composer />
           </section>
         </div>
       )}
-      {showNewSession && <NewSessionDialog onClose={() => setShowNewSession(false)} />}
+      {store.createProjectOpen && <CreateProjectDialog />}
       <ResizeEdges />
       {store.toast && <div className="toast">{store.toast}</div>}
     </div>

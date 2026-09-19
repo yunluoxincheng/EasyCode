@@ -838,3 +838,106 @@ select:focus-visible,
 .project-item.add { color: var(--green); border-color: var(--border); border-style: dashed; }
 .chip-ws { cursor: pointer; }
 .chip-ws.unbound { border-style: dashed; color: var(--green); background: rgba(74, 222, 128, .05); }
+
+/* ---------------- 项目切换器（composer popover，图一） ---------------- */
+
+.proj-switch { position: relative; }
+.proj-chip { cursor: pointer; }
+.proj-chip.unbound { border-style: dashed; color: var(--green); background: rgba(74, 222, 128, .05); }
+.proj-caret { color: var(--green); font-size: 9px; margin-left: 4px; }
+.proj-pop {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  width: 280px;
+  background: var(--panel);
+  border: 1px solid var(--border2);
+  border-radius: var(--radius);
+  box-shadow: 0 14px 36px rgba(0, 0, 0, .55);
+  z-index: 90;
+  overflow: hidden;
+}
+.proj-search {
+  width: calc(100% - 16px);
+  margin: 8px;
+  background: #070a08;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 12px;
+  padding: 6px 9px;
+  outline: none;
+}
+.proj-search:focus { border-color: var(--green-dim); }
+.proj-search::placeholder { color: var(--faint); }
+.proj-list { max-height: 240px; overflow-y: auto; padding: 4px; }
+.proj-opt {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  color: var(--dim);
+  font-family: var(--font);
+  font-size: 12.5px;
+  padding: 7px 10px;
+  cursor: pointer;
+  border-radius: var(--radius);
+}
+.proj-opt:hover { background: var(--panel2); color: var(--text); }
+.proj-opt.on { color: var(--green); }
+.proj-opt-mark { width: 14px; flex: none; color: var(--green); }
+.proj-empty { padding: 10px; color: var(--faint); font-size: 12px; }
+.proj-pop-foot { border-top: 1px solid var(--border); padding: 4px; }
+.proj-foot-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  color: var(--dim);
+  font-family: var(--font);
+  font-size: 12px;
+  padding: 7px 10px;
+  cursor: pointer;
+  border-radius: var(--radius);
+}
+.proj-foot-item:hover { background: var(--panel2); color: var(--text); }
+
+/* ---------------- 侧栏会话分组 / 创建项目 ---------------- */
+
+.session-group { margin-bottom: 4px; }
+.session-group-label {
+  font-size: 10.5px;
+  letter-spacing: 1px;
+  color: var(--faint);
+  padding: 5px 8px 3px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.session-group-label:hover { color: var(--green); }
+.session-group-label.active { color: var(--green); }
+.session-group-label.active::after { content: ' ◂'; }
+.group-empty { color: var(--faint); font-size: 11px; padding: 2px 8px 6px; }
+.folder-drop {
+  border: 1px dashed var(--border2);
+  border-radius: var(--radius);
+  padding: 14px;
+  text-align: center;
+}
+.folder-drop.has { border-style: solid; }
+.folder-hint { color: var(--faint); font-size: 12px; margin-bottom: 10px; }
+.folder-picked { display: flex; align-items: center; gap: 8px; }
+.folder-path {
+  flex: 1;
+  font-family: var(--font);
+  font-size: 12px;
+  color: var(--text);
+  word-break: break-all;
+  text-align: left;
+}

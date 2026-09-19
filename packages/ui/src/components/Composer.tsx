@@ -1,10 +1,10 @@
 import { useState } from 'react';
 import { useStore } from '../useStore.js';
+import { ProjectSwitcher } from './ProjectSwitcher.js';
 
 export function Composer() {
   const store = useStore();
   const [text, setText] = useState('');
-  const [binding, setBinding] = useState(false);
 
   const submit = () => {
     const t = text;
@@ -20,22 +20,6 @@ export function Composer() {
   };
 
   const session = store.activeSession;
-  const wsName = session?.workspaceRoot
-    ? session.workspaceRoot.split(/[\\/]/).filter(Boolean).pop()
-    : '';
-
-  const bindProject = async (): Promise<void> => {
-    if (!session || binding) return;
-    setBinding(true);
-    try {
-      const dir = await store.client.pickWorkspace();
-      if (dir) await store.bindWorkspace(session.id, dir);
-    } catch (err) {
-      store.showToast(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBinding(false);
-    }
-  };
 
   return (
     <div className="composer">
@@ -59,15 +43,7 @@ export function Composer() {
             YOLO
           </button>
         </div>
-        {session && (
-          <button
-            className={`chip chip-ws ${session.workspaceRoot ? '' : 'unbound'}`}
-            title={session.workspaceRoot || '未绑定项目——点击选择一个文件夹，启用文件与命令工具'}
-            onClick={() => void bindProject()}
-          >
-            {binding ? '选择中…' : wsName ? `⌂ ${wsName}` : '＋ 绑定项目'}
-          </button>
-        )}
+        {session && <ProjectSwitcher />}
         {session && (
           <span className="chip model-chip" title={session.workspaceRoot || undefined}>
             {store.providerLabelOf(session.providerId)} · {session.model}

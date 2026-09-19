@@ -1,5 +1,12 @@
 import type { ApprovalMode } from '@easycode/core';
 
+/** 项目：命名的源文件夹，会话归属其下 */
+export interface ProjectEntry {
+  id: string;
+  name: string;
+  folder: string;
+}
+
 /** 供应商下的一个模型 */
 export interface ProviderModel {
   /** 模型 ID（调用 API 时使用） */
@@ -23,6 +30,7 @@ export interface ProviderEntry {
 
 export interface Settings {
   providers: Record<string, ProviderEntry>;
+  projects: ProjectEntry[];
   defaultProvider: string;
   defaultApprovalMode: ApprovalMode;
 }
@@ -68,6 +76,7 @@ export const PROVIDER_PRESETS: Record<string, ProviderEntry> = {
 
 export const DEFAULT_SETTINGS: Settings = {
   providers: { ...PROVIDER_PRESETS },
+  projects: [],
   defaultProvider: 'zhipu',
   defaultApprovalMode: 'ask',
 };

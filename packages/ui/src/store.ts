@@ -1,5 +1,5 @@
 import type { AgentEvent, ApprovalMode, SessionData, SessionMeta, Usage } from '@easycode/core';
-import { providerLabel, type Settings } from '@easycode/engine';
+import { providerLabel, type ProjectEntry, type Settings } from '@easycode/engine';
 import type { AgentClient } from './client.js';
 
 export type ViewBlock = { type: 'text' | 'thinking'; text: string };
@@ -46,6 +46,10 @@ export class AppStore {
   view: ViewName = 'chat';
   settingsSection: SettingsSection = 'models';
   sidebarCollapsed = false;
+  activeProjectId: string | null = null;
+  createProjectOpen = false;
+  projectSwitcherOpen = false;
+  projectSearch = '';
 
   private listeners = new Set<() => void>();
   private seq = 0;
@@ -72,6 +76,64 @@ export class AppStore {
 
   get activeSession(): SessionMeta | undefined {
     return this.sessions.find((s) => s.id === this.activeId);
+  }
+
+  get activeProject(): ProjectEntry | null {
+    return this.settings?.projects.find((p) => p.id === this.activeProjectId) ?? null;
+  }
+
+  setActiveProject(id: string | null): void {
+    this.activeProjectId = id;
+    this.notify();
+  }
+
+  openCreateProject(): void {
+    this.createProjectOpen = true;
+    this.notify();
+  }
+
+  closeCreateProject(): void {
+    this.createProjectOpen = false;
+    this.notify();
+  }
+
+  toggleProjectSwitcher(): void {
+    this.projectSwitcherOpen = !this.projectSwitcherOpen;
+    this.projectSearch = '';
+    this.notify();
+  }
+
+  setProjectSearch(v: string): void {
+    this.projectSearch = v;
+    this.notify();
+  }
+
+  /** 从系统文件夹选择器挑一个文件夹：登记为项目并绑定到当前会话 */
+  async bindProjectFromPicker(id: string): Promise<void> {
+    const dir = await this.client.pickWorkspace();
+    if (!dir) return;
+    await this.createProject('', dir);
+    const meta = await this.client.setSessionWorkspace(id, dir);
+    this.sessions = this.sessions.map((s) => (s.id === id ? meta : s));
+    this.notify();
+  }
+
+  /** 创建项目（同文件夹复用已有项目） */
+  async createProject(name: string, folder: string): Promise<ProjectEntry> {
+    const cur = this.settings?.projects ?? [];
+    const existing = cur.find((p) => p.folder === folder);
+    if (existing) {
+      this.setActiveProject(existing.id);
+      return existing;
+    }
+    const entry: ProjectEntry = {
+      id: `p_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+      name: name.trim() || folder.split(/[\/]/).filter(Boolean).pop() || folder,
+      folder,
+    };
+    await this.saveSettings({ projects: [...cur, entry] });
+    this.setActiveProject(entry.id);
+    return entry;
   }
 
   /* ---------------- 初始化与加载 ---------------- */
@@ -178,11 +240,12 @@ export class AppStore {
 
   /* ---------------- 操作 ---------------- */
 
-  async newSession(workspaceRoot = '', providerId?: string, model?: string): Promise<void> {
+  /** 直接创建并进入新会话：绑定了项目则落在项目文件夹，否则纯对话 */
+  async newSession(): Promise<void> {
+    const folder = this.activeProject?.folder ?? '';
     const meta = await this.client.createSession({
-      workspaceRoot,
-      providerId: providerId ?? this.settings?.defaultProvider ?? 'zhipu',
-      model,
+      workspaceRoot: folder,
+      providerId: this.settings?.defaultProvider ?? 'zhipu',
     });
     this.sessions = [meta, ...this.sessions];
     await this.selectSession(meta.id);
