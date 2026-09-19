@@ -1,7 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import { useStore } from '../useStore.js';
 import { createBuiltinTools, type Host } from '@easycode/core';
-import { buildSystemPrompt } from '@easycode/engine';
+import {
+  buildSystemPrompt,
+  supportsNativeWebSearch,
+  validWebSearchBackend,
+} from '@easycode/engine';
 import { encode } from 'gpt-tokenizer/encoding/o200k_base';
 
 /** 精确 token 计数：o200k_base 编码（OpenAI 当前分词规范，对其他模型也是良好近似） */
@@ -34,8 +38,11 @@ export function ContextChip() {
   if (!session) return null;
 
   const provider = store.settings?.providers[session.providerId];
-  const windowTok = provider?.contextWindow ?? DEFAULT_WINDOW;
-
+  // 优先取该模型在设置里配置的上下文窗口，再退回供应商级/默认 1M
+  const effectiveModel =
+    session.model || (provider?.models ?? []).find((m) => m.enabled !== false)?.name || '';
+  const modelCfg = (provider?.models ?? []).find((m) => m.name === effectiveModel);
+  const windowTok = modelCfg?.contextWindow ?? provider?.contextWindow ?? DEFAULT_WINDOW;
   // 分类精确计数
   const rows: Array<{ label: string; tokens: number }> = [];
   let msgTokens = 0;
@@ -50,12 +57,32 @@ export function ContextChip() {
   }
   rows.push({ label: '消息', tokens: msgTokens });
 
-  rows.push({ label: '系统工具', tokens: count(JSON.stringify(createBuiltinTools().listSpecs())) });
+  // 系统工具计数：按会话模型实际会注册的工具（联网搜索按分流结果计入）
+  const wsCfg = store.settings?.webSearch;
+  const searchOn =
+    (modelCfg?.capabilities ?? ['system']).includes('websearch') && wsCfg?.enabled === true;
+  const useNativeSearch =
+    searchOn && supportsNativeWebSearch(effectiveModel, provider?.kind ?? 'openai-compatible');
+  const builtinSearch =
+    searchOn && !useNativeSearch && validWebSearchBackend(wsCfg)
+      ? {
+          webSearch: {
+            backend: wsCfg!.backend,
+            searxngUrl: wsCfg!.searxngUrl,
+            tavilyApiKey: wsCfg!.tavilyApiKey,
+            maxResults: wsCfg!.maxResults,
+          },
+        }
+      : undefined;
+  rows.push({ label: '系统工具', tokens: count(JSON.stringify(createBuiltinTools(builtinSearch).listSpecs())) });
 
   const stubHost = {
     paths: { sep: navigator.platform.includes('Win') ? '\\' : '/' },
   } as unknown as Host;
-  rows.push({ label: '系统提示词', tokens: count(buildSystemPrompt(stubHost, session.workspaceRoot)) });
+  rows.push({
+    label: '系统提示词',
+    tokens: count(buildSystemPrompt(stubHost, session.workspaceRoot, { webSearch: searchOn })),
+  });
 
   const other = store.items.length * 4; // 每条消息的角色/框架开销
   rows.push({ label: '其他', tokens: other });

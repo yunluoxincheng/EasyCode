@@ -2,9 +2,17 @@ import { Fragment, useEffect, useMemo, useState } from 'react';
 import { useStore } from '../useStore.js';
 import { TerminalSelect } from './TerminalSelect.js';
 import { UpdateSection } from './UpdateSection.js';
-import { PROVIDER_PRESETS, providerLabel } from '@easycode/engine';
-import type { ProviderEntry, ProviderModel, Settings } from '@easycode/engine';
+import { ModelConfigDialog } from './ModelConfigDialog.js';
+import { PROVIDER_PRESETS, providerLabel, validWebSearchBackend } from '@easycode/engine';
+import type {
+  ModelTestResult,
+  ProviderEntry,
+  ProviderModel,
+  Settings,
+  WebSearchConfig,
+} from '@easycode/engine';
 import type { SettingsSection } from '../store.js';
+import { fmtCtx } from '../format.js';
 
 const KIND_LABELS: Record<Exclude<ProviderEntry['kind'], 'mock'>, string> = {
   'anthropic': 'Anthropic Messages (/v1/messages)',
@@ -13,8 +21,27 @@ const KIND_LABELS: Record<Exclude<ProviderEntry['kind'], 'mock'>, string> = {
 };
 const MOCK_LABEL = '演示协议 (Mock，无需网络)';
 
+/** 连通性测试图标（脉冲线） */
+function IconTest() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M1.5 8.5h2.5l2-5 3.5 9 2-4h3" />
+    </svg>
+  );
+}
+
+/** 编辑配置图标（铅笔） */
+function IconEdit() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M11.2 2.3l2.5 2.5-8.3 8.3-3.4.9.9-3.4 8.3-8.3z" />
+    </svg>
+  );
+}
+
 const NAV: Array<{ id: SettingsSection; label: string; group: string }> = [
   { id: 'models', label: '模型服务', group: '配置' },
+  { id: 'websearch', label: '联网搜索', group: '配置' },
   { id: 'general', label: '常规', group: '配置' },
   { id: 'about', label: '关于', group: '信息' },
 ];
@@ -31,8 +58,10 @@ export function SettingsPage() {
   const [fetching, setFetching] = useState(false);
   const [adding, setAdding] = useState(false);
   const [newModelName, setNewModelName] = useState('');
-  const [renaming, setRenaming] = useState<string | null>(null);
-  const [renameValue, setRenameValue] = useState('');
+  const [configModel, setConfigModel] = useState<string | null>(null);
+  const [testing, setTesting] = useState<string | null>(null);
+  const [testResults, setTestResults] = useState<Record<string, ModelTestResult>>({});
+  const [testingSearch, setTestingSearch] = useState(false);
 
   // 兜底：打开设置页时若全局设置尚未加载完成，加载完成后初始化草稿
   useEffect(() => {
@@ -100,7 +129,21 @@ export function SettingsPage() {
       store.showToast(`模型 ${name} 已存在`);
       return;
     }
-    patchProvider(id, { models: [...modelsOf(id), { name, enabled: true }] });
+    patchProvider(id, {
+      models: [
+        ...modelsOf(id),
+        {
+          name,
+          enabled: true,
+          autoConfig: true,
+          contextWindow: 1_000_000,
+          maxOutputTokens: 65536,
+          inputTypes: ['text'],
+          capabilities: ['system'],
+          reasoningLevels: ['low', 'medium', 'high', 'max'],
+        },
+      ],
+    });
     setAdding(false);
     setNewModelName('');
   };
@@ -117,41 +160,121 @@ export function SettingsPage() {
     });
   };
 
-  const startRename = (name: string): void => {
-    setRenaming(name);
-    setRenameValue(name);
+  /** 有未保存更改时先落盘（测试/探测读取的是已保存的配置） */
+  const persistIfNeeded = async (): Promise<void> => {
+    if (!draft) return;
+    if (JSON.stringify(draft) !== JSON.stringify(store.settings)) {
+      await store.saveSettings(draft);
+      setDraft(structuredClone(store.settings!));
+    }
   };
 
-  const confirmRename = (id: string, oldName: string): void => {
-    const name = renameValue.trim();
-    if (!name || name === oldName) {
-      setRenaming(null);
-      return;
+  /** 测试前先把未保存的草稿落盘，保证测的是当前填写的配置 */
+  const testModel = async (id: string, name: string): Promise<void> => {
+    setTesting(name);
+    try {
+      await persistIfNeeded();
+      const res = await store.client.testProviderModel(id, name);
+      setTestResults((r) => ({ ...r, [`${id}/${name}`]: res }));
+      if (res.ok) store.showToast(`连通正常 · ${res.latencyMs}ms`);
+      else store.showToast(`连通失败: ${res.error ?? '未知错误'}`);
+    } catch (err) {
+      store.showToast(err instanceof Error ? err.message : String(err));
+    } finally {
+      setTesting(null);
     }
-    if (modelsOf(id).some((m) => m.name === name)) {
-      store.showToast(`模型 ${name} 已存在`);
-      return;
+  };
+
+  /** 应用模型配置（含改名），返回合并后的新设置；非法时返回 null */
+  const applyModelConfig = (id: string, oldName: string, next: ProviderModel): Settings | null => {
+    if (!draft) return null;
+    if ((draft.providers[id]?.models ?? []).some((m) => m.name === next.name && m.name !== oldName)) {
+      store.showToast(`模型 ${next.name} 已存在`);
+      return null;
     }
-    patchProvider(id, {
-      models: modelsOf(id).map((m) => (m.name === oldName ? { ...m, name } : m)),
+    const models = (draft.providers[id]?.models ?? []).map((m) => (m.name === oldName ? next : m));
+    return { ...draft, providers: { ...draft.providers, [id]: { ...draft.providers[id], models } } };
+  };
+
+  /* ---- 联网搜索配置 ---- */
+
+  const patchWebSearch = (p: Partial<WebSearchConfig>): void =>
+    patch({
+      webSearch: {
+        enabled: false,
+        backend: 'searxng',
+        maxResults: 5,
+        ...draft?.webSearch,
+        ...p,
+      },
     });
-    setRenaming(null);
+
+  const testWebSearch = async (): Promise<void> => {
+    setTestingSearch(true);
+    try {
+      await persistIfNeeded();
+      const res = await store.client.testWebSearch();
+      if (res.ok) {
+        store.showToast(`搜索正常 · ${res.resultCount ?? 0} 条结果 · ${res.latencyMs}ms`);
+      } else {
+        store.showToast(`搜索失败: ${res.error ?? '未知错误'}`);
+      }
+    } catch (err) {
+      store.showToast(err instanceof Error ? err.message : String(err));
+    } finally {
+      setTestingSearch(false);
+    }
   };
 
   const fetchModels = async (id: string): Promise<void> => {
     setFetching(true);
     try {
-      const ids = await store.client.listProviderModels(id);
-      const existing = new Set(modelsOf(id).map((m) => m.name));
-      const fresh = ids
-        .filter((x) => !existing.has(x))
-        .map((x) => ({ name: x, enabled: true }));
-      if (fresh.length === 0) {
+      const infos = await store.client.listProviderModels(id);
+      let updated = 0;
+      // 已有模型：自动托管语义——探测结果是权威值，直接替换（手动配置的不动）
+      const CAP_CANON = ['structured', 'websearch', 'system'];
+      const merged = modelsOf(id).map((m) => {
+        const info = infos.find((x) => x.name === m.name);
+        if (!info || m.autoConfig === false) return m;
+        const next: ProviderModel = { ...m };
+        next.contextWindow = info.contextWindow ?? m.contextWindow ?? 1_000_000;
+        next.maxOutputTokens = info.maxOutputTokens ?? m.maxOutputTokens ?? 65536;
+        if (info.inputTypes) next.inputTypes = info.inputTypes;
+        if (info.capabilities) {
+          // 保留用户手动勾选的联网搜索（目录无此数据源）
+          const caps = new Set([
+            ...info.capabilities,
+            ...(m.capabilities ?? []).filter((c) => c === 'websearch'),
+          ]);
+          next.capabilities = CAP_CANON.filter((c) => caps.has(c));
+        }
+        if (info.reasoningLevels) next.reasoningLevels = [...info.reasoningLevels];
+        if (JSON.stringify(next) !== JSON.stringify(m)) updated++;
+        return next;
+      });
+      const existing = new Set(merged.map((m) => m.name));
+      const fresh = infos
+        .filter((x) => !existing.has(x.name))
+        .map((x) => ({
+          name: x.name,
+          enabled: true,
+          autoConfig: true,
+          contextWindow: x.contextWindow ?? 1_000_000,
+          maxOutputTokens: x.maxOutputTokens ?? 65536,
+          inputTypes: x.inputTypes ?? ['text'],
+          capabilities: x.capabilities ?? ['system'],
+          reasoningLevels: x.reasoningLevels ?? ['low', 'medium', 'high', 'max'],
+        }));
+      if (fresh.length === 0 && updated === 0) {
         store.showToast('没有新模型可添加');
         return;
       }
-      patchProvider(id, { models: [...modelsOf(id), ...fresh] });
-      store.showToast(`已获取 ${fresh.length} 个新模型`);
+      patchProvider(id, { models: [...merged, ...fresh] });
+      store.showToast(
+        fresh.length > 0
+          ? `已获取 ${fresh.length} 个新模型${updated > 0 ? `，更新 ${updated} 个已知模型参数` : ''}`
+          : `更新 ${updated} 个模型参数`,
+      );
     } catch (err) {
       store.showToast(err instanceof Error ? err.message : String(err));
     } finally {
@@ -354,45 +477,63 @@ export function SettingsPage() {
                                 还没有模型。点击「自动获取」从 API 拉取，或「＋ 添加模型」手动添加。
                               </div>
                             )}
-                            {(p.models ?? []).map((m) => (
-                              <div
-                                key={m.name}
-                                className={`model-row ${m.enabled === false ? 'off' : ''}`}
-                              >
-                                {renaming === m.name ? (
-                                  <input
-                                    className="model-rename"
-                                    value={renameValue}
-                                    autoFocus
-                                    onChange={(e) => setRenameValue(e.target.value)}
-                                    onKeyDown={(e) => {
-                                      if (e.key === 'Enter') confirmRename(id, m.name);
-                                      if (e.key === 'Escape') setRenaming(null);
-                                    }}
-                                  />
-                                ) : (
-                                  <span className="model-name">{m.name}</span>
-                                )}
-                                {renaming === m.name ? (
-                                  <>
-                                    <button className="btn mini-btn" onClick={() => confirmRename(id, m.name)}>确认</button>
-                                    <button className="btn mini-btn" onClick={() => setRenaming(null)}>取消</button>
-                                  </>
-                                ) : (
-                                  <>
-                                    <button className="btn mini-btn" onClick={() => startRename(m.name)}>改名</button>
-                                    <button className="btn mini-btn" onClick={() => removeModel(id, m.name)}>删除</button>
-                                    <button
-                                      className={`switch ${m.enabled !== false ? 'on' : ''}`}
-                                      title={m.enabled !== false ? '已启用（点击停用）' : '已停用（点击启用）'}
-                                      onClick={() => toggleModel(id, m.name)}
-                                    >
-                                      <span className="knob" />
-                                    </button>
-                                  </>
-                                )}
-                              </div>
-                            ))}
+                            {(p.models ?? []).map((m) => {
+                              const ctx = fmtCtx(m.contextWindow);
+                              const vision = (m.inputTypes ?? []).includes('image');
+                              const tr = testResults[`${id}/${m.name}`];
+                              return (
+                                <div
+                                  key={m.name}
+                                  className={`model-row ${m.enabled === false ? 'off' : ''}`}
+                                >
+                                  <span className="model-name">
+                                    {m.name}
+                                    {ctx && (
+                                      <span
+                                        className="model-badge"
+                                        title={`上下文窗口 ${m.contextWindow?.toLocaleString()} tokens`}
+                                      >
+                                        {ctx}
+                                      </span>
+                                    )}
+                                    {vision && (
+                                      <span className="model-badge vision" title="支持图片输入">
+                                        视觉
+                                      </span>
+                                    )}
+                                  </span>
+                                  {testing === m.name ? (
+                                    <span className="model-test running">···</span>
+                                  ) : tr?.ok ? (
+                                    <span className="model-test ok">✓ {tr.latencyMs}ms</span>
+                                  ) : tr ? (
+                                    <span className="model-test fail" title={tr.error}>✗</span>
+                                  ) : null}
+                                  <button
+                                    className="icon-btn sm"
+                                    title="连通性测试"
+                                    disabled={testing != null}
+                                    onClick={() => void testModel(id, m.name)}
+                                  >
+                                    <IconTest />
+                                  </button>
+                                  <button
+                                    className="icon-btn sm"
+                                    title="模型配置"
+                                    onClick={() => setConfigModel(m.name)}
+                                  >
+                                    <IconEdit />
+                                  </button>
+                                  <button
+                                    className={`switch ${m.enabled !== false ? 'on' : ''}`}
+                                    title={m.enabled !== false ? '已启用（点击停用）' : '已停用（点击启用）'}
+                                    onClick={() => toggleModel(id, m.name)}
+                                  >
+                                    <span className="knob" />
+                                  </button>
+                                </div>
+                              );
+                            })}
                             {adding && (
                               <div className="model-row">
                                 <input
@@ -426,6 +567,164 @@ export function SettingsPage() {
                   );
                 })()}
               </div>
+            </div>
+
+            {configModel && (() => {
+              const m = modelsOf(selectedId).find((x) => x.name === configModel);
+              if (!m) return null;
+              return (
+                <ModelConfigDialog
+                  model={m}
+                  providerId={selectedId}
+                  reservedNames={modelsOf(selectedId)
+                    .filter((x) => x.name !== m.name)
+                    .map((x) => x.name)}
+                  onBeforeDetect={persistIfNeeded}
+                  onClose={() => setConfigModel(null)}
+                  onSave={(next) => {
+                    const nextSettings = applyModelConfig(selectedId, m.name, next);
+                    if (!nextSettings) return;
+                    setDraft(nextSettings);
+                    setConfigModel(null);
+                    void store
+                      .saveSettings(nextSettings)
+                      .then(() => {
+                        setDraft(structuredClone(store.settings!));
+                        store.showToast('模型配置已保存');
+                      })
+                      .catch((err) =>
+                        store.showToast(`保存失败: ${err instanceof Error ? err.message : String(err)}`),
+                      );
+                  }}
+                  onDelete={() => {
+                    removeModel(selectedId, m.name);
+                    setConfigModel(null);
+                  }}
+                />
+              );
+            })()}
+          </>
+        )}
+
+        {section === 'websearch' && (
+          <>
+            <h1 className="page-title">联网搜索</h1>
+            <div className="page-head">
+              <p className="page-desc">
+                给不支持原生搜索的模型提供 web_search 工具；开启后自动获取的模型默认启用联网搜索，
+                有原生搜索的模型（GPT/Claude）仍走原生。
+              </p>
+              <div className="page-actions">
+                {dirty && <span className="dirty-dot" title="有未保存的更改">●</span>}
+                {dirty && (
+                  <button className="btn" onClick={() => setDraft(structuredClone(store.settings!))}>
+                    放弃更改
+                  </button>
+                )}
+                <button className="btn primary" disabled={!dirty || saving} onClick={() => void save()}>
+                  {saving ? '保存中…' : '保存'}
+                </button>
+              </div>
+            </div>
+            <div className="general-panel">
+              <div className="field">
+                <span>启用联网搜索</span>
+                <div className="auto-scroll-row">
+                  <button
+                    className={`switch ${draft.webSearch?.enabled ? 'on' : ''}`}
+                    title={draft.webSearch?.enabled ? '已开启（点击关闭）' : '已关闭（点击开启）'}
+                    onClick={() => patchWebSearch({ enabled: draft.webSearch?.enabled === false })}
+                  >
+                    <span className="knob" />
+                  </button>
+                  <span className="auto-scroll-text">
+                    {draft.webSearch?.enabled ? '开启' : '关闭（所有模型均不联网搜索）'}
+                  </span>
+                </div>
+              </div>
+
+              {draft.webSearch?.enabled && (
+                <>
+                  <div className="field">
+                    <span>搜索后端</span>
+                    <TerminalSelect
+                      value={draft.webSearch.backend}
+                      options={[
+                        { value: 'searxng', label: 'SearXNG' },
+                        { value: 'tavily', label: 'Tavily' },
+                        { value: 'custom', label: '自定义 API' },
+                      ]}
+                      onChange={(v) => patchWebSearch({ backend: v as WebSearchConfig['backend'] })}
+                    />
+                  </div>
+
+                  {draft.webSearch.backend === 'searxng' && (
+                    <label className="field">
+                      <span>SearXNG 地址</span>
+                      <input
+                        value={draft.webSearch.searxngUrl ?? ''}
+                        placeholder="http://localhost:8080"
+                        onChange={(e) => patchWebSearch({ searxngUrl: e.target.value })}
+                      />
+                    </label>
+                  )}
+                  {draft.webSearch.backend === 'tavily' && (
+                    <label className="field">
+                      <span>Tavily API Key</span>
+                      <input
+                        type="password"
+                        value={draft.webSearch.tavilyApiKey ?? ''}
+                        placeholder="tvly-..."
+                        onChange={(e) => patchWebSearch({ tavilyApiKey: e.target.value })}
+                      />
+                    </label>
+                  )}
+                  {draft.webSearch.backend === 'custom' && (
+                    <label className="field">
+                      <span>API 地址</span>
+                      <input
+                        value={draft.webSearch.customUrl ?? ''}
+                        placeholder="https://search.example.com/search?q={query}"
+                        onChange={(e) => patchWebSearch({ customUrl: e.target.value })}
+                      />
+                    </label>
+                  )}
+
+                  <label className="field">
+                    <span>搜索结果条数</span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={10}
+                      value={draft.webSearch.maxResults ?? 5}
+                      onChange={(e) =>
+                        patchWebSearch({ maxResults: Math.max(1, Math.min(10, Number(e.target.value) || 5)) })
+                      }
+                    />
+                  </label>
+
+                  <div className="field">
+                    <span>连通性</span>
+                    <div className="auto-scroll-row">
+                      <button
+                        className="btn"
+                        disabled={testingSearch || !validWebSearchBackend(draft.webSearch)}
+                        onClick={() => void testWebSearch()}
+                      >
+                        {testingSearch ? '搜索中…' : '测试搜索'}
+                      </button>
+                    </div>
+                  </div>
+                </>
+              )}
+
+              <p className="hint">
+                {draft.webSearch?.backend === 'tavily'
+                  ? 'Tavily API Key 在 tavily.com 免费注册获取（每月 1000 次免费额度）。'
+                  : draft.webSearch?.backend === 'custom'
+                    ? '自定义 API 为 GET 请求，{query} 会替换为 URL 编码后的搜索词；响应需为 JSON，兼容 SearXNG 的 results 格式（title/url/content）。'
+                    : 'SearXNG 需在 settings.yml 的 search.formats 中启用 json 格式；localhost 地址不走应用代理。'}
+              </p>
             </div>
           </>
         )}

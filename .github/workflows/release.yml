@@ -54,6 +54,26 @@ jobs:
       - name: Install frontend deps
         run: pnpm install --frozen-lockfile
 
+      - name: Extract changelog for release body
+        id: changelog
+        run: |
+          if [[ "$GITHUB_REF_NAME" == v* ]]; then
+            VER="${GITHUB_REF_NAME#v}"
+            awk -v ver="$VER" '
+              index($0, "## [" ver "]") == 1 { found=1; next }
+              /^## \[/ && found { exit }
+              found { print }
+            ' CHANGELOG.md > release_body.md
+          fi
+          if [ ! -s release_body.md ]; then
+            echo "EasyCode 桌面端安装包。Windows 下载 .exe / .msi，macOS 下载 .dmg / .app.tar.gz，Linux 下载 .AppImage / .deb。" > release_body.md
+          fi
+          {
+            echo 'body<<CHANGELOG_BODY_EOF'
+            cat release_body.md
+            echo 'CHANGELOG_BODY_EOF'
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build & release
         uses: tauri-apps/tauri-action@v0
         env:
@@ -63,7 +83,7 @@ jobs:
         with:
           tagName: v__VERSION__
           releaseName: 'EasyCode v__VERSION__'
-          releaseBody: 'EasyCode 桌面端安装包。Windows 下载 .exe / .msi，macOS 下载 .dmg / .app.tar.gz，Linux 下载 .AppImage / .deb。'
+          releaseBody: ${{ steps.changelog.outputs.body }}
           releaseDraft: false
           prerelease: false
           projectPath: packages/desktop-tauri

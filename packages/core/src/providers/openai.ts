@@ -49,7 +49,12 @@ interface PendingToolCall {
 export class OpenAICompatibleProvider implements Provider {
   constructor(
     readonly id: string,
-    private readonly config: { baseURL: string; apiKey?: string; model: string },
+    private readonly config: {
+      baseURL: string;
+      apiKey?: string;
+      model: string;
+      nativeWebSearch?: boolean;
+    },
   ) {}
 
   async stream(request: StreamRequest, ctx: StreamContext): Promise<TurnResult> {
@@ -74,6 +79,10 @@ export class OpenAICompatibleProvider implements Provider {
           parameters: t.parameters,
         },
       }));
+    }
+    // 原生联网搜索：仅智谱系端点支持 web_search 工具类型，通用 OpenAI 兼容服务不认会 400
+    if (this.config.nativeWebSearch && /bigmodel\.cn|zhipu/i.test(this.config.baseURL)) {
+      body.tools = [{ type: 'web_search', web_search: { enable: true } }, ...((body.tools as unknown[]) ?? [])];
     }
 
     const res = await fetch(url, {

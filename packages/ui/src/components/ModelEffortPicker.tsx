@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useStore } from '../useStore.js';
+import { fmtCtx } from '../format.js';
 
 const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
 
@@ -21,9 +22,16 @@ export function ModelEffortPicker() {
 
   if (!session) return null;
   const entry = store.settings?.providers[session.providerId];
+  // 会话模型为空（跟随默认）时取第一个启用模型
+  const effectiveModel = session.model || (entry?.models ?? []).find((m) => m.enabled !== false)?.name || '';
+  const modelCfg = (entry?.models ?? []).find((m) => m.name === effectiveModel);
   const models = (entry?.models ?? []).filter((m) => m.enabled !== false).map((m) => m.name);
   const current = session.model || '默认';
   const effort = session.reasoningEffort || 'medium';
+  // 该模型在设置里定义了推理等级则用之，否则用默认档位
+  const effortLevels = modelCfg?.reasoningLevels?.length
+    ? modelCfg.reasoningLevels
+    : EFFORT_LEVELS;
 
   const pickModel = (m: string): void => {
     setOpen(null);
@@ -61,16 +69,26 @@ export function ModelEffortPicker() {
             <span className="me-check">{session.model === '' ? '✓' : ''}</span>
           </button>
           {models.length > 0 && <div className="me-section">推荐模型集</div>}
-          {models.map((m) => (
-            <button
-              key={m}
-              className={`me-opt ${session.model === m ? 'on' : ''}`}
-              onClick={() => pickModel(m)}
-            >
-              <span className="me-opt-name">{m}</span>
-              <span className="me-check">{session.model === m ? '✓' : ''}</span>
-            </button>
-          ))}
+          {models.map((m) => {
+            const cfg = (entry?.models ?? []).find((x) => x.name === m);
+            const ctx = fmtCtx(cfg?.contextWindow);
+            return (
+              <button
+                key={m}
+                className={`me-opt ${session.model === m ? 'on' : ''}`}
+                onClick={() => pickModel(m)}
+              >
+                <span className="me-opt-name">
+                  {m}
+                  {ctx && <span className="model-badge">{ctx}</span>}
+                  {(cfg?.inputTypes ?? []).includes('image') && (
+                    <span className="model-badge vision">视觉</span>
+                  )}
+                </span>
+                <span className="me-check">{session.model === m ? '✓' : ''}</span>
+              </button>
+            );
+          })}
           {models.length === 0 && (
             <div className="me-empty">该服务还没有模型，到 设置 › 模型服务 中获取</div>
           )}
@@ -79,7 +97,7 @@ export function ModelEffortPicker() {
 
       {open === 'effort' && (
         <div className="me-pop effort-pop" role="listbox">
-          {EFFORT_LEVELS.map((v) => (
+          {effortLevels.map((v) => (
             <button
               key={v}
               className={`me-opt ${effort === v ? 'on' : ''}`}

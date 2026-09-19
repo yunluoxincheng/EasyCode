@@ -87,6 +87,8 @@ const handlers: Record<string, Handler> = {
   'get-settings': () => server.getSettings(),
   'update-settings': (args) => server.updateSettings(args.patch),
   'list-provider-models': (args) => server.listProviderModels(args.id),
+  'test-provider-model': (args) => server.testProviderModel(args.id, args.model),
+  'test-web-search': () => server.testWebSearch(),
   'pick-workspace': async () => {
     if (!mainWindow) return null;
     const result = await dialog.showOpenDialog(mainWindow, {

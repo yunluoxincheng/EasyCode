@@ -39,7 +39,7 @@ function toWireInput(messages: ChatMessage[]): WireInputItem[] {
 export class ResponsesProvider implements Provider {
   constructor(
     readonly id: string,
-    private readonly config: { baseURL: string; apiKey?: string; model: string },
+    private readonly config: { baseURL: string; apiKey?: string; model: string; nativeWebSearch?: boolean },
   ) {}
 
   async stream(request: StreamRequest, ctx: StreamContext): Promise<TurnResult> {
@@ -59,6 +59,10 @@ export class ResponsesProvider implements Provider {
         description: t.description,
         parameters: t.parameters,
       }));
+    }
+    // 原生联网搜索：服务端工具，结果由 API 自行执行并注入（web_search_call 输出项在解析时被忽略）
+    if (this.config.nativeWebSearch) {
+      body.tools = [...((body.tools as unknown[]) ?? []), { type: 'web_search' }];
     }
 
     const res = await fetch(url, {

@@ -6,7 +6,7 @@ export * from './host.js';
 // 审批
 export * from './approval.js';
 // 工具
-export { ToolRegistry, executeTool, resolveWorkspacePath, createBuiltinTools } from './tools/index.js';
+export { ToolRegistry, executeTool, resolveWorkspacePath, createBuiltinTools, runWebSearch } from './tools/index.js';
 export type { Tool, ToolSpec, ToolContext, ToolExecution } from './tools/index.js';
 export { readFileTool, writeFileTool, editFileTool, listDirTool } from './tools/fs.js';
 export { searchFilesTool } from './tools/search.js';

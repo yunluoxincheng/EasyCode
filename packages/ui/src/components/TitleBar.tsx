@@ -40,7 +40,6 @@ export function TitleBar(): React.ReactElement {
       <div className="titlebar-brand" data-tauri-drag-region>
         <span className="titlebar-mark">▚</span>
         <span className="titlebar-name">EASYCODE</span>
-        <span className="titlebar-ver">v0.1</span>
       </div>
       <div className="titlebar-center" data-tauri-drag-region>
         {session && (

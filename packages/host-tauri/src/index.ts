@@ -173,6 +173,8 @@ function patchFetch(): void {
     let failure: Error | null = null;
     let closed = false;
     let waiter: (() => void) | null = null;
+    const id = crypto.randomUUID();
+    const signal = init?.signal;
 
     const notify = (): void => {
       const w = waiter;
@@ -180,18 +182,39 @@ function patchFetch(): void {
       w?.();
     };
 
+    const cleanupAbort = (): void => {
+      signal?.removeEventListener('abort', onAbort);
+    };
+
+    const onAbort = (): void => {
+      failure = new DOMException('The operation was aborted.', 'AbortError');
+      closed = true;
+      void invoke('http_stream_cancel', { id }).catch(() => {});
+      cleanupAbort();
+      notify();
+    };
+
+    if (signal?.aborted) {
+      onAbort();
+      throw failure;
+    }
+    signal?.addEventListener('abort', onAbort, { once: true });
+
     ch.onmessage = (f) => {
       if (f.t === 's') status = f.c;
       else if (f.t === 'd') buffer.push(f);
       else if (f.t === 'x') failure = new Error(f.m);
-      else if (f.t === 'e') closed = true;
+      else if (f.t === 'e') {
+        closed = true;
+        cleanupAbort();
+      }
       notify();
     };
 
-    const id = crypto.randomUUID();
     invoke('http_stream', { id, url, method, headers, body, onEvent: ch }).catch((e) => {
       failure = new Error(String(e));
       closed = true;
+      cleanupAbort();
       notify();
     });
 
@@ -262,6 +285,8 @@ export async function createTauriClient(): Promise<AgentClient> {
     getSettings: () => server.getSettings(),
     updateSettings: (patch) => server.updateSettings(patch),
     listProviderModels: (id) => server.listProviderModels(id),
+    testProviderModel: (id, model) => server.testProviderModel(id, model),
+    testWebSearch: () => server.testWebSearch(),
     pickWorkspace: () => invoke<string | null>('pick_folder'),
     onEvent: (listener) => server.onEvent(listener),
   };

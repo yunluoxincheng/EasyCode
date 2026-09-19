@@ -1,5 +1,5 @@
 import type { AgentEvent, SessionData, SessionMeta, ApprovalMode } from '@easycode/core';
-import type { Settings } from './settings.js';
+import type { ModelTestResult, ProviderModelInfo, Settings } from './settings.js';
 
 /**
  * UI 与引擎之间的传输抽象：
@@ -32,8 +32,12 @@ export interface AgentClient {
   setSessionWorkspace(id: string, workspace: string): Promise<SessionMeta>;
   getSettings(): Promise<Settings>;
   updateSettings(patch: Partial<Settings>): Promise<Settings>;
-  /** 从供应商 API 拉取可用模型 ID 列表（OpenAI 兼容 /models、Anthropic /v1/models） */
-  listProviderModels(providerId: string): Promise<string[]>;
+  /** 从供应商 API 拉取可用模型及元数据（OpenAI 兼容 /models、Anthropic /v1/models） */
+  listProviderModels(providerId: string): Promise<ProviderModelInfo[]>;
+  /** 单模型连通性测试：最小真实请求，返回延迟或错误 */
+  testProviderModel(providerId: string, model: string): Promise<ModelTestResult>;
+  /** 联网搜索连通性测试：用已保存配置真实搜索一次 */
+  testWebSearch(): Promise<{ ok: boolean; latencyMs: number; resultCount?: number; error?: string }>;
   pickWorkspace(): Promise<string | null>;
   onEvent(listener: (payload: { sessionId: string; event: AgentEvent }) => void): () => void;
 }

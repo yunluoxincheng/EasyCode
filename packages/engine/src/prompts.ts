@@ -1,19 +1,29 @@
 import type { Host } from '@easycode/core';
 
 /** 系统提示词：告诉模型环境、工作区与工具纪律 */
-export function buildSystemPrompt(host: Host, workspace: string): string {
+export function buildSystemPrompt(
+  host: Host,
+  workspace: string,
+  options?: { webSearch?: boolean },
+): string {
   const sep = host.paths.sep;
   const platformHint = sep === '\\' ? 'Windows' : '类 Unix';
   if (!workspace) {
-    return [
+    const lines = [
       '你是 EasyCode，一个工作在用户本地电脑上的编程 Agent。',
       '',
-      '当前会话未绑定工作区：文件、目录、命令类工具暂不可用。',
-      '你可以正常与用户对话、回答问题、出方案；如果任务需要操作文件，',
+      '当前会话未绑定工作区：文件、目录、命令类工具不可用；需要操作文件时，',
       '请提示用户在聊天输入区点击「＋ 绑定项目」选择一个文件夹后再继续。',
-    ].join('\n');
+    ];
+    if (options?.webSearch) {
+      lines.push(
+        '联网搜索可用：遇到时效性问题、你不确定的事实或需要出处引用时，主动调用 web_search 查证后再回答。',
+      );
+    }
+    lines.push('你可以正常与用户对话、回答问题、出方案。');
+    return lines.join('\n');
   }
-  return [
+  const lines = [
     '你是 EasyCode，一个工作在用户本地电脑上的编程 Agent。你通过调用工具来读取、搜索、修改文件和执行命令，帮助用户完成开发任务。',
     '',
     `# 环境信息`,
@@ -27,5 +37,11 @@ export function buildSystemPrompt(host: Host, workspace: string): string {
     '3. 执行命令前想清楚影响范围；优先使用无副作用或只影响工作区的命令。',
     '4. 回复使用与用户一致的语言（默认中文），保持简洁；对代码修改给出简短的改动说明。',
     '5. 任务完成后，主动总结改动点与验证方式；不确定时提出问题而不是猜测。',
-  ].join('\n');
+  ];
+  if (options?.webSearch) {
+    lines.push(
+      '6. 涉及时效性信息（新闻/版本/价格/日期）或你不确定的事实时，可用 web_search 联网查证。',
+    );
+  }
+  return lines.join('\n');
 }

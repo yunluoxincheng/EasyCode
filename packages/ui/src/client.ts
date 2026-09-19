@@ -6,6 +6,7 @@ import {
   type SessionMeta,
 } from '@easycode/core';
 import { AgentServer, type AgentClient, type Settings } from '@easycode/engine';
+import type { ModelTestResult, ProviderModelInfo } from '@easycode/engine';
 
 export type { AgentClient };
 
@@ -72,7 +73,15 @@ export class IpcAgentClient implements AgentClient {
     return this.invoke<Settings>('update-settings', { patch });
   }
   listProviderModels(id: string) {
-    return this.invoke<string[]>('list-provider-models', { id });
+    return this.invoke<ProviderModelInfo[]>('list-provider-models', { id });
+  }
+  testProviderModel(id: string, model: string) {
+    return this.invoke<ModelTestResult>('test-provider-model', { id, model });
+  }
+  testWebSearch() {
+    return this.invoke<{ ok: boolean; latencyMs: number; resultCount?: number; error?: string }>(
+      'test-web-search',
+    );
   }
   pickWorkspace() {
     return this.invoke<string | null>('pick-workspace');
@@ -146,6 +155,16 @@ export function createDemoClient(): AgentClient {
     getSettings: () => wrap(() => server.getSettings()),
     updateSettings: (patch) => wrap(() => server.updateSettings(patch)),
     listProviderModels: (id) => wrap(() => server.listProviderModels(id)),
+    testProviderModel: (id, model) =>
+      wrap(async () => {
+        const infos = await server.listProviderModels(id).catch(() => []);
+        if (!infos.some((m) => m.name === model)) {
+          return { ok: false, latencyMs: 0, error: '模型不在该服务的列表中' };
+        }
+        return { ok: true, latencyMs: 1 };
+      }),
+    testWebSearch: () =>
+      wrap(() => ({ ok: false, latencyMs: 0, error: '演示模式无搜索后端' })),
     pickWorkspace: async () => '/demo-workspace',
     onEvent: (listener) => server.onEvent(listener),
   };

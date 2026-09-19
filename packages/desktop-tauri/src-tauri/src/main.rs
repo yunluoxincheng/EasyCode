@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::io::Read;
+use std::net::IpAddr;
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant, UNIX_EPOCH};
@@ -13,7 +14,7 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 use base64::Engine as _;
 use serde::Serialize;
 use tauri::ipc::Channel;
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
 const MAX_PIPE: u64 = 400_000;
@@ -22,6 +23,32 @@ const MAX_STR: usize = 200_000;
 /// 运行中子进程注册表：id -> pid，供中止信号杀进程
 #[derive(Default)]
 struct PidMap(Mutex<HashMap<String, u32>>);
+
+/// 运行中 HTTP 请求的取消句柄：id -> oneshot sender。
+#[derive(Default)]
+struct HttpAbortMap(Mutex<HashMap<String, tokio::sync::oneshot::Sender<()>>>);
+
+fn is_private_http_target(url: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    let Ok(ip) = host.parse::<IpAddr>() else {
+        return false;
+    };
+    match ip {
+        IpAddr::V4(ip) => ip.is_private() || ip.is_loopback() || ip.is_link_local(),
+        IpAddr::V6(ip) => {
+            let first = ip.segments()[0];
+            ip.is_loopback() || (first & 0xfe00) == 0xfc00 || (first & 0xffc0) == 0xfe80
+        }
+    }
+}
 
 #[cfg(windows)]
 fn hide_window(cmd: &mut Command) {
@@ -269,13 +296,19 @@ enum Frame {
 /// 绕过 WebView CORS 且保留 SSE 流式语义。请求体/头由 core 的 Provider 构造。
 #[tauri::command]
 async fn http_stream(
+    id: String,
     method: String,
     url: String,
     headers: HashMap<String, String>,
     body: Option<String>,
     on_event: Channel<Frame>,
+    aborts: State<'_, HttpAbortMap>,
 ) -> Result<(), String> {
-    let client = reqwest::Client::builder().build().map_err(|e| e.to_string())?;
+    let mut builder = reqwest::Client::builder();
+    if is_private_http_target(&url) {
+        builder = builder.no_proxy();
+    }
+    let client = builder.build().map_err(|e| e.to_string())?;
     let m = reqwest::Method::from_bytes(method.as_bytes()).map_err(|e| e.to_string())?;
     let mut rb = client.request(m, &url);
     for (k, v) in &headers {
@@ -284,10 +317,28 @@ async fn http_stream(
     if let Some(b) = body {
         rb = rb.body(b);
     }
-    let resp = match rb.send().await {
-        Ok(r) => r,
-        Err(e) => {
-            let _ = on_event.send(Frame::X { m: format!("请求失败: {}", e) });
+
+    let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel::<()>();
+    {
+        let mut map = aborts.0.lock().map_err(|e| e.to_string())?;
+        if let Some(previous) = map.insert(id.clone(), cancel_tx) {
+            let _ = previous.send(());
+        }
+    }
+
+    let resp = tokio::select! {
+        result = rb.send() => {
+            match result {
+                Ok(r) => r,
+                Err(e) => {
+                    let _ = aborts.0.lock().map(|mut map| map.remove(&id));
+                    let _ = on_event.send(Frame::X { m: format!("请求失败: {}", e) });
+                    return Ok(());
+                }
+            }
+        }
+        _ = &mut cancel_rx => {
+            let _ = aborts.0.lock().map(|mut map| map.remove(&id));
             return Ok(());
         }
     };
@@ -297,7 +348,17 @@ async fn http_stream(
     let mut stream = resp.bytes_stream();
     let mut chunks = 0usize;
     let mut total = 0usize;
-    while let Some(chunk) = stream.next().await {
+    loop {
+        let next = tokio::select! {
+            chunk = stream.next() => chunk,
+            _ = &mut cancel_rx => {
+                let _ = on_event.send(Frame::X { m: "请求已取消".to_string() });
+                break;
+            }
+        };
+        let Some(chunk) = next else {
+            break;
+        };
         match chunk {
             Ok(bytes) => {
                 chunks += 1;
@@ -314,8 +375,17 @@ async fn http_stream(
             }
         }
     }
+    let _ = aborts.0.lock().map(|mut map| map.remove(&id));
     let _ = on_event.send(Frame::E);
     eprintln!("[http_stream] done url={} chunks={} total={}B", url, chunks, total);
+    Ok(())
+}
+
+#[tauri::command]
+fn http_stream_cancel(id: String, aborts: State<'_, HttpAbortMap>) -> Result<(), String> {
+    if let Some(tx) = aborts.0.lock().map_err(|e| e.to_string())?.remove(&id) {
+        let _ = tx.send(());
+    }
     Ok(())
 }
 
@@ -325,6 +395,7 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .manage(PidMap::default())
+        .manage(HttpAbortMap::default())
         .invoke_handler(tauri::generate_handler![
             host_info,
             fs_read,
@@ -336,7 +407,8 @@ fn main() {
             proc_run,
             proc_kill,
             pick_folder,
-            http_stream
+            http_stream,
+            http_stream_cancel
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

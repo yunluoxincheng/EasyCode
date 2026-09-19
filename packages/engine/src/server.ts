@@ -13,10 +13,12 @@ import {
   SessionMeta,
   runAgentLoop,
   createBuiltinTools,
+  runWebSearch,
   type ApprovalMode,
 } from '@easycode/core';
 import { Settings, DEFAULT_SETTINGS, PROVIDER_PRESETS } from './settings.js';
-import type { ProviderEntry, ProviderModel } from './settings.js';
+import type { ModelTestResult, ProviderEntry, ProviderModel, ProviderModelInfo } from './settings.js';
+import { loadModelDirectory, resolveModelMeta } from './model-catalog.js';
 import { buildSystemPrompt } from './prompts.js';
 
 export interface CreateSessionOptions {
@@ -176,17 +178,40 @@ export class AgentServer {
     try {
       const entry = this.settings.providers[rt.data.meta.providerId];
       const firstEnabled = (entry?.models ?? []).find((m) => m.enabled !== false)?.name ?? 'default';
-      const provider = this.createProvider(
-        rt.data.meta.providerId,
-        rt.data.meta.model || firstEnabled,
+      const model = rt.data.meta.model || firstEnabled;
+      const caps = (entry?.models ?? []).find((m) => m.name === model)?.capabilities ?? ['system'];
+      // 联网搜索分流：总开关关闭=全部不搜索；有原生工具的走原生，否则走内置 web_search()
+      const searchOn = caps.includes('websearch') && this.settings.webSearch?.enabled === true;
+      const useNativeSearch = searchOn && supportsNativeWebSearch(model, entry.kind);
+      const provider = this.createProvider(rt.data.meta.providerId, model, useNativeSearch);
+      const webSearchCfg = this.settings.webSearch;
+      const builtinTools = createBuiltinTools(
+        searchOn && !useNativeSearch && webSearchCfg && validWebSearchBackend(webSearchCfg)
+          ? {
+              webSearch: {
+                backend: webSearchCfg.backend,
+                searxngUrl: webSearchCfg.searxngUrl,
+                tavilyApiKey: webSearchCfg.tavilyApiKey,
+                maxResults: webSearchCfg.maxResults,
+              },
+            }
+          : undefined,
       );
+      // 对话中系统消息：模型配置关闭时把系统提示词并入首条用户消息
+      const systemPrompt = buildSystemPrompt(this.host, rt.data.meta.workspaceRoot, {
+        webSearch: searchOn,
+      });
+      const wireMessages =
+        caps.includes('system') || !systemPrompt
+          ? rt.data.messages
+          : mergeSystemIntoUser(rt.data.messages, systemPrompt);
       const result = await runAgentLoop({
         provider,
-        tools: createBuiltinTools(),
+        tools: builtinTools,
         host: this.host,
         workspace: rt.data.meta.workspaceRoot,
-        systemPrompt: buildSystemPrompt(this.host, rt.data.meta.workspaceRoot),
-        messages: rt.data.messages,
+        systemPrompt: caps.includes('system') ? systemPrompt : '',
+        messages: wireMessages,
         signal: rt.controller.signal,
         approval: rt.approval,
         emit: (event) => {
@@ -304,28 +329,28 @@ export class AgentServer {
 
   /* -------------------- 内部 -------------------- */
 
-  private createProvider(providerId: string, model: string): Provider {
+  private createProvider(providerId: string, model: string, nativeWebSearch: boolean): Provider {
     const entry = this.settings.providers[providerId];
     if (!entry) throw new Error(`未配置的 Provider: ${providerId}，请在设置中检查`);
     switch (entry.kind) {
       case 'mock':
         return new MockProvider(providerId);
       case 'anthropic':
-        return new AnthropicProvider(providerId, { ...entry, model });
+        return new AnthropicProvider(providerId, { ...entry, model, nativeWebSearch });
       case 'responses':
-        return new ResponsesProvider(providerId, { ...entry, model });
+        return new ResponsesProvider(providerId, { ...entry, model, nativeWebSearch });
       case 'openai-compatible':
       default:
-        return new OpenAICompatibleProvider(providerId, { ...entry, model });
+        return new OpenAICompatibleProvider(providerId, { ...entry, model, nativeWebSearch });
     }
   }
 
-  /** 从供应商 API 拉取可用模型 ID（OpenAI 兼容 /models、Anthropic /v1/models） */
-  async listProviderModels(providerId: string): Promise<string[]> {
+  /** 从供应商 API 拉取可用模型及元数据（OpenAI 兼容 /models、Anthropic /v1/models） */
+  async listProviderModels(providerId: string): Promise<ProviderModelInfo[]> {
     await this.ensureSettings();
     const entry = this.settings.providers[providerId];
     if (!entry) throw new Error(`未配置的模型服务: ${providerId}`);
-    if (entry.kind === 'mock') return ['mock-1'];
+    if (entry.kind === 'mock') return [{ name: 'mock-1' }];
     if (!entry.baseURL) throw new Error('请先填写 Base URL');
     if (!entry.apiKey) throw new Error('请先填写 API Key');
     const base = entry.baseURL.replace(/\/$/, '');
@@ -338,13 +363,155 @@ export class AgentServer {
     if (!res.ok) {
       throw new Error(`获取模型列表失败: HTTP ${res.status} ${res.statusText}`);
     }
-    const data = (await res.json()) as { data?: Array<{ id?: string }> };
-    const ids = (data.data ?? [])
-      .map((m) => m.id)
-      .filter((x): x is string => !!x)
-      .sort();
-    if (ids.length === 0) throw new Error('供应商返回了空的模型列表');
-    return ids;
+    const data = (await res.json()) as
+      | { data?: unknown }
+      | unknown[];
+    const rawList: unknown[] = Array.isArray(data) ? data : (Array.isArray(data.data) ? data.data : []);
+    const infos: ProviderModelInfo[] = [];
+    for (const item of rawList) {
+      if (typeof item === 'string') {
+        infos.push({ name: item });
+        continue;
+      }
+      if (!item || typeof item !== 'object') continue;
+      const m = item as Record<string, unknown> & { id?: unknown };
+      if (typeof m.id !== 'string' || !m.id) continue;
+      infos.push({ name: m.id, ...detectModelMeta(m) });
+    }
+    infos.sort((a, b) => a.name.localeCompare(b.name));
+    if (infos.length === 0) throw new Error('供应商返回了空的模型列表');
+    // 元数据缺失时逐层补齐：models.dev 在线目录 → 内置规格目录 → 名称启发式
+    const directory = await loadModelDirectory(this.host).catch(() => null);
+    const webSearchEnabled = this.settings.webSearch?.enabled === true;
+    return infos.map((info) => {
+      const resolved = resolveModelMeta(info, directory);
+      // 全局联网搜索开启时，自动获取的模型默认具备联网搜索能力
+      // （运行时分流：有原生工具的走原生，其余走内置 web_search()）
+      if (webSearchEnabled && !resolved.capabilities?.includes('websearch')) {
+        resolved.capabilities = ['structured', 'websearch', 'system'].filter(
+          (c) => c === 'websearch' || resolved.capabilities?.includes(c),
+        );
+      }
+      return resolved;
+    });
+  }
+
+  /**
+   * 单模型连通性测试：发送一条最小的真实请求，验证 Key/模型/网络全链路。
+   * 仅以 HTTP 状态判定连通（推理模型的空回复也算连通）。
+   */
+  async testProviderModel(providerId: string, model: string): Promise<ModelTestResult> {
+    await this.ensureSettings();
+    const entry = this.settings.providers[providerId];
+    if (!entry) throw new Error(`未配置的模型服务: ${providerId}`);
+    if (entry.kind === 'mock') return { ok: true, latencyMs: 0 };
+    if (!entry.baseURL) throw new Error('请先填写 Base URL');
+    if (!entry.apiKey) throw new Error('请先填写 API Key');
+    const base = entry.baseURL.replace(/\/$/, '');
+    let url: string;
+    let headers: Record<string, string>;
+    let body: Record<string, unknown>;
+    if (entry.kind === 'anthropic') {
+      url = `${base}/v1/messages`;
+      headers = {
+        'content-type': 'application/json',
+        'x-api-key': entry.apiKey ?? '',
+        'anthropic-version': '2023-06-01',
+      };
+      body = { model, max_tokens: 1, messages: [{ role: 'user', content: 'ping' }] };
+    } else if (entry.kind === 'responses') {
+      url = `${base}/responses`;
+      headers = { 'content-type': 'application/json', authorization: `Bearer ${entry.apiKey ?? ''}` };
+      // 与 ResponsesProvider 的正式请求同构：input 必须是数组形态，部分网关不接受纯字符串
+      body = {
+        model,
+        input: [{ role: 'user', content: [{ type: 'input_text', text: 'ping' }] }],
+        max_output_tokens: 16,
+      };
+    } else {
+      url = `${base}/chat/completions`;
+      headers = { 'content-type': 'application/json', authorization: `Bearer ${entry.apiKey ?? ''}` };
+      body = {
+        model,
+        messages: [{ role: 'user', content: 'ping' }],
+        max_tokens: 32,
+        stream: false,
+      };
+    }
+    const started = Date.now();
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 20000);
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+        signal: ctrl.signal,
+      });
+      if (!res.ok) {
+        let detail = '';
+        try {
+          detail = (await res.text()).slice(0, 200);
+        } catch {
+          // 忽略读取失败
+        }
+        return {
+          ok: false,
+          latencyMs: Date.now() - started,
+          error: `HTTP ${res.status}${detail ? `: ${detail}` : ''}`,
+        };
+      }
+      return { ok: true, latencyMs: Date.now() - started };
+    } catch (err) {
+      const msg =
+        err instanceof Error
+          ? err.name === 'AbortError'
+            ? '请求超时（20s）'
+            : err.message
+          : String(err);
+      return { ok: false, latencyMs: Date.now() - started, error: msg };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** 联网搜索连通性测试：用当前已保存的配置真实搜索一次 */
+  async testWebSearch(): Promise<{
+    ok: boolean;
+    latencyMs: number;
+    resultCount?: number;
+    error?: string;
+  }> {
+    await this.ensureSettings();
+    const ws = this.settings.webSearch;
+    if (!ws?.enabled) return { ok: false, latencyMs: 0, error: '联网搜索未开启' };
+    if (!validWebSearchBackend(ws)) return { ok: false, latencyMs: 0, error: '搜索后端配置不完整' };
+    const started = Date.now();
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 20000);
+    try {
+      const hits = await runWebSearch(
+        {
+          backend: ws.backend,
+          searxngUrl: ws.searxngUrl,
+          tavilyApiKey: ws.tavilyApiKey,
+          maxResults: ws.maxResults,
+        },
+        'EasyCode 联网搜索测试',
+        ctrl.signal,
+      );
+      return { ok: true, latencyMs: Date.now() - started, resultCount: hits.length };
+    } catch (err) {
+      const msg =
+        err instanceof Error
+          ? err.name === 'AbortError'
+            ? '请求超时（20s）'
+            : err.message
+          : String(err);
+      return { ok: false, latencyMs: Date.now() - started, error: msg };
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   private emitterFor(sessionId: string) {
@@ -408,4 +575,82 @@ export class AgentServer {
         : Object.keys(providers)[0] ?? DEFAULT_SETTINGS.defaultProvider;
     return { ...DEFAULT_SETTINGS, ...stored, providers, defaultProvider };
   }
+}
+
+function num(v: unknown): number | undefined {
+  return typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : undefined;
+}
+
+/** 关闭"对话中系统消息"时：把系统提示词并入首条用户消息（不改动存储的会话数组） */
+function mergeSystemIntoUser(messages: ChatMessage[], system: string): ChatMessage[] {
+  const idx = messages.findIndex((m) => m.role === 'user');
+  if (idx === -1) return messages;
+  const first = messages[idx];
+  const out = [...messages];
+  if (first.role === 'user') {
+    out[idx] = { role: 'user', content: `${system}\n\n---\n\n${first.content}` };
+  }
+  return out;
+}
+
+/** 模型有官方原生联网搜索且当前 API 格式支持该工具类型（其余模型走内置 web_search()） */
+export function supportsNativeWebSearch(modelName: string, kind: ProviderEntry['kind']): boolean {
+  if (kind === 'responses') return /^(gpt-|codex-|chatgpt-|o[34](-|$))/i.test(modelName);
+  if (kind === 'anthropic') return /^claude-/i.test(modelName);
+  return false;
+}
+
+/** 联网搜索后端配置是否齐全 */
+export function validWebSearchBackend(ws: Settings['webSearch']): boolean {
+  if (!ws?.enabled) return false;
+  if (ws.backend === 'tavily') return !!ws.tavilyApiKey?.trim();
+  if (ws.backend === 'custom') return !!ws.customUrl?.trim();
+  return !!ws.searxngUrl?.trim();
+}
+
+/**
+ * 从 /models 条目探测上下文窗口 / 最大输出 / 视觉能力。
+ * 各供应商字段名不一（OpenRouter: context_length、Groq: context_window、
+ * vLLM: max_model_len、xAI 等），尽量兼容；探测不到就不填，由默认值兜底。
+ */
+function detectModelMeta(item: Record<string, unknown>): Omit<ProviderModelInfo, 'name'> {
+  const o = item as {
+    context_length?: unknown;
+    context_window?: unknown;
+    max_model_len?: unknown;
+    context_size?: unknown;
+    max_context_length?: unknown;
+    top_provider?: { context_length?: unknown; max_completion_tokens?: unknown };
+    max_output_tokens?: unknown;
+    max_completion_tokens?: unknown;
+    max_tokens?: unknown;
+    architecture?: { input_modalities?: unknown };
+    input_modalities?: unknown;
+    modalities?: unknown;
+    vision?: unknown;
+    capabilities?: { vision?: unknown };
+  };
+  const contextWindow =
+    num(o.context_length) ??
+    num(o.context_window) ??
+    num(o.max_model_len) ??
+    num(o.context_size) ??
+    num(o.max_context_length) ??
+    num(o.top_provider?.context_length);
+  const maxOutputTokens =
+    num(o.max_output_tokens) ??
+    num(o.max_completion_tokens) ??
+    num(o.max_tokens) ??
+    num(o.top_provider?.max_completion_tokens);
+  const mods = o.architecture?.input_modalities ?? o.input_modalities ?? o.modalities;
+  const vision =
+    (Array.isArray(mods) &&
+      mods.some((x) => typeof x === 'string' && /image|vision/i.test(x))) ||
+    o.vision === true ||
+    o.capabilities?.vision === true;
+  const meta: Omit<ProviderModelInfo, 'name'> = {};
+  if (contextWindow !== undefined) meta.contextWindow = contextWindow;
+  if (maxOutputTokens !== undefined) meta.maxOutputTokens = maxOutputTokens;
+  if (vision) meta.vision = true;
+  return meta;
 }

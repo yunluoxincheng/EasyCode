@@ -42,7 +42,12 @@ function toWireMessages(messages: ChatMessage[]) {
 export class AnthropicProvider implements Provider {
   constructor(
     readonly id: string,
-    private readonly config: { baseURL?: string; apiKey?: string; model: string },
+    private readonly config: {
+      baseURL?: string;
+      apiKey?: string;
+      model: string;
+      nativeWebSearch?: boolean;
+    },
   ) {}
 
   async stream(request: StreamRequest, ctx: StreamContext): Promise<TurnResult> {
@@ -62,6 +67,10 @@ export class AnthropicProvider implements Provider {
         description: t.description,
         input_schema: t.parameters,
       }));
+    }
+    // 原生联网搜索：Anthropic 服务端工具（server_tool_use 块在解析时被忽略）
+    if (this.config.nativeWebSearch) {
+      body.tools = [...((body.tools as unknown[]) ?? []), { type: 'web_search_20250305', name: 'web_search', max_uses: 5 }];
     }
 
     const res = await fetch(url, {

@@ -4,6 +4,10 @@ import type { ApprovalManager } from '../approval.js';
 import { readFileTool, writeFileTool, editFileTool, listDirTool } from './fs.js';
 import { searchFilesTool } from './search.js';
 import { runCommandTool } from './shell.js';
+import { createWebSearchTool, type WebSearchBackendConfig } from './websearch.js';
+
+export { createWebSearchTool, runWebSearch } from './websearch.js';
+export type { WebSearchBackendConfig, SearchHit } from './websearch.js';
 
 /** 工具暴露给模型的规格 */
 export interface ToolSpec {
@@ -22,6 +26,8 @@ export interface Tool {
   spec: ToolSpec;
   /** 敏感操作在 ask 模式下需用户批准 */
   sensitive?: boolean;
+  /** 是否依赖工作区（默认 true）；false 则未绑定项目的会话也可执行（如联网搜索） */
+  requiresWorkspace?: boolean;
   execute(input: unknown, ctx: ToolContext): Promise<string>;
 }
 
@@ -50,16 +56,23 @@ export class ToolRegistry {
   }
 }
 
-/** 内置工具集（文件读写/编辑/列目录/搜索/命令）。宿主能力在 execute 时注入。 */
-export function createBuiltinTools(): ToolRegistry {
+/**
+ * 内置工具集（文件读写/编辑/列目录/搜索/命令）。宿主能力在 execute 时注入。
+ * 传入 webSearch 配置时额外注册联网搜索工具（给不支持原生搜索的模型）。
+ */
+export function createBuiltinTools(options?: {
+  webSearch?: WebSearchBackendConfig;
+}): ToolRegistry {
   const registry = new ToolRegistry();
-  return registry
+  registry
     .register(readFileTool)
     .register(writeFileTool)
     .register(editFileTool)
     .register(listDirTool)
     .register(searchFilesTool)
     .register(runCommandTool);
+  if (options?.webSearch) registry.register(createWebSearchTool(options.webSearch));
+  return registry;
 }
 
 /** 把模型给的工作区相对路径解析为绝对路径，并强制限制在工作区内 */
@@ -100,7 +113,7 @@ export async function executeTool(
   if (!tool) {
     return { content: `未知工具: ${name}`, approved: false, isError: true, durationMs: 0 };
   }
-  if (!ctx.workspace) {
+  if (!ctx.workspace && tool.requiresWorkspace !== false) {
     return {
       content: '当前会话未绑定工作区，文件与命令工具不可用。请让用户在聊天输入区点击「＋ 绑定项目」选择一个文件夹后重试。',
       approved: true,
