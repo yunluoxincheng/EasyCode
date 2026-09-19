@@ -20,8 +20,8 @@ export type AgentEvent =
   | {
       type: 'step_end';
       usage?: Usage;
-      /** 本会话累计（输入/输出/步数），由引擎累计 */
-      sessionUsage?: { input: number; output: number; steps: number };
+      /** 本会话累计（输入/输出/步数/缓存命中），由引擎累计 */
+      sessionUsage?: { input: number; output: number; steps: number; cached?: number };
     }
   | { type: 'error'; message: string }
   | { type: 'done'; reason: 'completed' | 'aborted' | 'error' };

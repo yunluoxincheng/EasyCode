@@ -2,21 +2,20 @@ import { useEffect, useRef, useState } from 'react';
 import { useStore } from '../useStore.js';
 import { createBuiltinTools, type Host } from '@easycode/core';
 import { buildSystemPrompt } from '@easycode/engine';
+import { encode } from 'gpt-tokenizer/encoding/o200k_base';
 
-/** 粗略 token 估算：中英混合按 2 字符 ≈ 1 token（入参为字符数） */
-function est(chars: number): number {
-  return Math.ceil(chars / 2);
+/** 精确 token 计数：o200k_base 编码（OpenAI 当前分词规范，对其他模型也是良好近似） */
+function count(text: string): number {
+  if (!text) return 0;
+  return encode(text).length;
 }
 function fmtTk(n: number): string {
   return n >= 10000 ? `${(n / 10000).toFixed(1)}万` : n.toLocaleString();
 }
-function baseName(p: string): string {
-  return p.split(/[\\/]/).filter(Boolean).pop() ?? p;
-}
 
-const ROW_COLORS = ['#4da3ff', '#3fb96a', '#d9a53a', '#8b93a5'];
+const DEFAULT_WINDOW = 1_000_000;
 
-/** 上下文容量 chip + 面板（ZCode 同款）：当前会话在模型上下文窗口中的占用估算 */
+/** 上下文容量 chip + 面板（ZCode 同款）：当前会话在模型上下文窗口中的精确占用 */
 export function ContextChip() {
   const store = useStore();
   const [open, setOpen] = useState(false);
@@ -35,36 +34,39 @@ export function ContextChip() {
   if (!session) return null;
 
   const provider = store.settings?.providers[session.providerId];
-  const windowTok = provider?.contextWindow ?? 128000;
+  const windowTok = provider?.contextWindow ?? DEFAULT_WINDOW;
 
-  // 分类估算（打开面板时计算一次）
+  // 分类精确计数
   const rows: Array<{ label: string; tokens: number }> = [];
-  let msgChars = 0;
+  let msgTokens = 0;
   for (const it of store.items) {
-    if (it.kind === 'user') msgChars += it.text.length;
+    if (it.kind === 'user') msgTokens += count(it.text);
     else if (it.kind === 'assistant')
-      for (const b of it.blocks) msgChars += b.text.length;
+      for (const b of it.blocks) msgTokens += count(b.text);
     else if (it.kind === 'tool') {
-      msgChars += JSON.stringify(it.input ?? {}).length;
-      msgChars += (it.result ?? '').length;
-    } else if (it.kind === 'approval') msgChars += JSON.stringify(it.input ?? {}).length;
+      msgTokens += count(JSON.stringify(it.input ?? {}));
+      msgTokens += count(it.result ?? '');
+    } else if (it.kind === 'approval') msgTokens += count(JSON.stringify(it.input ?? {}));
   }
-  rows.push({ label: '消息', tokens: est(msgChars) });
+  rows.push({ label: '消息', tokens: msgTokens });
 
-  const toolChars = JSON.stringify(createBuiltinTools().listSpecs()).length;
-  rows.push({ label: '系统工具', tokens: est(toolChars) });
+  rows.push({ label: '系统工具', tokens: count(JSON.stringify(createBuiltinTools().listSpecs())) });
 
   const stubHost = {
     paths: { sep: navigator.platform.includes('Win') ? '\\' : '/' },
   } as unknown as Host;
-  const sysPrompt = buildSystemPrompt(stubHost, session.workspaceRoot);
-  rows.push({ label: '系统提示词', tokens: est(sysPrompt.length) });
+  rows.push({ label: '系统提示词', tokens: count(buildSystemPrompt(stubHost, session.workspaceRoot)) });
 
-  const other = store.items.length * 8; // 每条消息的角色/框架开销
+  const other = store.items.length * 4; // 每条消息的角色/框架开销
   rows.push({ label: '其他', tokens: other });
 
   const used = rows.reduce((a, r) => a + r.tokens, 0);
   const pct = Math.min(100, (used / windowTok) * 100);
+
+  // 平均缓存命中率 = 累计缓存 / 累计输入
+  const su = store.sessionUsage;
+  const cacheRate =
+    su.input > 0 && su.cached > 0 ? `${((su.cached / su.input) * 100).toFixed(1)}%` : '0%';
 
   return (
     <div className="usage-wrap" ref={ref}>
@@ -96,11 +98,15 @@ export function ContextChip() {
               );
             })}
           </div>
-          <p className="hint">按 2 字符 ≈ 1 token 估算；在供应商设置中可配置上下文窗口大小{session.workspaceRoot ? '' : '（未绑定项目，消息类工具不可用）'}。</p>
+          <div className="ctx-cache">
+            <span className="ctx-cache-label">平均缓存命中率</span>
+            <span className="ctx-cache-val">{cacheRate}</span>
+          </div>
+          <p className="hint">按 o200k_base 分词精确计数{session.workspaceRoot ? '' : '；未绑定项目，消息类工具不可用'}。</p>
         </div>
       )}
     </div>
   );
 }
 
-export { baseName };
+const ROW_COLORS = ['#4da3ff', '#3fb96a', '#d9a53a', '#8b93a5'];

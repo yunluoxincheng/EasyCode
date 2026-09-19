@@ -92,7 +92,9 @@ export class AnthropicProvider implements Provider {
         partial_json?: string;
         stop_reason?: string;
       };
-      message?: { usage?: { input_tokens?: number } };
+      message?: {
+        usage?: { input_tokens?: number; cache_read_input_tokens?: number };
+      };
       usage?: { output_tokens?: number };
     };
 
@@ -104,7 +106,10 @@ export class AnthropicProvider implements Provider {
         continue;
       }
       if (evt.type === 'message_start') {
-        usage = { inputTokens: evt.message?.usage?.input_tokens };
+        usage = {
+          inputTokens: evt.message?.usage?.input_tokens,
+          cachedTokens: evt.message?.usage?.cache_read_input_tokens,
+        };
       } else if (evt.type === 'content_block_delta') {
         if (evt.delta?.type === 'text_delta' && evt.delta.text) {
           textParts.push(evt.delta.text);

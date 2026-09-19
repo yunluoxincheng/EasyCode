@@ -87,7 +87,11 @@ export class ResponsesProvider implements Provider {
           name?: string;
           arguments?: string;
         }>;
-        usage?: { input_tokens?: number; output_tokens?: number };
+        usage?: {
+          input_tokens?: number;
+          output_tokens?: number;
+          input_tokens_details?: { cached_tokens?: number };
+        };
       };
     };
 
@@ -113,6 +117,7 @@ export class ResponsesProvider implements Provider {
           ? {
               inputTokens: evt.response.usage.input_tokens,
               outputTokens: evt.response.usage.output_tokens,
+              cachedTokens: evt.response.usage.input_tokens_details?.cached_tokens,
             }
           : undefined;
         toolCalls = (evt.response?.output ?? [])

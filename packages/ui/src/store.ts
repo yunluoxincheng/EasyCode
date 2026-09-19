@@ -42,7 +42,12 @@ export class AppStore {
   settings: Settings | null = null;
   demoMode = false;
   lastUsage: Usage | null = null;
-  sessionUsage: { input: number; output: number; steps: number } = { input: 0, output: 0, steps: 0 };
+  sessionUsage: { input: number; output: number; steps: number; cached: number } = {
+    input: 0,
+    output: 0,
+    steps: 0,
+    cached: 0,
+  };
   toast: string | null = null;
   view: ViewName = 'chat';
   settingsSection: SettingsSection = 'models';
@@ -402,7 +407,14 @@ export class AppStore {
       }
       case 'step_end':
         this.lastUsage = event.usage ?? null;
-        if (event.sessionUsage) this.sessionUsage = event.sessionUsage;
+        if (event.sessionUsage) {
+          this.sessionUsage = {
+            input: event.sessionUsage.input,
+            output: event.sessionUsage.output,
+            steps: event.sessionUsage.steps,
+            cached: event.sessionUsage.cached ?? 0,
+          };
+        }
         break;
       case 'error':
         this.flushAssistant();

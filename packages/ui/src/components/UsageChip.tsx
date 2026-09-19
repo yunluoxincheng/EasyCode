@@ -46,6 +46,14 @@ export function UsageChip() {
               <tr><td>累计输入</td><td>{su.input.toLocaleString()} tk</td></tr>
               <tr><td>累计输出</td><td>{su.output.toLocaleString()} tk</td></tr>
               <tr><td>累计合计</td><td>{total.toLocaleString()} tk</td></tr>
+              <tr>
+                <td>缓存命中率</td>
+                <td>
+                  {su.cached > 0
+                    ? `${((su.cached / su.input) * 100).toFixed(1)}% (${su.cached.toLocaleString()} tk)`
+                    : '0%'}
+                </td>
+              </tr>
               <tr><td>步数</td><td>{su.steps}</td></tr>
               <tr className="hl">
                 <td>最近一步</td>

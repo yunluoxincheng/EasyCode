@@ -108,7 +108,11 @@ export class OpenAICompatibleProvider implements Provider {
           };
           finish_reason?: string | null;
         }>;
-        usage?: { prompt_tokens?: number; completion_tokens?: number } | null;
+        usage?: {
+          prompt_tokens?: number;
+          completion_tokens?: number;
+          prompt_tokens_details?: { cached_tokens?: number };
+        } | null;
       };
       try {
         chunk = JSON.parse(payload);
@@ -137,6 +141,7 @@ export class OpenAICompatibleProvider implements Provider {
         usage = {
           inputTokens: chunk.usage.prompt_tokens,
           outputTokens: chunk.usage.completion_tokens,
+          cachedTokens: chunk.usage.prompt_tokens_details?.cached_tokens,
         };
       }
     }

@@ -195,11 +195,17 @@ export class AgentServer {
             const u = rt.data.usage ?? { input: 0, output: 0, steps: 0 };
             u.input += event.usage?.inputTokens ?? 0;
             u.output += event.usage?.outputTokens ?? 0;
+            u.cached = (u.cached ?? 0) + (event.usage?.cachedTokens ?? 0);
             u.steps += 1;
             rt.data.usage = u;
             this.emitterFor(id)({
               ...event,
-              sessionUsage: { input: u.input, output: u.output, steps: u.steps },
+              sessionUsage: {
+                input: u.input,
+                output: u.output,
+                steps: u.steps,
+                cached: u.cached ?? 0,
+              },
             });
             return;
           }
