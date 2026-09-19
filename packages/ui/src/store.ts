@@ -50,6 +50,7 @@ export class AppStore {
   createProjectOpen = false;
   projectSwitcherOpen = false;
   projectSearch = '';
+  updatePanelOpen = false;
 
   private listeners = new Set<() => void>();
   private seq = 0;
@@ -65,7 +66,7 @@ export class AppStore {
 
   constructor(readonly client: AgentClient) {}
 
-  private notify(): void {
+  notify(): void {
     this.version++;
     for (const l of this.listeners) l();
   }

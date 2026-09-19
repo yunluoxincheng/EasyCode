@@ -1,4 +1,5 @@
 import { useStore } from '../useStore.js';
+import { UpdateBadge } from './UpdateBadge.js';
 
 /** 左侧栏（Codex 桌面端布局）：项目分组 + 会话；支持收起为图标栏 */
 export function Sidebar() {
@@ -122,9 +123,12 @@ export function Sidebar() {
       </nav>
 
       <div className="sidebar-bottom">
-        <button className="btn ghost block" onClick={() => store.openSettings('models')}>
-          设置
-        </button>
+        <div className="sidebar-bottom-row">
+          <button className="btn ghost block" onClick={() => store.openSettings('models')}>
+            设置
+          </button>
+          <UpdateBadge />
+        </div>
       </div>
     </aside>
   );

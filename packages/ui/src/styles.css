@@ -1050,3 +1050,28 @@ select:focus-visible,
 .update-bar { height: 8px; background: #070a08; border: 1px solid var(--border2); border-radius: 4px; overflow: hidden; }
 .update-bar-fill { height: 100%; background: linear-gradient(90deg, var(--green-dim), var(--green)); transition: width .2s; }
 .update-err { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+
+
+/* ---------------- 侧栏更新角标 ---------------- */
+
+.sidebar-bottom-row { display: flex; gap: 6px; align-items: center; }
+.sidebar-bottom-row .btn.ghost.block { flex: 1; }
+.update-badge { position: relative; }
+.update-btn { width: 38px; text-align: center; padding-left: 0; padding-right: 0; }
+.update-btn.hot { color: var(--green); border-color: var(--green-dim); animation: pulse 1.6s infinite; }
+.update-btn.danger { color: var(--red); border-color: var(--red); }
+.update-pop {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  right: 0;
+  width: 280px;
+  background: var(--panel);
+  border: 1px solid var(--border2);
+  border-radius: var(--radius);
+  box-shadow: 0 14px 36px rgba(0, 0, 0, .55);
+  padding: 12px 14px;
+  z-index: 90;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
