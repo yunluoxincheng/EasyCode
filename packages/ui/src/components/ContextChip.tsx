@@ -102,7 +102,6 @@ export function ContextChip() {
             <span className="ctx-cache-label">平均缓存命中率</span>
             <span className="ctx-cache-val">{cacheRate}</span>
           </div>
-          <p className="hint">按 o200k_base 分词精确计数{session.workspaceRoot ? '' : '；未绑定项目，消息类工具不可用'}。</p>
         </div>
       )}
     </div>
