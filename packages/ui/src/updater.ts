@@ -49,7 +49,7 @@ class UpdaterController {
     this.notify();
   }
 
-  /** 应用启动时调用：读取当前版本并静默检查一次 */
+  /** 应用启动时调用：读取当前版本并静默检查一次，此后每小时静默复查 */
   async init(): Promise<void> {
     if (!('__TAURI_INTERNALS__' in window)) return;
     this.isSupported = true;
@@ -60,6 +60,13 @@ class UpdaterController {
     }
     this.notify();
     void this.check(true);
+    window.setInterval(() => {
+      // 下载/安装进行中不打断；避免复查重置进度
+      if (this.checking || this.phase.kind === 'downloading' || this.phase.kind === 'installing') {
+        return;
+      }
+      void this.check(true);
+    }, 60 * 60 * 1000);
   }
 
   async check(silent = false): Promise<void> {
