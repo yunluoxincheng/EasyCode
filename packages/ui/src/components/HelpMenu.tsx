@@ -27,7 +27,7 @@ export function HelpButton() {
       await openUrl(url);
       setOpen(false);
     } catch (err) {
-      store.showToast(`打开链接失败: ${err instanceof Error ? err.message : String(err)}`);
+      store.showToast(`打开链接失败: ${err instanceof Error ? err.message : String(err)}`, 'err');
     }
   };
 
@@ -44,9 +44,9 @@ export function HelpButton() {
         store.showToast(`发现新版本 v${updater.phase.version}，侧栏 ⤓ 可下载安装`);
         setOpen(false);
       } else if (k === 'latest') {
-        store.showToast('[ OK ] 已是最新版本');
+        store.showToast('已是最新版本');
       } else if (k === 'error') {
-        store.showToast(`检查更新失败：${updater.phase.message}`);
+        store.showToast(`检查更新失败：${updater.phase.message}`, 'err');
       }
     } finally {
       setChecking(false);

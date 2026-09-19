@@ -177,7 +177,7 @@ export function SettingsPage() {
       const res = await store.client.testProviderModel(id, name);
       setTestResults((r) => ({ ...r, [`${id}/${name}`]: res }));
       if (res.ok) store.showToast(`连通正常 · ${res.latencyMs}ms`);
-      else store.showToast(`连通失败: ${res.error ?? '未知错误'}`);
+      else store.showToast(`连通失败: ${res.error ?? '未知错误'}`, 'err');
     } catch (err) {
       store.showToast(err instanceof Error ? err.message : String(err));
     } finally {
@@ -217,7 +217,7 @@ export function SettingsPage() {
       if (res.ok) {
         store.showToast(`搜索正常 · ${res.resultCount ?? 0} 条结果 · ${res.latencyMs}ms`);
       } else {
-        store.showToast(`搜索失败: ${res.error ?? '未知错误'}`);
+        store.showToast(`搜索失败: ${res.error ?? '未知错误'}`, 'err');
       }
     } catch (err) {
       store.showToast(err instanceof Error ? err.message : String(err));
@@ -294,7 +294,7 @@ export function SettingsPage() {
       store.showToast('设置已保存');
       setDraft(structuredClone(store.settings!));
     } catch (err) {
-      store.showToast(`保存失败: ${err instanceof Error ? err.message : String(err)}`);
+      store.showToast(`保存失败: ${err instanceof Error ? err.message : String(err)}`, 'err');
     } finally {
       setSaving(false);
     }
@@ -593,7 +593,7 @@ export function SettingsPage() {
                         store.showToast('模型配置已保存');
                       })
                       .catch((err) =>
-                        store.showToast(`保存失败: ${err instanceof Error ? err.message : String(err)}`),
+                        store.showToast(`保存失败: ${err instanceof Error ? err.message : String(err)}`, 'err'),
                       );
                   }}
                   onDelete={() => {

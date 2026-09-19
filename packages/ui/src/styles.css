@@ -545,6 +545,8 @@ select:focus-visible,
   font-size: 12.5px; z-index: 100;
 }
 .toast::before { content: '[ OK ] '; }
+.toast.err { border-color: var(--red); color: var(--red); }
+.toast.err::before { content: '[ ERR ] '; }
 
 /* 滚动条 */
 ::-webkit-scrollbar { width: 10px; height: 10px; }

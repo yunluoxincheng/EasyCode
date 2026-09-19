@@ -333,7 +333,9 @@ export class AppStore {
     this.notify();
   }
 
-  showToast(message: string): void {
+  toastKind: 'ok' | 'err' = 'ok';
+  showToast(message: string, kind: 'ok' | 'err' = 'ok'): void {
+    this.toastKind = kind;
     this.toast = message;
     this.notify();
     setTimeout(() => {

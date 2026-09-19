@@ -34,7 +34,9 @@ export function App() {
       )}
       {store.createProjectOpen && <CreateProjectDialog />}
       <ResizeEdges />
-      {store.toast && <div className="toast">{store.toast}</div>}
+      {store.toast && (
+        <div className={`toast ${store.toastKind === 'err' ? 'err' : ''}`}>{store.toast}</div>
+      )}
     </div>
   );
 }

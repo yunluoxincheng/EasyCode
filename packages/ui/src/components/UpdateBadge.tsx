@@ -21,7 +21,7 @@ export function UpdateBadge() {
   useEffect(() => {
     if (p.kind === 'error' && p.message !== lastError.current) {
       lastError.current = p.message;
-      store.showToast(`检查更新失败：${p.message}`);
+      store.showToast(`检查更新失败：${p.message}`, 'err');
     }
   }, [p, store]);
 
