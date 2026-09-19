@@ -67,13 +67,6 @@ export function Sidebar() {
 
       <nav className="session-list">
         <div className="nav-mini-label">项目</div>
-        <button
-          className={`project-item ${store.activeProjectId === null ? 'active' : ''}`}
-          title="新会话将直接对话（可在输入区绑定项目）"
-          onClick={() => store.setActiveProject(null)}
-        >
-          <span className="project-item-name">不在项目中</span>
-        </button>
         {(store.settings?.projects ?? []).map((p) => (
           <button
             key={p.id}
