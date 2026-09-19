@@ -79,6 +79,11 @@ export class AppStore {
     return this.sessions.find((s) => s.id === this.activeId);
   }
 
+  /** 自动滚底开关（未配置视为开启） */
+  get autoScrollOn(): boolean {
+    return this.settings?.autoScroll !== false;
+  }
+
   get activeProject(): ProjectEntry | null {
     return this.settings?.projects.find((p) => p.id === this.activeProjectId) ?? null;
   }

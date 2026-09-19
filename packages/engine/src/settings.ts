@@ -33,6 +33,8 @@ export interface Settings {
   projects: ProjectEntry[];
   defaultProvider: string;
   defaultApprovalMode: ApprovalMode;
+  /** 发送/流式输出时自动滚到底部；默认开 */
+  autoScroll?: boolean;
 }
 
 /** 内置 Provider 预设：均为 OpenAI 兼容端点（或 Anthropic），API Key 留空由用户填写 */
@@ -79,6 +81,7 @@ export const DEFAULT_SETTINGS: Settings = {
   projects: [],
   defaultProvider: 'zhipu',
   defaultApprovalMode: 'ask',
+  autoScroll: true,
 };
 
 export function providerLabel(id: string, entry: ProviderEntry | undefined): string {

@@ -167,8 +167,9 @@ export function Transcript() {
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
+    if (!store.autoScrollOn) return;
     bottomRef.current?.scrollIntoView({ behavior: 'auto', block: 'end' });
-  }, [store.items]);
+  }, [store.version, store.autoScrollOn]);
 
   return (
     <main className="transcript">

@@ -468,6 +468,19 @@ export function SettingsPage() {
                   ))}
                 </div>
               </div>
+              <div className="field">
+                <span>发送消息后自动滚到底部</span>
+                <div className="auto-scroll-row">
+                  <button
+                    className={`switch ${draft.autoScroll !== false ? 'on' : ''}`}
+                    title={draft.autoScroll !== false ? '已开启（点击关闭）' : '已关闭（点击开启）'}
+                    onClick={() => patch({ autoScroll: draft.autoScroll === false })}
+                  >
+                    <span className="knob" />
+                  </button>
+                  <span className="auto-scroll-text">{draft.autoScroll !== false ? '开启' : '关闭'}</span>
+                </div>
+              </div>
               <p className="hint">
                 API Key 保存在本机设置文件中，不会上传。接入 Ollama / LM Studio 等本地服务可完全离线使用。
               </p>
