@@ -368,11 +368,11 @@ export class AgentServer {
     const source: Record<string, ProviderEntry> = { ...stored.providers };
     delete source.demo; // 演示供应商已从内置预设移除
     for (const [id, legacy] of Object.entries(source)) {
-      const { model: _m, models: _ms, ...rest } = legacy as ProviderEntry & {
-        model?: string;
-        models?: ProviderModel[];
-      };
-      providers[id] = { ...rest, models: [] };
+      const p = legacy as ProviderEntry & { model?: string };
+      // models 列表正常保留（自动获取/手动添加的结果）；仅丢弃 legacy 的单 model 字段
+      const models = Array.isArray(p.models) ? p.models : [];
+      const { model: _m, ...rest } = p;
+      providers[id] = { ...rest, models };
     }
     // 补齐新增内置预设（不覆盖用户已配置的）
     for (const [id, preset] of Object.entries(PROVIDER_PRESETS)) {
