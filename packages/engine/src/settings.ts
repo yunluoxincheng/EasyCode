@@ -22,6 +22,8 @@ export interface ProviderEntry {
   apiKey?: string;
   /** 该供应商可用的模型列表 */
   models?: ProviderModel[];
+  /** 模型上下文窗口大小（tokens），用于容量估算；缺省 128000 */
+  contextWindow?: number;
   /** 显示名称（供应商列表与新会话选择器中优先展示） */
   name?: string;
   /** 关闭后不出现在新会话的模型服务选择器中；缺省视为启用 */

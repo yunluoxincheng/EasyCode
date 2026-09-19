@@ -3,6 +3,7 @@ import { useStore } from '../useStore.js';
 import { ProjectSwitcher } from './ProjectSwitcher.js';
 import { ModelEffortPicker } from './ModelEffortPicker.js';
 import { UsageChip } from './UsageChip.js';
+import { ContextChip } from './ContextChip.js';
 
 export function Composer() {
   const store = useStore();
@@ -48,6 +49,7 @@ export function Composer() {
         {session && <ProjectSwitcher />}
         {session && <ModelEffortPicker />}
         {session && <UsageChip />}
+        {session && <ContextChip />}
         <span className="spacer" />
         {store.running && <span className="running-dot" title="Agent 运行中" />}
       </div>

@@ -333,6 +333,19 @@ export function SettingsPage() {
                       {isMock ? (
                         <p className="hint">演示协议无需配置模型。</p>
                       ) : (
+                        <>
+                        <label className="field">
+                          <span>上下文窗口（tokens）</span>
+                          <input
+                            type="number"
+                            value={p.contextWindow ?? 128000}
+                            onChange={(e) =>
+                              patchProvider(id, {
+                                contextWindow: Number(e.target.value) || undefined,
+                              })
+                            }
+                          />
+                        </label>
                         <div className="field">
                           <div className="models-head">
                             <span>模型列表</span>
@@ -411,6 +424,7 @@ export function SettingsPage() {
                             )}
                           </div>
                         </div>
+                        </>
                       )}
 
                       {!isBuiltin && (
