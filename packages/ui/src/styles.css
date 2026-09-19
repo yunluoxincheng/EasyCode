@@ -992,23 +992,35 @@ select:focus-visible,
   width: 100%;
   appearance: none;
   -webkit-appearance: none;
-  height: 6px;
-  border-radius: 3px;
+  height: 12px;
+  border-radius: 6px;
   background: linear-gradient(90deg, var(--green-dim), var(--green));
   outline: none;
-  margin: 6px 0 4px;
+  margin: 10px 0 8px;
+  cursor: pointer;
 }
 .effort-slider::-webkit-slider-thumb {
   appearance: none;
   -webkit-appearance: none;
-  width: 18px;
-  height: 18px;
+  width: 26px;
+  height: 26px;
   border-radius: 50%;
   background: #eafff2;
-  border: 2px solid var(--green);
-  box-shadow: 0 0 10px rgba(74, 222, 128, .5);
-  cursor: pointer;
+  border: 3px solid var(--green);
+  box-shadow: 0 0 14px rgba(74, 222, 128, .55);
+  cursor: grab;
 }
+.effort-slider::-webkit-slider-thumb:active { cursor: grabbing; transform: scale(1.08); }
+.effort-slider::-moz-range-thumb {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: #eafff2;
+  border: 3px solid var(--green);
+  box-shadow: 0 0 14px rgba(74, 222, 128, .55);
+  cursor: grab;
+}
+.effort-slider::-moz-range-track { height: 12px; border-radius: 6px; }
 .effort-ticks { display: flex; justify-content: space-between; }
 .effort-ticks span { color: var(--faint); font-size: 10px; font-family: var(--font); }
 .effort-ticks span.on { color: var(--green); font-weight: 700; }
