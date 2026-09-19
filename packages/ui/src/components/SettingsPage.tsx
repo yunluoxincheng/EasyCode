@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useMemo, useState } from 'react';
 import { useStore } from '../useStore.js';
 import { TerminalSelect } from './TerminalSelect.js';
+import { UpdateSection } from './UpdateSection.js';
 import { PROVIDER_PRESETS, providerLabel } from '@easycode/engine';
 import type { ProviderEntry, ProviderModel, Settings } from '@easycode/engine';
 import type { SettingsSection } from '../store.js';
@@ -498,6 +499,7 @@ export function SettingsPage() {
                 </tbody>
               </table>
               <p className="hint">Agent 能力：读写文件 · 目录浏览 · 正则搜索 · 执行命令 · 审批门 · 流式输出</p>
+              <UpdateSection />
             </div>
           </>
         )}

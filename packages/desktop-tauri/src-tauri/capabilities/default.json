@@ -1,6 +1,6 @@
 {
   "identifier": "default",
-  "description": "EasyCode 主窗口能力：核心权限 + 窗口控制/拖拽/缩放 + 文件夹选择对话框",
+  "description": "EasyCode 主窗口能力：核心 + 窗口控制 + 对话框 + 自动更新",
   "windows": ["main"],
   "permissions": [
     "core:default",
@@ -9,6 +9,8 @@
     "core:window:allow-toggle-maximize",
     "core:window:allow-close",
     "core:window:allow-start-dragging",
-    "core:window:allow-start-resize-dragging"
+    "core:window:allow-start-resize-dragging",
+    "updater:default",
+    "process:default"
   ]
 }

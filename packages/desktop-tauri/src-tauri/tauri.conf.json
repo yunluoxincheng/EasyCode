@@ -8,6 +8,14 @@
     "beforeDevCommand": "pnpm --filter @easycode/ui run dev",
     "beforeBuildCommand": "pnpm --filter @easycode/ui run build"
   },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/yunluoxincheng/EasyCode/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEZGMzkzNEQ0OUYxM0JGMkQKUldRdHZ4T2YxRFE1LzRueUE3YXAxNGUrQ2h4am4xUkN3ZFZZalhhcldQMzJyWExYckVGTDFtUFoK"
+    }
+  },
   "app": {
     "windows": [
       {
