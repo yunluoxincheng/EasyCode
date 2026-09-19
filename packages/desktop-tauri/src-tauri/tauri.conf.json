@@ -1,6 +1,6 @@
 {
   "productName": "EasyCode",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "identifier": "com.easycode.desktop",
   "build": {
     "frontendDist": "../../ui/dist",
