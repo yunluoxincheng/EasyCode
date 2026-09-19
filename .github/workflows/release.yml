@@ -40,6 +40,7 @@ jobs:
         with:
           workspaces: packages/desktop-tauri/src-tauri
 
+
       - name: Linux deps
         if: matrix.platform == 'ubuntu-22.04'
         run: |
@@ -64,6 +65,3 @@ jobs:
           projectPath: packages/desktop-tauri
           args: ${{ matrix.platform == 'macos-latest' && '--target universal-apple-darwin' || '' }}
 
-      - name: Setup macOS universal target
-        if: matrix.platform == 'macos-latest'
-        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin

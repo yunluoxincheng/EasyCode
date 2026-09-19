@@ -6,7 +6,7 @@
     "frontendDist": "../../ui/dist",
     "devUrl": "http://localhost:5183",
     "beforeDevCommand": "pnpm --filter @easycode/ui run dev",
-    "beforeBuildCommand": "pnpm --filter @easycode/ui run build"
+    "beforeBuildCommand": "pnpm -r run build"
   },
   "plugins": {
     "updater": {
