@@ -1057,7 +1057,15 @@ select:focus-visible,
 .sidebar-bottom-row { display: flex; gap: 6px; align-items: center; }
 .sidebar-bottom-row .btn.ghost.block { flex: 1; }
 .update-badge { position: relative; }
-.update-btn { width: 38px; text-align: center; padding-left: 0; padding-right: 0; }
+.update-btn {
+  width: 36px;
+  min-width: 36px;
+  text-align: center;
+  padding-left: 0;
+  padding-right: 0;
+  white-space: nowrap;
+}
+.update-btn::before, .update-btn::after { content: none !important; }
 .update-btn.hot { color: var(--green); border-color: var(--green-dim); animation: pulse 1.6s infinite; }
 .update-btn.danger { color: var(--red); border-color: var(--red); }
 .update-pop {
