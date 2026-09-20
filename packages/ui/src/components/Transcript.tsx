@@ -247,13 +247,21 @@ function TurnView({ turn }: { turn: TurnItem }) {
 
   return (
     <div className={`turn ${expanded ? 'expanded' : 'collapsed'}`} data-anchor={turn.id}>
-      <button className="turn-head" onClick={() => store.toggleTurn(turn.id)}>
-        <span className="turn-caret">{expanded ? '▾' : '▸'}</span>
-        <span>
-          用时 {fmtDuration(elapsed)}
-          {live && <span className="turn-live"> · 运行中</span>}
-        </span>
-      </button>
+      <div className="turn-head">
+        <button
+          className="turn-head-toggle"
+          onClick={() => store.toggleTurn(turn.id)}
+          title={expanded ? '折叠过程' : '展开过程'}
+        >
+          <span className="turn-caret">{expanded ? '▾' : '▸'}</span>
+          <span>
+            用时 {fmtDuration(elapsed)}
+            {live && <span className="turn-live"> · 运行中</span>}
+          </span>
+        </button>
+        <span className="spacer" />
+        {finalText && <CopyButton text={finalText} />}
+      </div>
       {expanded && (
         <div className="turn-body">
           {turn.items.map((it) => (
@@ -263,7 +271,6 @@ function TurnView({ turn }: { turn: TurnItem }) {
       )}
       {!expanded && (
         <div className="turn-final">
-          <CopyButton text={finalText} />
           {finalText ? <Md text={finalText} /> : null}
           {errors.map((e) => (
             <div key={e.id} className="error-line">
@@ -280,8 +287,11 @@ export function Transcript() {
   const store = useStore();
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
-  const [ticks, setTicks] = useState<{ id: string; top: number; text: string }[]>([]);
-  const [hover, setHover] = useState<{ top: number; text: string } | null>(null);
+  const railRef = useRef<HTMLDivElement>(null);
+  const [hover, setHover] = useState<{ frac: number; text: string } | null>(null);
+  const [posFrac, setPosFrac] = useState(0);
+  const [tickCount, setTickCount] = useState(0);
+  const anchorsRef = useRef<{ top: number; text: string }[]>([]);
 
   // 仅发送消息与切换会话时滚到底部；流式输出/工具事件不滚动（#3）
   useEffect(() => {
@@ -289,47 +299,87 @@ export function Transcript() {
     bottomRef.current?.scrollIntoView({ behavior: 'auto', block: 'end' });
   }, [store.scrollTick, store.activeId, store.autoScrollOn]);
 
-  // 时间线轨道刻度：按用户消息锚点在滚动内容中的比例定位
+  /** 测量：锚点位置（预览/跳转用）+ 当前滚动比例（刻度高亮用） */
+  const measure = (): void => {
+    const el = scrollRef.current;
+    const rail = railRef.current;
+    if (!el || !rail) return;
+    const maxScroll = el.scrollHeight - el.clientHeight;
+    setPosFrac(maxScroll > 0 ? el.scrollTop / maxScroll : 0);
+    anchorsRef.current = [...el.querySelectorAll<HTMLElement>('[data-anchor]')].map((n) => ({
+      top: n.offsetTop,
+      // 优先取正文（排除复制按钮等操作文本）
+      text: (n.querySelector('.msg-content, .turn-final') ?? n).textContent?.slice(0, 200) ?? '',
+    }));
+    setTickCount(Math.max(2, Math.floor(rail.clientHeight / 22)));
+  };
+
+  useEffect(() => {
+    measure();
+  }, [store.version, store.activeId]);
+
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
-    const H = el.scrollHeight;
-    const list: { id: string; top: number; text: string }[] = [];
-    el.querySelectorAll<HTMLElement>('[data-anchor]').forEach((n) => {
-      list.push({
-        id: n.dataset.anchor ?? '',
-        top: H > 0 ? ((n.offsetTop + n.offsetHeight / 2) / H) * 100 : 0,
-        text: (n.textContent ?? '').slice(0, 200),
-      });
-    });
-    setTicks(list);
-  }, [store.version, store.activeId]);
+    const onScroll = (): void => {
+      const maxScroll = el.scrollHeight - el.clientHeight;
+      setPosFrac(maxScroll > 0 ? el.scrollTop / maxScroll : 0);
+    };
+    el.addEventListener('scroll', onScroll);
+    return () => el.removeEventListener('scroll', onScroll);
+  }, []);
 
-  const jumpTo = (id: string): void => {
-    scrollRef.current
-      ?.querySelector(`[data-anchor="${id}"]`)
-      ?.scrollIntoView({ behavior: 'auto', block: 'start' });
+  useEffect(() => {
+    const rail = railRef.current;
+    if (!rail) return;
+    const ro = new ResizeObserver(() => measure());
+    ro.observe(rail);
+    return () => ro.disconnect();
+  }, []);
+
+  /** 该滚动比例处可见的内容锚点文本 */
+  const anchorAtFrac = (frac: number): string => {
+    const el = scrollRef.current;
+    if (!el) return '';
+    const maxScroll = el.scrollHeight - el.clientHeight;
+    const probe = frac * Math.max(0, maxScroll) + el.clientHeight * 0.4;
+    let best = '';
+    for (const a of anchorsRef.current) {
+      if (a.top <= probe) best = a.text;
+      else break;
+    }
+    return best;
   };
+
+  const scrollToFraction = (frac: number): void => {
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollTop = frac * Math.max(0, el.scrollHeight - el.clientHeight);
+  };
+
+  const count = Math.max(2, tickCount);
+  const ticks: number[] = Array.from({ length: count }, (_, i) => i / (count - 1));
+  const curIdx = posFrac > 0 ? Math.round(posFrac * (count - 1)) : 0;
 
   return (
     <main className="transcript has-rail">
-      <div className="rail">
-        {ticks.map((t) => (
+      <div className="rail" ref={railRef}>
+        {ticks.map((f, i) => (
           <div
-            key={t.id}
-            className="rail-tick"
-            style={{ top: `${Math.min(97, Math.max(2, t.top))}%` }}
-            onMouseEnter={() => setHover({ top: t.top, text: t.text })}
+            key={f}
+            className={`rail-tick ${i === curIdx ? 'current' : ''}`}
+            style={{ top: `${f * 100}%` }}
+            onMouseEnter={() => setHover({ frac: f, text: anchorAtFrac(f) })}
             onMouseLeave={() => setHover(null)}
-            onClick={() => jumpTo(t.id)}
+            onClick={() => scrollToFraction(f)}
           />
         ))}
         {hover && (
           <div
             className="rail-preview"
-            style={{ top: `calc(${Math.min(85, Math.max(3, hover.top))}% - 12px)` }}
+            style={{ top: `calc(${Math.min(85, Math.max(3, hover.frac * 100))}% - 12px)` }}
           >
-            {hover.text}
+            {hover.text || '（此处无内容）'}
           </div>
         )}
       </div>
