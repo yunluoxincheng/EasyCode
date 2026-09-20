@@ -27,6 +27,17 @@ export interface LoopResult {
   errorMessage?: string;
 }
 
+/** 为消息补 id/createdAt（UI 锚点与回合分组用；wire 格式会忽略这些字段） */
+function stamp(
+  msg: ChatMessage & { id?: string; createdAt?: string },
+): ChatMessage & { id?: string; createdAt?: string } {
+  return {
+    ...msg,
+    id: `m_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+    createdAt: new Date().toISOString(),
+  };
+}
+
 /**
  * Agent 主循环：流式生成 → 执行工具 → 结果回传，直至模型不再调用工具。
  * 单一轮次入口，由上层（engine 的会话服务）驱动。
@@ -66,7 +77,7 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
         },
       });
 
-      messages.push({ role: 'assistant', blocks: turn.blocks });
+      messages.push(stamp({ role: 'assistant', blocks: turn.blocks }));
       emit({ type: 'step_end', usage: turn.usage });
 
       const calls = extractToolCalls(turn.blocks);
@@ -98,7 +109,7 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
           content: execution.content,
           isError: execution.isError,
         };
-        messages.push(resultMessage);
+        messages.push(stamp(resultMessage));
       }
     }
     return finish(

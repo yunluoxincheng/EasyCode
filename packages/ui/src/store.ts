@@ -6,28 +6,40 @@ export type ViewBlock = { type: 'text' | 'thinking'; text: string };
 export type ViewName = 'chat' | 'settings';
 export type SettingsSection = 'models' | 'websearch' | 'general' | 'about';
 
-export type TranscriptItem =
-  | { kind: 'user'; id: string; text: string }
-  | { kind: 'assistant'; id: string; blocks: ViewBlock[] }
-  | {
-      kind: 'tool';
-      id: string;
-      callId: string;
-      name: string;
-      input: unknown;
-      status: 'running' | 'ok' | 'error' | 'denied';
-      result?: string;
-      durationMs?: number;
-    }
-  | {
-      kind: 'approval';
-      id: string;
-      requestId: string;
-      name: string;
-      input: unknown;
-      status: 'pending' | 'approved' | 'denied';
-    }
-  | { kind: 'error'; id: string; message: string };
+export type UserItem = { kind: 'user'; id: string; text: string; ts?: number };
+export type AssistantItem = { kind: 'assistant'; id: string; blocks: ViewBlock[] };
+export type ToolItem = {
+  kind: 'tool';
+  id: string;
+  callId: string;
+  name: string;
+  input: unknown;
+  status: 'running' | 'ok' | 'error' | 'denied';
+  result?: string;
+  durationMs?: number;
+};
+export type ApprovalItem = {
+  kind: 'approval';
+  id: string;
+  requestId: string;
+  name: string;
+  input: unknown;
+  status: 'pending' | 'approved' | 'denied';
+};
+export type ErrorItem = { kind: 'error'; id: string; message: string };
+
+/** 一个回合：一次发送的完整执行（思考 + 工具调用 + 中间说明 + 最终回答） */
+export type TurnItem = {
+  kind: 'turn';
+  id: string;
+  startedAt: number;
+  durationMs?: number;
+  /** 折叠时只显示最终结果；运行中默认展开 */
+  collapsed: boolean;
+  items: (AssistantItem | ToolItem | ApprovalItem | ErrorItem)[];
+};
+
+export type TranscriptItem = UserItem | TurnItem;
 
 /**
  * 应用状态仓库（框架无关，React 通过 useSyncExternalStore 订阅）。
@@ -166,6 +178,7 @@ export class AppStore {
     this.activeId = id;
     this.view = 'chat';
     this.lastUsage = null;
+    this.currentTurn = null;
     const data = await this.client.getSession(id);
     this.items = this.itemsFromSession(data);
     // 同步该会话实际的审批模式到输入区（新会话用设置默认值）
@@ -224,18 +237,54 @@ export class AppStore {
 
   private itemsFromSession(data: SessionData): TranscriptItem[] {
     const items: TranscriptItem[] = [];
-    const toolById = new Map<string, Extract<TranscriptItem, { kind: 'tool' }>>();
+    const toolById = new Map<string, ToolItem>();
+    let turn: TurnItem | null = null;
+    let firstTs: number | undefined;
+    let lastTs: number | undefined;
+    const toTs = (iso?: string): number | undefined => (iso ? Date.parse(iso) : undefined);
+
+    const closeTurn = (): void => {
+      if (turn) {
+        if (firstTs != null && lastTs != null && lastTs >= firstTs) {
+          turn.durationMs = lastTs - firstTs;
+        }
+        turn = null;
+        firstTs = undefined;
+        lastTs = undefined;
+      }
+    };
+    const ensureTurn = (ts?: number): TurnItem => {
+      if (!turn) {
+        turn = { kind: 'turn', id: this.nextId(), startedAt: ts ?? Date.now(), collapsed: true, items: [] };
+        items.push(turn);
+      }
+      if (ts != null) {
+        firstTs = firstTs ?? ts;
+        lastTs = ts;
+      }
+      return turn;
+    };
+
     for (const msg of data.messages) {
       if (msg.role === 'user') {
-        items.push({ kind: 'user', id: this.nextId(), text: msg.content });
-      } else if (msg.role === 'assistant') {
+        closeTurn();
+        items.push({
+          kind: 'user',
+          id: this.nextId(),
+          text: msg.content,
+          ts: toTs(msg.createdAt),
+        });
+        continue;
+      }
+      const t = ensureTurn(toTs(msg.createdAt));
+      if (msg.role === 'assistant') {
         const view: ViewBlock[] = [];
-        const toolItems: Extract<TranscriptItem, { kind: 'tool' }>[] = [];
+        const toolItems: ToolItem[] = [];
         for (const block of msg.blocks) {
           if (block.type === 'text') view.push({ type: 'text', text: block.text });
           else if (block.type === 'thinking') view.push({ type: 'thinking', text: block.text });
           else if (block.type === 'tool_call') {
-            const item: Extract<TranscriptItem, { kind: 'tool' }> = {
+            const item: ToolItem = {
               kind: 'tool',
               id: this.nextId(),
               callId: block.id,
@@ -249,17 +298,19 @@ export class AppStore {
         }
         // 助手文本在前，工具卡片随后（与实时事件顺序一致）
         if (view.length > 0) {
-          items.push({ kind: 'assistant', id: this.nextId(), blocks: view });
+          t.items.push({ kind: 'assistant', id: this.nextId(), blocks: view });
         }
-        items.push(...toolItems);
+        t.items.push(...toolItems);
       } else {
         const tool = toolById.get(msg.toolCallId);
         if (tool) {
           tool.status = msg.isError ? 'error' : msg.content.includes('用户拒绝') ? 'denied' : 'ok';
           tool.result = msg.content;
         }
+        lastTs = toTs(msg.createdAt) ?? lastTs;
       }
     }
+    closeTurn();
     return items;
   }
 
@@ -288,19 +339,34 @@ export class AppStore {
     this.notify();
   }
 
+  /** 发送时递增，驱动会话区滚动到底部（流式输出与工具事件不触发滚动） */
+  scrollTick = 0;
+
   async send(text: string): Promise<void> {
     if (!this.activeId || this.running || !text.trim()) return;
     this.running = true;
-    this.items.push({ kind: 'user', id: this.nextId(), text: text.trim() });
+    this.items.push({ kind: 'user', id: this.nextId(), text: text.trim(), ts: Date.now() });
+    const turn: TurnItem = {
+      kind: 'turn',
+      id: this.nextId(),
+      startedAt: Date.now(),
+      collapsed: false,
+      items: [],
+    };
+    this.items.push(turn);
+    this.currentTurn = turn;
+    if (this.autoScrollOn) this.scrollTick++;
     this.notify();
     try {
       await this.client.sendMessage(this.activeId, text.trim());
     } catch (err) {
-      this.items.push({
+      const errorItem: ErrorItem = {
         kind: 'error',
         id: this.nextId(),
         message: err instanceof Error ? err.message : String(err),
-      });
+      };
+      if (this.currentTurn) this.currentTurn.items.push(errorItem);
+      else this.items.push(errorItem);
       this.running = false;
       this.notify();
     }
@@ -314,6 +380,17 @@ export class AppStore {
   async stop(): Promise<void> {
     if (!this.activeId) return;
     await this.client.abort(this.activeId);
+  }
+
+  /** 展开/折叠一个回合 */
+  toggleTurn(turnId: string): void {
+    const turn = this.items.find(
+      (i): i is TurnItem => i.kind === 'turn' && i.id === turnId,
+    );
+    if (turn) {
+      turn.collapsed = !turn.collapsed;
+      this.notify();
+    }
   }
 
   async setMode(mode: ApprovalMode): Promise<void> {
@@ -348,6 +425,18 @@ export class AppStore {
 
   /* ---------------- 事件归约 ---------------- */
 
+  currentTurn: TurnItem | null = null;
+
+  /** 事件产生的条目进入当前回合 */
+  private pushToTurn(item: AssistantItem | ToolItem | ApprovalItem | ErrorItem): void {
+    if (this.currentTurn) this.currentTurn.items.push(item);
+    else this.items.push(item as TranscriptItem);
+  }
+
+  private findInTurn<T extends TranscriptItem>(pred: (i: TranscriptItem) => i is T): T | undefined {
+    return (this.currentTurn?.items ?? []).find(pred);
+  }
+
   handleEvent(event: AgentEvent): void {
     switch (event.type) {
       case 'assistant_start':
@@ -366,7 +455,7 @@ export class AppStore {
       }
       case 'tool_call_start':
         this.flushAssistant();
-        this.items.push({
+        this.pushToTurn({
           kind: 'tool',
           id: this.nextId(),
           callId: event.call.id,
@@ -376,9 +465,8 @@ export class AppStore {
         });
         break;
       case 'tool_result': {
-        const tool = this.items.find(
-          (i): i is Extract<TranscriptItem, { kind: 'tool' }> =>
-            i.kind === 'tool' && i.callId === event.callId,
+        const tool = this.findInTurn(
+          (i): i is ToolItem => i.kind === 'tool' && i.callId === event.callId,
         );
         if (tool) {
           tool.status = event.isError ? 'error' : event.content.includes('用户拒绝') ? 'denied' : 'ok';
@@ -389,7 +477,7 @@ export class AppStore {
       }
       case 'approval_request':
         this.flushAssistant();
-        this.items.push({
+        this.pushToTurn({
           kind: 'approval',
           id: this.nextId(),
           requestId: event.requestId,
@@ -399,8 +487,8 @@ export class AppStore {
         });
         break;
       case 'approval_resolved': {
-        const approval = this.items.find(
-          (i): i is Extract<TranscriptItem, { kind: 'approval' }> =>
+        const approval = this.findInTurn(
+          (i): i is ApprovalItem =>
             i.kind === 'approval' && i.requestId === event.requestId,
         );
         if (approval) approval.status = event.approved ? 'approved' : 'denied';
@@ -419,19 +507,24 @@ export class AppStore {
         break;
       case 'error':
         this.flushAssistant();
-        this.items.push({ kind: 'error', id: this.nextId(), message: event.message });
+        this.pushToTurn({ kind: 'error', id: this.nextId(), message: event.message });
         break;
       case 'done':
         this.flushAssistant();
+        if (this.currentTurn) {
+          this.currentTurn.durationMs = Date.now() - this.currentTurn.startedAt;
+          this.currentTurn.collapsed = true;
+          this.currentTurn = null;
+        }
         this.running = false;
         break;
     }
     this.notify();
   }
 
-  private currentAssistant: Extract<TranscriptItem, { kind: 'assistant' }> | null = null;
+  private currentAssistant: AssistantItem | null = null;
 
-  private ensureAssistant(): Extract<TranscriptItem, { kind: 'assistant' }> {
+  private ensureAssistant(): AssistantItem {
     if (!this.currentAssistant) {
       this.currentAssistant = { kind: 'assistant', id: this.nextId(), blocks: [] };
     }
@@ -439,7 +532,7 @@ export class AppStore {
   }
 
   private appendToBlock(
-    item: Extract<TranscriptItem, { kind: 'assistant' }>,
+    item: AssistantItem,
     type: 'text' | 'thinking',
     delta: string,
   ): void {
@@ -447,13 +540,17 @@ export class AppStore {
     if (last && last.type === type) last.text += delta;
     else item.blocks.push({ type, text: delta });
     // 首个内容到达时入列
-    if (!this.items.includes(item)) this.items.push(item);
+    if (this.currentTurn && !this.currentTurn.items.includes(item)) {
+      this.currentTurn.items.push(item);
+    }
   }
 
   /** 当前流式助手消息落盘成普通条目 */
   private flushAssistant(): void {
     if (this.currentAssistant && this.currentAssistant.blocks.length > 0) {
-      if (!this.items.includes(this.currentAssistant)) this.items.push(this.currentAssistant);
+      if (this.currentTurn && !this.currentTurn.items.includes(this.currentAssistant)) {
+        this.currentTurn.items.push(this.currentAssistant);
+      }
     }
     this.currentAssistant = null;
   }

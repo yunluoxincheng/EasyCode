@@ -46,14 +46,24 @@ export function ContextChip() {
   // 分类精确计数
   const rows: Array<{ label: string; tokens: number }> = [];
   let msgTokens = 0;
+  const countTurnItems = (items: { kind: string }[]): void => {
+    for (const it of items) {
+      if (it.kind === 'assistant') {
+        for (const b of (it as unknown as { blocks: { type: string; text: string }[] }).blocks) {
+          msgTokens += count(b.text);
+        }
+      } else if (it.kind === 'tool') {
+        const t = it as unknown as { input: unknown; result?: string };
+        msgTokens += count(JSON.stringify(t.input ?? {}));
+        msgTokens += count(t.result ?? '');
+      } else if (it.kind === 'approval') {
+        msgTokens += count(JSON.stringify((it as unknown as { input: unknown }).input ?? {}));
+      }
+    }
+  };
   for (const it of store.items) {
     if (it.kind === 'user') msgTokens += count(it.text);
-    else if (it.kind === 'assistant')
-      for (const b of it.blocks) msgTokens += count(b.text);
-    else if (it.kind === 'tool') {
-      msgTokens += count(JSON.stringify(it.input ?? {}));
-      msgTokens += count(it.result ?? '');
-    } else if (it.kind === 'approval') msgTokens += count(JSON.stringify(it.input ?? {}));
+    else if (it.kind === 'turn') countTurnItems(it.items);
   }
   rows.push({ label: '消息', tokens: msgTokens });
 

@@ -170,7 +170,12 @@ export class AgentServer {
     if (rt.data.messages.length === 0) {
       rt.data.meta.title = content.slice(0, 30) + (content.length > 30 ? '…' : '');
     }
-    rt.data.messages.push({ role: 'user', content });
+    rt.data.messages.push({
+      role: 'user',
+      content,
+      id: `m_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+      createdAt: new Date().toISOString(),
+    });
     rt.data.meta.updatedAt = new Date().toISOString();
 
     rt.running = true;

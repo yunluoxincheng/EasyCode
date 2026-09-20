@@ -1,5 +1,6 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useStore } from '../useStore.js';
+import type { UserItem } from '../store.js';
 import { ProjectSwitcher } from './ProjectSwitcher.js';
 import { ModelEffortPicker } from './ModelEffortPicker.js';
 import { UsageChip } from './UsageChip.js';
@@ -8,10 +9,18 @@ import { ContextChip } from './ContextChip.js';
 export function Composer() {
   const store = useStore();
   const [text, setText] = useState('');
+  const taRef = useRef<HTMLTextAreaElement>(null);
+  /** ↑/↓ 浏览历史的状态：会话切换或发送后重置 */
+  const historyRef = useRef<{ list: string[]; index: number; draft: string } | null>(null);
+
+  useEffect(() => {
+    historyRef.current = null;
+  }, [store.activeId]);
 
   const submit = () => {
     const t = text;
     setText('');
+    historyRef.current = null;
     store.send(t);
   };
 
@@ -19,6 +28,38 @@ export function Composer() {
     if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault();
       submit();
+      return;
+    }
+    // ↑/↓ 浏览已发送消息：光标在首行/末行时生效（多行编辑不受影响）
+    if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+      const ta = e.currentTarget;
+      const pos = ta.selectionStart ?? 0;
+      const atFirst = !ta.value.slice(0, pos).includes('\n');
+      const atLast = !ta.value.slice(pos).includes('\n');
+      if (e.key === 'ArrowUp' && !atFirst) return;
+      if (e.key === 'ArrowDown' && !atLast) return;
+
+      const list = store.items
+        .filter((i): i is UserItem => i.kind === 'user')
+        .map((i) => i.text)
+        .reverse();
+      if (list.length === 0) return;
+
+      if (!historyRef.current) historyRef.current = { list, index: -1, draft: ta.value };
+      const h = historyRef.current;
+      const next = h.index + (e.key === 'ArrowUp' ? 1 : -1);
+      if (next < -1 || next >= h.list.length) {
+        e.preventDefault();
+        return;
+      }
+      h.index = next;
+      const value = next === -1 ? h.draft : h.list[next];
+      setText(value);
+      e.preventDefault();
+      requestAnimationFrame(() => {
+        const el = taRef.current;
+        if (el) el.selectionStart = el.selectionEnd = el.value.length;
+      });
     }
   };
 
@@ -55,6 +96,7 @@ export function Composer() {
       </div>
       <div className="composer-input">
         <textarea
+          ref={taRef}
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={onKeyDown}

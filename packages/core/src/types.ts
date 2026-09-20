@@ -19,10 +19,16 @@ export type AssistantBlock = TextBlock | ThinkingBlock | ToolCallBlock;
 export interface UserMessage {
   role: 'user';
   content: string;
+  /** 会话内唯一标识（UI 锚点/编辑定位用） */
+  id?: string;
+  /** ISO 时间戳 */
+  createdAt?: string;
 }
 export interface AssistantMessage {
   role: 'assistant';
   blocks: AssistantBlock[];
+  id?: string;
+  createdAt?: string;
 }
 export interface ToolResultMessage {
   role: 'tool_result';
@@ -30,6 +36,8 @@ export interface ToolResultMessage {
   toolName: string;
   content: string;
   isError?: boolean;
+  id?: string;
+  createdAt?: string;
 }
 export type ChatMessage = UserMessage | AssistantMessage | ToolResultMessage;
 
