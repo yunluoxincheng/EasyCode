@@ -85,7 +85,16 @@ export class AppStore {
 
   getSnapshot = (): number => this.version;
 
-  constructor(readonly client: AgentClient) {}
+  private inited = false;
+
+  constructor(readonly client: AgentClient) {
+    // 事件订阅放构造函数：store 是页面级单例，只订阅一次。
+    // 此前放在 init() 且不退订，StrictMode 双挂载会注册两份监听，每个事件处理两遍
+    // （表现为工具卡片成对出现、文本增量重复追加），仅 dev 构建可见。
+    this.client.onEvent(({ sessionId, event }) => {
+      if (sessionId === this.activeId) this.handleEvent(event);
+    });
+  }
 
   notify(): void {
     this.version++;
@@ -166,10 +175,9 @@ export class AppStore {
   /* ---------------- 初始化与加载 ---------------- */
 
   async init(): Promise<void> {
+    if (this.inited) return; // StrictMode 双挂载防重入
+    this.inited = true;
     this.demoMode = !('easycode' in window) && !('__TAURI_INTERNALS__' in window);
-    this.client.onEvent(({ sessionId, event }) => {
-      if (sessionId === this.activeId) this.handleEvent(event);
-    });
     this.sessions = await this.client.listSessions();
     if (this.sessions.length > 0) {
       await this.selectSession(this.sessions[0].id);
