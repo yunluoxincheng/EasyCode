@@ -172,6 +172,7 @@ export class OpenAICompatibleProvider implements Provider {
     if (thinkingParts.length > 0) blocks.push({ type: 'thinking', text: thinkingParts.join('') });
     if (textParts.length > 0) blocks.push({ type: 'text', text: textParts.join('') });
     const toolIds = new Set<string>();
+    const emitted: Array<{ id: string; name: string; raw: string }> = [];
     for (const [, slot] of [...pendingTools.entries()].sort((a, b) => a[0] - b[0])) {
       let input: unknown = {};
       if (slot.arguments.trim()) {
@@ -181,6 +182,14 @@ export class OpenAICompatibleProvider implements Provider {
           input = { _raw: slot.arguments, _parse_error: true };
         }
       }
+      // 部分网关会把并行调用整个重复发一遍（复制分片、index+1、id 与内容原样照抄）：
+      // id、名称、参数逐字一致即判定为重复分片，丢弃，避免同一工作执行两遍
+      if (
+        slot.id &&
+        emitted.some((c) => c.id === slot.id && c.name === slot.name && c.raw === slot.arguments)
+      ) {
+        continue;
+      }
       const call: ToolCallBlock = {
         type: 'tool_call',
         // 部分网关的并行调用会给出重复或空 id：原地重生成，保证回合内唯一
@@ -188,6 +197,7 @@ export class OpenAICompatibleProvider implements Provider {
         name: slot.name || 'unknown',
         input,
       };
+      emitted.push({ id: slot.id, name: slot.name, raw: slot.arguments });
       toolIds.add(call.id);
       blocks.push(call);
     }
