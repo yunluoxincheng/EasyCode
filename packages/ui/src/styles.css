@@ -281,7 +281,6 @@ body::after {
 
 /* 用户消息 = 提示符行 */
 .msg { margin-bottom: 14px; display: flex; }
-.msg.user { flex-direction: row; }
 .msg.user { align-items: flex-end; }
 .msg.user .msg-content {
   background: var(--panel2);
