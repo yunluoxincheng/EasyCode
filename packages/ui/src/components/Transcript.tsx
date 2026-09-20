@@ -360,18 +360,15 @@ export function Transcript() {
           <div
             key={ex.anchorId}
             className={`rail-tick ${i === Math.min(highlight, exchanges.length - 1) ? 'current' : ''}`}
-            style={{ top: `${exchanges.length === 1 ? 50 : ((i + 0.5) / exchanges.length) * 100}%` }}
+            style={{ top: `${i * 14 + 7}px` }}
             title={ex.userText}
-            onMouseEnter={() => setHover({ top: ((i + 0.5) / exchanges.length) * 100, text: ex.preview })}
+            onMouseEnter={() => setHover({ top: i * 14 + 7, text: ex.preview })}
             onMouseLeave={() => setHover(null)}
             onClick={() => jumpTo(ex.anchorId)}
           />
         ))}
         {hover && (
-          <div
-            className="rail-preview"
-            style={{ top: `calc(${Math.min(80, Math.max(3, hover.top))}% - 12px)` }}
-          >
+          <div className="rail-preview" style={{ top: `${hover.top}px` }}>
             {hover.text}
           </div>
         )}
