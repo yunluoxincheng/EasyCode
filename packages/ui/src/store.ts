@@ -516,9 +516,12 @@ export class AppStore {
         });
         break;
       case 'tool_result': {
-        const tool = this.findInTurn(
-          (i): i is ToolItem => i.kind === 'tool' && i.callId === event.callId,
-        );
+        // 同一回合可能出现相同 callId 的并行调用：优先匹配仍在运行的那张卡片
+        const tool =
+          this.findInTurn(
+            (i): i is ToolItem => i.kind === 'tool' && i.callId === event.callId && i.status === 'running',
+          ) ??
+          this.findInTurn((i): i is ToolItem => i.kind === 'tool' && i.callId === event.callId);
         if (tool) {
           tool.status = event.isError ? 'error' : event.content.includes('用户拒绝') ? 'denied' : 'ok';
           tool.result = event.content;

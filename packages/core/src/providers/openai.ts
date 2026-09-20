@@ -99,6 +99,7 @@ export class OpenAICompatibleProvider implements Provider {
     const textParts: string[] = [];
     const thinkingParts: string[] = [];
     const pendingTools = new Map<number, PendingToolCall>();
+    const implicitSlots = new Map<string, number>();
     let usage: TurnResult['usage'];
     let stopReason: string | undefined;
 
@@ -138,7 +139,19 @@ export class OpenAICompatibleProvider implements Provider {
         ctx.emit({ type: 'reasoning_delta', delta: choice.delta.reasoning_content });
       }
       for (const tc of choice?.delta?.tool_calls ?? []) {
-        const index = tc.index ?? 0;
+        // 部分网关流式并行调用不带 index：按 id 分槽，避免并成一路
+        let index = tc.index;
+        if (index === undefined) {
+          const known = tc.id ? implicitSlots.get(tc.id) : undefined;
+          if (known !== undefined) {
+            index = known;
+          } else if (tc.id) {
+            index = pendingTools.size;
+            implicitSlots.set(tc.id, index);
+          } else {
+            index = 0;
+          }
+        }
         const slot = pendingTools.get(index) ?? { id: '', name: '', arguments: '' };
         if (tc.id) slot.id = tc.id;
         if (tc.function?.name) slot.name = tc.function.name;
@@ -170,7 +183,8 @@ export class OpenAICompatibleProvider implements Provider {
       }
       const call: ToolCallBlock = {
         type: 'tool_call',
-        id: slot.id || `call_${toolIds.size}_${Date.now().toString(36)}`,
+        // 部分网关的并行调用会给出重复或空 id：原地重生成，保证回合内唯一
+        id: !slot.id || toolIds.has(slot.id) ? `call_${toolIds.size}_${Date.now().toString(36)}` : slot.id,
         name: slot.name || 'unknown',
         input,
       };
