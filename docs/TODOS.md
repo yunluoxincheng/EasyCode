@@ -36,6 +36,25 @@
 
 ---
 
+### 3. 自动滚动改造：仅发送消息时滚到底部
+
+**状态**：已记录，未排期
+
+**背景**：当前会话区滚动跟随 `store.version`（每个 AgentEvent 都触发），导致 AI 流式输出、工具调用期间会话区被持续拉回底部，用户上翻阅读会被打断。
+
+**期望**：
+- 仅**用户发送消息**时滚动到底部
+- 流式输出、工具调用、其他事件不触发滚动
+- 切换会话时仍自动回到底部（保持现状）
+
+**方案**（讨论中已设计，约 10 行改动）：
+- `store.send()` 推送用户消息且 `autoScrollOn` 时递增一个 `scrollTick` 信号
+- `Transcript` 的滚动 effect 依赖从 `[version, autoScrollOn]` 改为 `[scrollTick, activeId, autoScrollOn]`
+
+**涉及改动**：store.ts（新增 scrollTick 字段与发送时递增）、Transcript.tsx（effect 依赖调整）。
+
+---
+
 ### 2. 编辑加固：edit_file 强制"先读后改"
 
 **状态**：已记录，未排期
