@@ -208,12 +208,53 @@ function CopyButton({ text }: { text: string }) {
   );
 }
 
-/** 用户消息：气泡 + 时间 + 复制 */
-function UserView({ item }: { item: UserItem }) {
+/** 用户消息：气泡框 + 时间/复制/编辑（编辑仅最近一条且非运行中） */
+function UserView({ item, canEdit }: { item: UserItem; canEdit: boolean }) {
+  const store = useStore();
   const [copied, setCopied] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(item.text);
   const time = item.ts
     ? new Date(item.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
     : '';
+
+  const save = (): void => {
+    setEditing(false);
+    if (draft.trim() && draft.trim() !== item.text) {
+      void store.editAndResend(item.id, draft);
+    }
+  };
+
+  if (editing) {
+    return (
+      <div className="msg user editing" data-anchor={item.id}>
+        <textarea
+          className="msg-edit-area"
+          value={draft}
+          autoFocus
+          rows={Math.min(10, Math.max(3, draft.split('\n').length + 1))}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+              e.preventDefault();
+              save();
+            }
+            if (e.key === 'Escape') setEditing(false);
+          }}
+        />
+        <div className="msg-meta">
+          <span className="msg-time">Enter 保存并重新生成 · Esc 取消</span>
+          <button className="msg-copy" onClick={() => setEditing(false)}>
+            取消
+          </button>
+          <button className="msg-copy" onClick={save}>
+            保存
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="msg user" data-anchor={item.id}>
       <div className="msg-content">{item.text}</div>
@@ -231,6 +272,11 @@ function UserView({ item }: { item: UserItem }) {
         >
           {copied ? '已复制' : '复制'}
         </button>
+        {canEdit && (
+          <button className="msg-copy" title="编辑并重新生成" onClick={() => setEditing(true)}>
+            编辑
+          </button>
+        )}
       </div>
     </div>
   );
@@ -436,13 +482,15 @@ export function Transcript() {
             </ul>
           </div>
         )}
-        {store.items.map((item) =>
-          item.kind === 'user' ? (
-            <UserView key={item.id} item={item} />
-          ) : (
-            <TurnView key={item.id} turn={item} />
-          ),
-        )}
+        {store.items.map((item) => {
+          if (item.kind === 'user') {
+            const isLastUser =
+              !store.running &&
+              store.items.lastIndexOf(item) === store.items.length - 1 - (store.items.length > 1 && store.items[store.items.length - 1].kind === 'turn' ? 1 : 0);
+            return <UserView key={item.id} item={item} canEdit={isLastUser} />;
+          }
+          return <TurnView key={item.id} turn={item} />;
+        })}
         <div ref={bottomRef} />
       </div>
     </main>

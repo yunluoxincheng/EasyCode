@@ -64,6 +64,10 @@ const handlers: Record<string, Handler> = {
   'delete-session': (args) => server.deleteSession(args.id),
   'rename-session': (args) => server.renameSession(args.id, args.title),
   'get-session': (args) => server.getSession(args.id),
+  'edit-last-user-message': async (args) => {
+    await server.editLastUserMessage(args.id, args.text);
+    return null;
+  },
   'send-message': async (args) => {
     await server.sendMessage(args.id, args.text);
     return null;

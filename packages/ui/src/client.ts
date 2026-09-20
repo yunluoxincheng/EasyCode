@@ -45,6 +45,9 @@ export class IpcAgentClient implements AgentClient {
   sendMessage(id: string, text: string) {
     return this.invoke<void>('send-message', { id, text });
   }
+  editLastUserMessage(id: string, text: string) {
+    return this.invoke<void>('edit-last-user-message', { id, text });
+  }
   respondApproval(id: string, requestId: string, approved: boolean) {
     return this.invoke<void>('respond-approval', { id, requestId, approved });
   }
@@ -136,6 +139,7 @@ export function createDemoClient(): AgentClient {
     renameSession: (id, title) => wrap(() => server.renameSession(id, title)),
     getSession: (id) => wrap(() => server.getSession(id)),
     sendMessage: (id, text) => wrap(() => server.sendMessage(id, text)),
+    editLastUserMessage: (id, text) => wrap(() => server.editLastUserMessage(id, text)),
     respondApproval: (id, requestId, approved) =>
       wrap(() => {
         server.respondApproval(id, requestId, approved);

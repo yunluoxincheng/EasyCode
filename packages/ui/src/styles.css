@@ -286,16 +286,35 @@ body::after {
 /* 用户消息 = 提示符行 */
 .msg { margin-bottom: 14px; display: flex; }
 .msg.user { flex-direction: row; }
+.msg.user { align-items: flex-end; }
 .msg.user .msg-content {
-  background: none;
-  border-radius: 0;
-  padding: 0;
-  max-width: 92%;
+  background: var(--panel2);
+  border: 1px solid var(--border2);
+  border-radius: 10px;
+  padding: 8px 12px;
+  max-width: 85%;
+  box-sizing: border-box;
   white-space: pre-wrap;
   word-break: break-word;
   color: var(--text-bright);
 }
-.msg.user .msg-content::before { content: '❯ '; color: var(--green); }
+.msg-meta { opacity: .55; }
+.msg.user:hover .msg-meta { opacity: 1; }
+.msg-edit-area {
+  width: 85%;
+  background: var(--panel2);
+  border: 1px solid var(--green-dim);
+  border-radius: 10px;
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 13px;
+  line-height: 1.6;
+  padding: 8px 12px;
+  resize: vertical;
+  outline: none;
+  margin-left: auto;
+  white-space: pre-wrap;
+}
 .msg.assistant .msg-content { max-width: 100%; width: 100%; }
 
 /* Markdown */

@@ -269,6 +269,9 @@ export async function createTauriClient(): Promise<AgentClient> {
     renameSession: (id, title) => server.renameSession(id, title),
     getSession: (id) => server.getSession(id),
     sendMessage: (id, text) => server.sendMessage(id, text),
+    editLastUserMessage: async (id, text) => {
+      await server.editLastUserMessage(id, text);
+    },
     respondApproval: async (id, requestId, approved) => {
       server.respondApproval(id, requestId, approved);
     },

@@ -177,7 +177,38 @@ export class AgentServer {
       createdAt: new Date().toISOString(),
     });
     rt.data.meta.updatedAt = new Date().toISOString();
+    await this.runTurn(rt);
+  }
 
+  /** 编辑最近一条用户消息：替换文本、丢弃其后的内容并重新生成 */
+  async editLastUserMessage(id: string, text: string): Promise<void> {
+    const rt = this.requireSession(id);
+    if (rt.running) throw new Error('会话正在运行中，请先等待完成或点击停止');
+    const content = text.trim();
+    if (!content) throw new Error('消息为空');
+    let idx = -1;
+    for (let i = rt.data.messages.length - 1; i >= 0; i--) {
+      if (rt.data.messages[i].role === 'user') {
+        idx = i;
+        break;
+      }
+    }
+    if (idx === -1) throw new Error('会话中没有用户消息');
+    const old = rt.data.messages[idx] as {
+      role: 'user';
+      content: string;
+      id?: string;
+      createdAt?: string;
+    };
+    rt.data.messages[idx] = { role: 'user', content, id: old.id, createdAt: old.createdAt };
+    rt.data.messages = rt.data.messages.slice(0, idx + 1);
+    rt.data.meta.updatedAt = new Date().toISOString();
+    await this.runTurn(rt);
+  }
+
+  /** 执行一轮 Agent（消息由调用方先行构造；负责运行态与持久化） */
+  private async runTurn(rt: SessionRuntime): Promise<void> {
+    const id = rt.data.meta.id;
     rt.running = true;
     rt.controller = new AbortController();
     try {

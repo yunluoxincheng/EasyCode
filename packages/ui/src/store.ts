@@ -372,6 +372,41 @@ export class AppStore {
     }
   }
 
+  /** 编辑最近一条用户消息并重新生成：UI 截断该消息之后的内容，新建回合容器承接流式事件 */
+  async editAndResend(userItemId: string, text: string): Promise<void> {
+    if (!this.activeId || this.running || !text.trim()) return;
+    const idx = this.items.findIndex((i) => i.id === userItemId);
+    if (idx === -1) return;
+    this.items = this.items
+      .slice(0, idx + 1)
+      .map((i) => (i.id === userItemId && i.kind === 'user' ? { ...i, text: text.trim() } : i));
+    const turn: TurnItem = {
+      kind: 'turn',
+      id: this.nextId(),
+      startedAt: Date.now(),
+      collapsed: false,
+      items: [],
+    };
+    this.items.push(turn);
+    this.currentTurn = turn;
+    this.running = true;
+    if (this.autoScrollOn) this.scrollTick++;
+    this.notify();
+    try {
+      await this.client.editLastUserMessage(this.activeId, text);
+    } catch (err) {
+      const errorItem: ErrorItem = {
+        kind: 'error',
+        id: this.nextId(),
+        message: err instanceof Error ? err.message : String(err),
+      };
+      if (this.currentTurn) this.currentTurn.items.push(errorItem);
+      else this.items.push(errorItem);
+      this.running = false;
+      this.notify();
+    }
+  }
+
   async respondApproval(requestId: string, approved: boolean): Promise<void> {
     if (!this.activeId) return;
     this.client.respondApproval(this.activeId, requestId, approved);
