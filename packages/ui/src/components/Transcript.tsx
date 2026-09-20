@@ -291,6 +291,7 @@ export function Transcript() {
   const [exchanges, setExchanges] = useState<Exchange[]>([]);
   const [highlight, setHighlight] = useState(0);
   const [hover, setHover] = useState<{ top: number; text: string } | null>(null);
+  const [railH, setRailH] = useState(0);
 
   // 仅发送消息与切换会话时滚到底部；流式输出/工具事件不滚动（#3）
   useEffect(() => {
@@ -328,11 +329,13 @@ export function Transcript() {
     measure();
   }, [store.version, store.activeId]);
 
-  /** 滚动时高亮当前视口所在的 exchange */
+  /** 滚动时高亮当前视口所在的 exchange，并刷新轨道可用高度 */
   useEffect(() => {
     const el = scrollRef.current;
-    if (!el) return;
-    const onScroll = (): void => {
+    const rail = railRef.current;
+    if (!el || !rail) return;
+    const update = (): void => {
+      setRailH(rail.clientHeight);
       const nodes = [...el.querySelectorAll<HTMLElement>('[data-anchor]')];
       if (nodes.length === 0) return;
       const probe = el.scrollTop + el.clientHeight * 0.35;
@@ -342,9 +345,15 @@ export function Transcript() {
       });
       setHighlight(idx);
     };
-    el.addEventListener('scroll', onScroll);
-    onScroll();
-    return () => el.removeEventListener('scroll', onScroll);
+    update();
+    el.addEventListener('scroll', update);
+    const ro = new ResizeObserver(update);
+    ro.observe(rail);
+    ro.observe(el);
+    return () => {
+      el.removeEventListener('scroll', update);
+      ro.disconnect();
+    };
   }, [exchanges, store.activeId]);
 
   const jumpTo = (anchorId: string): void => {
@@ -353,6 +362,19 @@ export function Transcript() {
       ?.scrollIntoView({ behavior: 'auto', block: 'start' });
   };
 
+  // 刻度条垂直居中；放不下时随滚动滑移，让当前刻度保持在中间
+  const spacing = 14;
+  const total = exchanges.length * spacing;
+  let railOffset = 0;
+  if (railH > 0) {
+    if (total > railH) {
+      const mid = highlight * spacing + spacing / 2;
+      railOffset = Math.min(Math.max(mid - railH / 2, 0), total - railH);
+    } else {
+      railOffset = (railH - total) / 2;
+    }
+  }
+
   return (
     <main className="transcript has-rail">
       <div className="rail" ref={railRef}>
@@ -360,15 +382,15 @@ export function Transcript() {
           <div
             key={ex.anchorId}
             className={`rail-tick ${i === Math.min(highlight, exchanges.length - 1) ? 'current' : ''}`}
-            style={{ top: `${i * 14 + 7}px` }}
+            style={{ top: `${railOffset + i * spacing + spacing / 2}px` }}
             title={ex.userText}
-            onMouseEnter={() => setHover({ top: i * 14 + 7, text: ex.preview })}
+            onMouseEnter={() => setHover({ top: railOffset + i * spacing + spacing / 2, text: ex.preview })}
             onMouseLeave={() => setHover(null)}
             onClick={() => jumpTo(ex.anchorId)}
           />
         ))}
         {hover && (
-          <div className="rail-preview" style={{ top: `${hover.top}px` }}>
+          <div className="rail-preview" style={{ top: `${hover.top - 7}px` }}>
             {hover.text}
           </div>
         )}
