@@ -221,7 +221,8 @@ body::after {
   background: var(--faint); opacity: .55; cursor: pointer;
   border-radius: 1px; transform: translateY(-50%);
 }
-.rail-tick.current { background: var(--green); opacity: 1; height: 4px; width: 12px; left: 0; }
+.rail-tick.current { background: var(--green); opacity: 1; height: 4px; width: 12px; }
+.rail-tick { transition: width .12s ease-out, height .12s ease-out, left .12s ease-out, opacity .12s ease-out; }
 .rail-tick:hover { background: var(--green); opacity: 1; }
 .rail-tick.current { background: var(--green); opacity: 1; }
 .rail-preview {

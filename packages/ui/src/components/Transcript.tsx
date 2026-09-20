@@ -377,7 +377,36 @@ export function Transcript() {
 
   return (
     <main className="transcript has-rail">
-      <div className="rail" ref={railRef}>
+      <div
+        className="rail"
+        ref={railRef}
+        onMouseMove={(e) => {
+          // 波浪效果：靠近指针的刻度放大变亮，随距离衰减
+          const rail = railRef.current;
+          if (!rail) return;
+          const my = e.clientY - rail.getBoundingClientRect().top;
+          rail.querySelectorAll<HTMLElement>('.rail-tick').forEach((t) => {
+            const center = parseFloat(t.style.top || '0') + 1.5;
+            const w = Math.max(0, 1 - Math.abs(center - my) / 70);
+            const width = 10 + w * 8;
+            t.style.width = `${width}px`;
+            t.style.height = `${3 + w * 3}px`;
+            t.style.left = `${6 - width / 2}px`;
+            t.style.opacity = String(0.55 + w * 0.45);
+          });
+        }}
+        onMouseLeave={() => {
+          const rail = railRef.current;
+          if (!rail) return;
+          rail.querySelectorAll<HTMLElement>('.rail-tick').forEach((t) => {
+            t.style.width = '';
+            t.style.height = '';
+            t.style.left = '';
+            t.style.opacity = '';
+          });
+          setHover(null);
+        }}
+      >
         {exchanges.map((ex, i) => (
           <div
             key={ex.anchorId}
