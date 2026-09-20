@@ -288,10 +288,9 @@ export function Transcript() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const railRef = useRef<HTMLDivElement>(null);
-  const [hover, setHover] = useState<{ frac: number; text: string } | null>(null);
-  const [posFrac, setPosFrac] = useState(0);
-  const [tickCount, setTickCount] = useState(0);
-  const anchorsRef = useRef<{ top: number; text: string }[]>([]);
+  const [exchanges, setExchanges] = useState<Exchange[]>([]);
+  const [highlight, setHighlight] = useState(0);
+  const [hover, setHover] = useState<{ top: number; text: string } | null>(null);
 
   // 仅发送消息与切换会话时滚到底部；流式输出/工具事件不滚动（#3）
   useEffect(() => {
@@ -299,87 +298,81 @@ export function Transcript() {
     bottomRef.current?.scrollIntoView({ behavior: 'auto', block: 'end' });
   }, [store.scrollTick, store.activeId, store.autoScrollOn]);
 
-  /** 测量：锚点位置（预览/跳转用）+ 当前滚动比例（刻度高亮用） */
+  /** 收集对话 exchanges：一条用户消息 + 其后的模型回合 = 一个刻度 */
   const measure = (): void => {
     const el = scrollRef.current;
-    const rail = railRef.current;
-    if (!el || !rail) return;
-    const maxScroll = el.scrollHeight - el.clientHeight;
-    setPosFrac(maxScroll > 0 ? el.scrollTop / maxScroll : 0);
-    anchorsRef.current = [...el.querySelectorAll<HTMLElement>('[data-anchor]')].map((n) => ({
-      top: n.offsetTop,
-      // 优先取正文（排除复制按钮等操作文本）
-      text: (n.querySelector('.msg-content, .turn-final') ?? n).textContent?.slice(0, 200) ?? '',
-    }));
-    setTickCount(Math.max(2, Math.floor(rail.clientHeight / 22)));
+    if (!el) return;
+    const items = store.items;
+    const list: Exchange[] = [];
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i];
+      if (it.kind !== 'user') continue;
+      const next = items[i + 1];
+      const turn = next && next.kind === 'turn' ? next : undefined;
+      const lines = (turn ? finalTextOf(turn) : '').split('\n');
+      list.push({
+        userId: it.id,
+        userText: it.text,
+        preview:
+          it.text +
+          '\n\n' +
+          lines.slice(0, 2).join('\n') +
+          (lines.length > 2 ? '\n…' : ''),
+        anchorId: it.id,
+      });
+    }
+    setExchanges(list);
   };
 
   useEffect(() => {
     measure();
   }, [store.version, store.activeId]);
 
+  /** 滚动时高亮当前视口所在的 exchange */
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
     const onScroll = (): void => {
-      const maxScroll = el.scrollHeight - el.clientHeight;
-      setPosFrac(maxScroll > 0 ? el.scrollTop / maxScroll : 0);
+      const nodes = [...el.querySelectorAll<HTMLElement>('[data-anchor]')];
+      if (nodes.length === 0) return;
+      const probe = el.scrollTop + el.clientHeight * 0.35;
+      let idx = 0;
+      nodes.forEach((n, i) => {
+        if (n.offsetTop <= probe) idx = i;
+      });
+      setHighlight(idx);
     };
     el.addEventListener('scroll', onScroll);
+    onScroll();
     return () => el.removeEventListener('scroll', onScroll);
-  }, []);
+  }, [exchanges, store.activeId]);
 
-  useEffect(() => {
-    const rail = railRef.current;
-    if (!rail) return;
-    const ro = new ResizeObserver(() => measure());
-    ro.observe(rail);
-    return () => ro.disconnect();
-  }, []);
-
-  /** 该滚动比例处可见的内容锚点文本 */
-  const anchorAtFrac = (frac: number): string => {
-    const el = scrollRef.current;
-    if (!el) return '';
-    const maxScroll = el.scrollHeight - el.clientHeight;
-    const probe = frac * Math.max(0, maxScroll) + el.clientHeight * 0.4;
-    let best = '';
-    for (const a of anchorsRef.current) {
-      if (a.top <= probe) best = a.text;
-      else break;
-    }
-    return best;
+  const jumpTo = (anchorId: string): void => {
+    scrollRef.current
+      ?.querySelector(`[data-anchor="${anchorId}"]`)
+      ?.scrollIntoView({ behavior: 'auto', block: 'start' });
   };
-
-  const scrollToFraction = (frac: number): void => {
-    const el = scrollRef.current;
-    if (!el) return;
-    el.scrollTop = frac * Math.max(0, el.scrollHeight - el.clientHeight);
-  };
-
-  const count = Math.max(2, tickCount);
-  const ticks: number[] = Array.from({ length: count }, (_, i) => i / (count - 1));
-  const curIdx = posFrac > 0 ? Math.round(posFrac * (count - 1)) : 0;
 
   return (
     <main className="transcript has-rail">
       <div className="rail" ref={railRef}>
-        {ticks.map((f, i) => (
+        {exchanges.map((ex, i) => (
           <div
-            key={f}
-            className={`rail-tick ${i === curIdx ? 'current' : ''}`}
-            style={{ top: `${f * 100}%` }}
-            onMouseEnter={() => setHover({ frac: f, text: anchorAtFrac(f) })}
+            key={ex.anchorId}
+            className={`rail-tick ${i === Math.min(highlight, exchanges.length - 1) ? 'current' : ''}`}
+            style={{ top: `${exchanges.length === 1 ? 50 : ((i + 0.5) / exchanges.length) * 100}%` }}
+            title={ex.userText}
+            onMouseEnter={() => setHover({ top: ((i + 0.5) / exchanges.length) * 100, text: ex.preview })}
             onMouseLeave={() => setHover(null)}
-            onClick={() => scrollToFraction(f)}
+            onClick={() => jumpTo(ex.anchorId)}
           />
         ))}
         {hover && (
           <div
             className="rail-preview"
-            style={{ top: `calc(${Math.min(85, Math.max(3, hover.frac * 100))}% - 12px)` }}
+            style={{ top: `calc(${Math.min(80, Math.max(3, hover.top))}% - 12px)` }}
           >
-            {hover.text || '（此处无内容）'}
+            {hover.text}
           </div>
         )}
       </div>
@@ -406,4 +399,11 @@ export function Transcript() {
       </div>
     </main>
   );
+}
+
+interface Exchange {
+  userId: string;
+  userText: string;
+  preview: string;
+  anchorId: string;
 }
