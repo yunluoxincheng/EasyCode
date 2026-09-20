@@ -256,24 +256,20 @@ body::after {
 .turn-final { position: relative; padding: 4px 10px 8px; }
 
 
-/* 复制按钮（回合最终结果 / 用户消息） */
-.copy-btn, .msg-copy {
-  background: var(--panel2); border: 1px solid var(--border2); border-radius: var(--radius);
-  color: var(--dim); font-family: var(--font); font-size: 11px;
-  padding: 2px 8px; cursor: pointer;
+/* 消息操作图标（复制/编辑，回合最终结果与用户消息共用） */
+.msg-icon, .copy-btn, .msg-copy {
+  background: none; border: none; color: var(--dim); cursor: pointer;
+  font-family: var(--font); font-size: 12px; padding: 1px 5px;
+  border-radius: var(--radius); line-height: 1.4;
 }
-.turn-head .copy-btn { opacity: 1; }
-.turn-head .copy-btn:hover { color: var(--green); border-color: var(--green-dim); }
-.copy-btn:hover, .msg-copy:hover { color: var(--green); border-color: var(--green-dim); }
+.msg-icon:hover, .copy-btn:hover, .msg-copy:hover { color: var(--green); background: var(--panel2); }
 .msg.user { position: relative; flex-direction: column; }
 .msg-meta {
-  display: flex; justify-content: flex-end; align-items: center; gap: 8px;
-  margin-top: 3px; opacity: 0; transition: opacity .12s;
+  display: flex; justify-content: flex-end; align-items: center; gap: 4px;
+  margin-top: 3px; opacity: .55; transition: opacity .12s;
 }
 .msg.user:hover .msg-meta { opacity: 1; }
 .msg-time { color: var(--faint); font-size: 10px; }
-.msg-copy { opacity: 0; }
-.msg.user:hover .msg-copy { opacity: 1; }
 
 .hero { max-width: 560px; margin: 9vh auto 0; color: var(--dim); }
 .hero h1 { font-size: 26px; margin: 0 0 6px; color: var(--green); letter-spacing: 1px; }

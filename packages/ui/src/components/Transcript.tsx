@@ -195,7 +195,8 @@ function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
   return (
     <button
-      className="copy-btn"
+      className="msg-icon"
+      title={copied ? '已复制' : '复制'}
       onClick={() => {
         void navigator.clipboard.writeText(text).then(() => {
           setCopied(true);
@@ -203,7 +204,7 @@ function CopyButton({ text }: { text: string }) {
         });
       }}
     >
-      {copied ? '已复制' : '复制'}
+      {copied ? '✓' : '⧉'}
     </button>
   );
 }
@@ -261,8 +262,8 @@ function UserView({ item, canEdit }: { item: UserItem; canEdit: boolean }) {
       <div className="msg-meta">
         {time && <span className="msg-time">{time}</span>}
         <button
-          className="msg-copy"
-          title="复制"
+          className="msg-icon"
+          title={copied ? '已复制' : '复制'}
           onClick={() => {
             void navigator.clipboard.writeText(item.text).then(() => {
               setCopied(true);
@@ -270,11 +271,11 @@ function UserView({ item, canEdit }: { item: UserItem; canEdit: boolean }) {
             });
           }}
         >
-          {copied ? '已复制' : '复制'}
+          {copied ? '✓' : '⧉'}
         </button>
         {canEdit && (
-          <button className="msg-copy" title="编辑并重新生成" onClick={() => setEditing(true)}>
-            编辑
+          <button className="msg-icon" title="编辑并重新生成" onClick={() => setEditing(true)}>
+            ✎
           </button>
         )}
       </div>
