@@ -239,7 +239,7 @@ body::after {
 .turn-live { color: var(--green); animation: pulse 1.2s infinite; }
 .turn-body { padding: 2px 10px 8px; display: flex; flex-direction: column; gap: 6px; }
 .turn-final { position: relative; padding: 4px 10px 8px; }
-.turn-final .md { padding-right: 60px; }
+
 
 /* 复制按钮（回合最终结果 / 用户消息） */
 .copy-btn, .msg-copy {
@@ -250,15 +250,13 @@ body::after {
 .copy-btn { position: absolute; top: 4px; right: 6px; opacity: 0; }
 .turn-final:hover .copy-btn { opacity: 1; }
 .copy-btn:hover, .msg-copy:hover { color: var(--green); border-color: var(--green-dim); }
-.msg.user { position: relative; }
+.msg.user { position: relative; flex-direction: column; }
 .msg-meta {
   display: flex; justify-content: flex-end; align-items: center; gap: 8px;
   margin-top: 3px; opacity: 0; transition: opacity .12s;
 }
 .msg.user:hover .msg-meta { opacity: 1; }
 .msg-time { color: var(--faint); font-size: 10px; }
-.msg.user .msg-meta { opacity: 1; }
-.msg-time { margin-right: auto; }
 .msg-copy { opacity: 0; }
 .msg.user:hover .msg-copy { opacity: 1; }
 
