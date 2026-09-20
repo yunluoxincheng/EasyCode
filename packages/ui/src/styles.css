@@ -290,7 +290,7 @@ body::after {
 .msg.user .msg-content {
   background: var(--panel2);
   border: 1px solid var(--border2);
-  border-radius: 10px;
+  border-radius: var(--radius);
   padding: 8px 12px;
   max-width: 85%;
   box-sizing: border-box;
@@ -298,13 +298,14 @@ body::after {
   word-break: break-word;
   color: var(--text-bright);
 }
+.msg.user .msg-content::before { content: '❯ '; color: var(--green); }
 .msg-meta { opacity: .55; }
 .msg.user:hover .msg-meta { opacity: 1; }
 .msg-edit-area {
   width: 85%;
   background: var(--panel2);
   border: 1px solid var(--green-dim);
-  border-radius: 10px;
+  border-radius: var(--radius);
   color: var(--text);
   font-family: var(--font);
   font-size: 13px;
