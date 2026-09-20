@@ -2,6 +2,16 @@
 
 本文件记录 EasyCode 每个版本的变更。发布时，GitHub Release 说明自动取自对应版本的段落。
 
+## [0.1.8] - 2026-09-20
+
+### 新增
+- 模型选择器支持跨服务切换：composer 的模型菜单改为「当前服务在上、其余服务分组在下」，点选其他服务下的模型即同时切换会话的服务与模型，思考强度一并重置为该服务默认（TODOS #6）
+- 任务完成桌面通知：Agent 跑完时若窗口不在前台，发系统原生通知（标题「EasyCode — Agent 完成」+ 会话名），前台时静默不打扰（TODOS #13）
+- 「在文件管理器中打开」：项目切换器新增入口，用系统文件管理器打开当前会话的工作区（TODOS #14）
+
+### 技术
+- 新增宿主能力命令 `open_path`（tauri-plugin-opener）与 `send_notification`（tauri-plugin-notification），二者经 AgentClient 抽象，Tauri / Electron / 演示模式各有实现（Electron 走 shell.openPath 与原生 Notification，演示模式退回 Web Notification）
+
 ## [0.1.7] - 2026-09-20
 
 ### 新增

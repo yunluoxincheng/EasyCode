@@ -80,40 +80,41 @@
 
 ### 14. 「打开工作区」按钮：资源管理器 / VS Code
 
-**状态**：已记录，未排期（参照 ZCode 标题栏的打开方式分体按钮）
+**状态**：✅ 资源管理器部分已实现（2026-09-20，随 v0.1.8）——入口放在 composer 的项目切换器里，非标题栏
 
-**期望行为**：
-- 标题栏新增「打开工作区」分体按钮：左键按默认方式打开当前会话的工作区；右侧小箭头下拉可选工具并勾选默认——资源管理器 / VS Code
-- 资源管理器：打开工作区文件夹（opener 插件已具备，reveal 或 open 目录）
-- VS Code：执行 `code <工作区>`；未检测到 VS Code 时 toast 提示安装
-- 未绑定工作区的会话按钮禁用（悬停提示原因）
-- 默认方式记忆到设置（settings.openWorkspaceWith）
+**已实现**：
+- Rust 命令 `open_path`（`tauri-plugin-opener` 的 `opener().open_path()`），经 AgentClient 暴露为 `openPath`：Tauri 用系统文件管理器打开，Electron 走 `shell.openPath`，演示模式空实现
+- UI 入口：项目切换器弹窗底部新增「⧉ 在文件管理器中打开」，用当前会话的 `workspaceRoot` 打开；未绑定工作区时不显示该项
+- 入口位置说明：放在项目切换器（工作区语义的归属地）而非标题栏，与「⌂ 打开文件夹 / ○ 不在项目中工作」同组，改动面小且语义内聚
 
-**涉及改动**：
-- Tauri 壳：新增 Rust 命令（在 PATH/常见安装路径探测 code，或直接 spawn；注意 Windows 下 code 是 code.cmd 需经 cmd 或全路径调用）
-- engine 设置项 + TitleBar 按钮与下拉 UI
-- opener 插件已有，文件夹打开零新增依赖
+**未做（留待后续）**：
+- VS Code 打开 + 未安装时 toast 提示（需探测 `code`/`code.cmd`，Windows 下经 cmd 或全路径调用）
+- 默认方式记忆到设置（`settings.openWorkspaceWith`）与标题栏分体按钮下拉
 
 ---
 
 ### 13. 任务完成桌面通知（右下角，应用风格）
 
-**状态**：已记录，未排期
+**状态**：✅ 核心已实现（2026-09-20，随 v0.1.8）——采用方案 a（系统通知），窗口不在前台时 Agent 完成即发原生通知
+
+**已实现**：
+- 走 `tauri-plugin-notification`（Rust 命令 `send_notification`），经 AgentClient 抽象：Tauri 用系统原生通知、Electron 用主进程 `Notification`、演示模式退回浏览器 Web Notification
+- 触发时机：store 的 `done` 事件（Agent 回合结束），且 `document.hasFocus()` 为假（窗口在后台）才发；前台时沿用应用内 toast，不重复打扰
+- 文案：标题「EasyCode — Agent 完成」，正文为会话标题
+
+**未做（留待后续，参照原方案 b）**：
+- 点击通知唤起主窗口并定位到该会话
+- 出错时也通知（当前只覆盖正常完成）
+- 设置页开关
+- 自绘终端风小窗（方案 b）：若要"风格与应用一致"需另做，且与 #5 托盘常驻配套
 
 **背景**：长任务跑着时用户切去干别的，完成/出错没有提醒（尤其 #5 托盘常驻之后窗口是隐藏的）。
 
-**期望行为**：
-- Agent 任务完成（或出错）时，在**桌面右下角、系统托盘上方**弹出通知：标题（会话名）+ 摘要（最终回复片段或错误信息）
-- **风格与应用一致**（终端风），自动几秒后消失
-- 点击通知唤起主窗口并定位到对应会话
-- 仅在窗口隐藏/失焦时弹；前台时沿用现有应用内 toast，不重复打扰
-- 设置页可开关
+**涉及改动**：Tauri 壳（notification 插件 + `send_notification` 命令）、AgentClient（`notify`）、UI store（done 事件 + 前台判断）——均已完成。
 
-**实现选项（排期时定）**：
-- a) 系统通知：tauri-plugin-notification，最简单，但样式跟 OS 不跟应用
-- b) 自绘通知小窗：无边框、置顶、不抢焦点的迷你窗口定位到托盘上方，终端风渲染——完全满足"风格与应用一致"，推荐，且与 #5 托盘常驻天然配套
+**已知行为：dev 构建的通知会署名为「Windows PowerShell」**（图标也是 PowerShell 的），这是插件的刻意设计而非缺陷：`tauri-plugin-notification` 的 Windows 分支检测到 exe 位于 `…/target/debug` 或 `…/target/release` 时**不设置 `System.AppUserModel.ID`**（源码注释：*set the notification's System.AppUserModel.ID only when running the installed app*），于是 `tauri-winrt-notification` 落到它文档化的兜底方案 `Toast::POWERSHELL_APP_ID`（该常量注释原文：*the toast will erroneously report its origin as powershell*）。
 
-**涉及改动**：Tauri 壳（通知窗口或 notification 插件）、engine/UI（done/error 事件触发通知、前台判断）、设置页开关。
+**安装版（NSIS）署名正常**：包外路径运行时会传 `app_id = com.easycode.desktop`，且该 AUMID 已由安装器的开始菜单快捷方式注册（`EasyCode.lnk` 的 `System.AppUserModel.ID` 属性即此值）。实测对比：debug 路径运行 → 通知库里 `powershell.exe` 计数 +1；把 exe 复制到非 `target` 路径运行 → `com.easycode.desktop` 计数 +1。**因此验收通知署名需用安装版，不要在 dev 构建下按此判缺陷。**
 
 ---
 
@@ -223,20 +224,22 @@
 
 ### 6. 模型选择器支持切换供应商（含模型子菜单）
 
-**状态**：已记录，未排期（参照 ZCode 的模型选择器）
+**状态**：✅ 核心已实现（2026-09-20，随 v0.1.8）——菜单改为「当前服务在上、其余服务分组在下」，点选其他服务下的模型即切换会话的服务 + 模型
 
-**背景**：composer 的模型选择器目前只列**当前会话所属供应商**下的模型，切供应商要先去设置页改默认或新建会话。期望在模型选择器里直接切换供应商。
+**已实现**：
+- engine `AgentServer.setSessionProvider(id, providerId, model?)`：校验目标服务已配置，切换 providerId 并把 model 落为目标服务第一个启用模型，reasoningEffort 一并重置（换服务后旧档位未必适用）
+- `ModelEffortPicker` 由「平铺当前供应商模型」改为分组平铺：当前服务一组（含「跟随服务默认」），其余启用服务各一组；组标题带 `// ` 前缀与顶部分隔线，其他服务的模型项常态降透明度，表达「选中即切换服务」语义
+- 全链路打通：AgentClient → Tauri / Electron / 演示模式三种宿主实现
 
-**期望行为**（参照截图）：
-- 选择器中列出**已添加模型**的供应商（models 非空；空供应商不展示，避免选中后无模型可用）
-- 每个供应商一行，悬停/点击展开该供应商的模型子列表（模型带上下文/视觉徽标，复用现有徽标样式）
-- 选中模型 = 同时切换会话的供应商与模型
-- 菜单底部提供「管理模型」入口 → 跳转设置页模型服务分区
+**未做（留待后续）**：
+- 菜单底部「管理模型」入口 → 跳转设置页模型服务分区
+- 二级悬停子菜单（本版采用分组平铺：实现更简单，且一次性可见全部可选模型，无需逐级悬停）
+
+**背景**：composer 的模型选择器原只列**当前会话所属供应商**下的模型，切供应商要先去设置页改默认或新建会话。
 
 **涉及改动**：
-- engine：可能需新增"切换会话供应商"方法（切 providerId 并把 model 重置为目标供应商的启用模型；校验目标供应商有启用模型）
-- ModelEffortPicker.tsx：从"平铺当前供应商模型"改为"供应商分组 + 二级展开"结构
-- 交互：二级展开用悬停子菜单（参照截图）或分组平铺（实现更简单，排期时定）
+- engine：新增 `setSessionProvider`（已加）
+- ModelEffortPicker.tsx：改为供应商分组结构（已改）
 
 ---
 

@@ -3,7 +3,7 @@
  * 装配 AgentServer + NodeHost，桥接渲染进程（IPC 白名单分发）。
  * 业务逻辑全部在 @easycode/engine / @easycode/core。
  */
-import { app, BrowserWindow, dialog, ipcMain } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Notification, shell } from 'electron';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
@@ -86,6 +86,7 @@ const handlers: Record<string, Handler> = {
   },
   'get-approval-mode': (args) => server.getApprovalMode(args.id),
   'set-session-model': (args) => server.setSessionModel(args.id, args.model),
+  'set-session-provider': (args) => server.setSessionProvider(args.id, args.providerId, args.model),
   'set-session-effort': (args) => server.setSessionEffort(args.id, args.effort),
   'set-session-workspace': (args) => server.setSessionWorkspace(args.id, args.workspace),
   'get-settings': () => server.getSettings(),
@@ -100,6 +101,16 @@ const handlers: Record<string, Handler> = {
       title: '选择工作区目录',
     });
     return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0];
+  },
+  'open-path': async (args) => {
+    const err = await shell.openPath(String(args.path));
+    if (err) throw new Error(err);
+    return null;
+  },
+  'send-notification': (args) => {
+    if (!Notification.isSupported()) return null;
+    new Notification({ title: String(args.title), body: String(args.body), silent: true }).show();
+    return null;
   },
   'win-control': (args, event) => {
     const win = BrowserWindow.fromWebContents(event.sender);

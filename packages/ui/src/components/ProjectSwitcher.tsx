@@ -63,6 +63,18 @@ export function ProjectSwitcher() {
             >
               ⌂ 打开文件夹
             </button>
+            {session.workspaceRoot && (
+              <button
+                className="proj-foot-item"
+                title={session.workspaceRoot}
+                onClick={() => {
+                  store.toggleProjectSwitcher();
+                  store.openPath(session.workspaceRoot);
+                }}
+              >
+                ⧉ 在文件管理器中打开
+              </button>
+            )}
             <button
               className="proj-foot-item"
               onClick={() => {

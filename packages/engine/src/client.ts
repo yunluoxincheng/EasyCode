@@ -28,6 +28,8 @@ export interface AgentClient {
   getApprovalMode(id: string): Promise<ApprovalMode>;
   /** 会话级模型覆盖；'' = 跟随供应商默认 */
   setSessionModel(id: string, model: string): Promise<SessionMeta>;
+  /** 会话级 Provider 切换（同时重置模型） */
+  setSessionProvider(id: string, providerId: string, model?: string): Promise<SessionMeta>;
   /** 会话级思考强度；'' = 跟随供应商默认 */
   setSessionEffort(id: string, effort: string): Promise<SessionMeta>;
   /** 绑定/更换会话工作区；空串 = 解绑为纯对话 */
@@ -40,6 +42,10 @@ export interface AgentClient {
   testProviderModel(providerId: string, model: string): Promise<ModelTestResult>;
   /** 联网搜索连通性测试：用已保存配置真实搜索一次 */
   testWebSearch(): Promise<{ ok: boolean; latencyMs: number; resultCount?: number; error?: string }>;
+  /** 会话级工作区打开（由宿主用系统文件管理器打开指定路径） */
+  openPath(path: string): Promise<void>;
+  /** 发送系统通知（由宿主用原生通知中心发送） */
+  notify(title: string, body: string): Promise<void>;
   pickWorkspace(): Promise<string | null>;
   onEvent(listener: (payload: { sessionId: string; event: AgentEvent }) => void): () => void;
 }

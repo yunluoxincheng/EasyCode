@@ -283,6 +283,7 @@ export async function createTauriClient(): Promise<AgentClient> {
     },
     getApprovalMode: async (id) => server.getApprovalMode(id),
     setSessionModel: async (id, model) => server.setSessionModel(id, model),
+    setSessionProvider: async (id, providerId, model) => server.setSessionProvider(id, providerId, model),
     setSessionEffort: async (id, effort) => server.setSessionEffort(id, effort),
     setSessionWorkspace: async (id, workspace) => server.setSessionWorkspace(id, workspace),
     getSettings: () => server.getSettings(),
@@ -291,6 +292,8 @@ export async function createTauriClient(): Promise<AgentClient> {
     testProviderModel: (id, model) => server.testProviderModel(id, model),
     testWebSearch: () => server.testWebSearch(),
     pickWorkspace: () => invoke<string | null>('pick_folder'),
+    openPath: (path: string) => invoke<void>('open_path', { path }),
+    notify: (title: string, body: string) => invoke<void>('send_notification', { title, body }),
     onEvent: (listener) => server.onEvent(listener),
   };
 }

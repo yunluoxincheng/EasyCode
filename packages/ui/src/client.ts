@@ -63,6 +63,9 @@ export class IpcAgentClient implements AgentClient {
   setSessionModel(id: string, model: string) {
     return this.invoke<SessionMeta>('set-session-model', { id, model });
   }
+  setSessionProvider(id: string, providerId: string, model?: string) {
+    return this.invoke<SessionMeta>('set-session-provider', { id, providerId, model });
+  }
   setSessionEffort(id: string, effort: string) {
     return this.invoke<SessionMeta>('set-session-effort', { id, effort });
   }
@@ -88,6 +91,12 @@ export class IpcAgentClient implements AgentClient {
   }
   pickWorkspace() {
     return this.invoke<string | null>('pick-workspace');
+  }
+  openPath(path: string) {
+    return this.invoke<void>('open-path', { path });
+  }
+  notify(title: string, body: string) {
+    return this.invoke<void>('send-notification', { title, body });
   }
   onEvent(listener: (payload: { sessionId: string; event: AgentEvent }) => void) {
     this.bridge.onEvent(listener);
@@ -154,6 +163,7 @@ export function createDemoClient(): AgentClient {
       }),
     getApprovalMode: (id) => wrap(() => server.getApprovalMode(id)),
     setSessionModel: (id, model) => wrap(() => server.setSessionModel(id, model)),
+    setSessionProvider: (id, providerId, model) => wrap(() => server.setSessionProvider(id, providerId, model)),
     setSessionEffort: (id, effort) => wrap(() => server.setSessionEffort(id, effort)),
     setSessionWorkspace: (id, workspace) => wrap(() => server.setSessionWorkspace(id, workspace)),
     getSettings: () => wrap(() => server.getSettings()),
@@ -170,6 +180,16 @@ export function createDemoClient(): AgentClient {
     testWebSearch: () =>
       wrap(() => ({ ok: false, latencyMs: 0, error: '演示模式无搜索后端' })),
     pickWorkspace: async () => '/demo-workspace',
+    openPath: async (_path) => { /* 演示模式：无实际文件系统 */ },
+    notify: async (title, body) => {
+      // 演示模式（浏览器）：退回 Web Notification
+      if (!('Notification' in window)) return;
+      const send = (): void => { new Notification(title, { body, silent: true }); };
+      if (Notification.permission === 'granted') send();
+      else if (Notification.permission === 'default') {
+        await Notification.requestPermission().then((p) => { if (p === 'granted') send(); });
+      }
+    },
     onEvent: (listener) => server.onEvent(listener),
   };
 }

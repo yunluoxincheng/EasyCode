@@ -318,6 +318,22 @@ export class AgentServer {
     return rt.data.meta;
   }
 
+  /** 会话级 Provider 切换（同时重置模型为该 Provider 第一个启用模型） */
+  async setSessionProvider(id: string, providerId: string, model?: string): Promise<SessionMeta> {
+    await this.ensureSettings();
+    const rt = this.requireSession(id);
+    if (rt.running) throw new Error('会话运行中，暂不能切换模型服务');
+    const entry = this.settings.providers[providerId];
+    if (!entry) throw new Error(`未配置的模型服务: ${providerId}`);
+    const enabledModels = (entry.models ?? []).filter((m) => m.enabled !== false).map((m) => m.name);
+    rt.data.meta.providerId = providerId;
+    rt.data.meta.model = model?.trim() ?? enabledModels[0] ?? '';
+    rt.data.meta.reasoningEffort = '';
+    rt.data.meta.updatedAt = new Date().toISOString();
+    await this.persistSession(rt);
+    return rt.data.meta;
+  }
+
   /** 会话级思考强度（'' = 跟随供应商默认） */
   async setSessionEffort(id: string, effort: string): Promise<SessionMeta> {
     const rt = this.requireSession(id);

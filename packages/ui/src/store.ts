@@ -207,6 +207,13 @@ export class AppStore {
     return providerLabel(id, this.settings?.providers[id]);
   }
 
+  /** 会话级 Provider + 模型切换 */
+  async setSessionProvider(id: string, providerId: string, model?: string): Promise<void> {
+    const meta = await this.client.setSessionProvider(id, providerId, model);
+    this.sessions = this.sessions.map((s) => (s.id === id ? meta : s));
+    this.notify();
+  }
+
   /** 会话级模型覆盖（'' = 供应商默认） */
   async setSessionModel(id: string, model: string): Promise<void> {
     const meta = await this.client.setSessionModel(id, model);
@@ -469,6 +476,21 @@ export class AppStore {
     this.notify();
   }
 
+  /** 用系统文件管理器打开路径 */
+  openPath(path: string): void {
+    void this.client.openPath(path).catch(() => {/* 静默：路径可能不存在 */});
+  }
+
+  /** Agent 完成后发桌面通知（窗口在后台时才发，避免打断当前窗口的用户） */
+  private sendDesktopNotification(): void {
+    if (document.hasFocus()) return;
+    const session = this.activeSession;
+    const title = session?.title ?? '任务完成';
+    void this.client
+      .notify('EasyCode — Agent 完成', title)
+      .catch(() => {/* 通知失败不影响主流程 */});
+  }
+
   toastKind: 'ok' | 'err' = 'ok';
   showToast(message: string, kind: 'ok' | 'err' = 'ok'): void {
     this.toastKind = kind;
@@ -579,6 +601,7 @@ export class AppStore {
           this.currentTurn = null;
         }
         this.running = false;
+        this.sendDesktopNotification();
         break;
     }
     this.notify();

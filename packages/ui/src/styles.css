@@ -1051,6 +1051,8 @@ select:focus-visible,
 }
 .me-section { font-size: 10px; letter-spacing: 1.5px; color: var(--faint); padding: 7px 10px 3px; }
 .me-section::before { content: '// '; }
+/* 其他 Provider 分组标题：顶部分隔线 + 略暗色区分 */
+.me-section-other { border-top: 1px solid var(--border); margin-top: 4px; color: var(--faint); opacity: 0.75; }
 .me-opt {
   display: flex;
   align-items: center;
@@ -1067,6 +1069,9 @@ select:focus-visible,
   border-radius: var(--radius);
 }
 .me-opt:hover { background: var(--panel2); color: var(--text); }
+/* 其他 Provider 下的模型项：常态稍暗，提示"切换服务"语义 */
+.me-opt-other { color: var(--faint); }
+.me-opt-other:hover { background: var(--panel2); color: var(--green); }
 .me-opt.on { color: var(--green); }
 .me-opt-name { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .me-check { color: var(--green); width: 14px; text-align: center; }

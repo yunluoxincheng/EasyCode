@@ -283,6 +283,25 @@ async fn pick_folder(app: AppHandle) -> Result<Option<String>, String> {
     rx.await.map_err(|e| e.to_string())
 }
 
+/// 用系统文件管理器打开路径（文件夹或文件）
+#[tauri::command]
+async fn open_path(app: AppHandle, path: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    app.opener().open_path(&path, None::<&str>).map_err(|e| e.to_string())
+}
+
+/// 发送系统通知（Agent 任务完成等）
+#[tauri::command]
+async fn send_notification(app: AppHandle, title: String, body: String) -> Result<(), String> {
+    use tauri_plugin_notification::NotificationExt;
+    app.notification()
+        .builder()
+        .title(title)
+        .body(body)
+        .show()
+        .map_err(|e| e.to_string())
+}
+
 #[derive(Clone, serde::Serialize)]
 #[serde(tag = "t", rename_all = "lowercase")]
 enum Frame {
@@ -395,6 +414,7 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
         .manage(PidMap::default())
         .manage(HttpAbortMap::default())
         .invoke_handler(tauri::generate_handler![
@@ -408,6 +428,8 @@ fn main() {
             proc_run,
             proc_kill,
             pick_folder,
+            open_path,
+            send_notification,
             http_stream,
             http_stream_cancel
         ])
