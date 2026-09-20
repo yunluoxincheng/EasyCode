@@ -15,6 +15,14 @@ export function App() {
     store.init();
     store.loadSettings();
     void updater.init();
+    // 禁用 WebView 原生右键菜单；输入类控件内保留（右键粘贴可用）——TODOS #16
+    const onContextMenu = (e: MouseEvent): void => {
+      const t = e.target as HTMLElement;
+      if (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable) return;
+      e.preventDefault();
+    };
+    document.addEventListener('contextmenu', onContextMenu);
+    return () => document.removeEventListener('contextmenu', onContextMenu);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

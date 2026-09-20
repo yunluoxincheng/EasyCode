@@ -20,6 +20,8 @@ export interface ToolContext {
   host: Host;
   workspace: string;
   signal: AbortSignal;
+  /** 本轮已成功读取的文件绝对路径集合；edit_file / 覆盖已有文件的 write_file 强制先读（防盲改） */
+  readFiles?: Set<string>;
 }
 
 export interface Tool {

@@ -32,7 +32,7 @@ export const readFileTool: Tool = {
       required: ['path'],
     },
   },
-  async execute(input, { host, workspace }) {
+  async execute(input, { host, workspace, readFiles }) {
     const { path: rel, offset = 0, limit = 2000 } = input as {
       path: string;
       offset?: number;
@@ -45,6 +45,7 @@ export const readFileTool: Tool = {
     let content = await host.fs.readFile(abs);
     if (content.includes('\u0000')) throw new Error(`疑似二进制文件，无法以文本读取: ${rel}`);
     if (content.length > MAX_READ_BYTES) content = content.slice(0, MAX_READ_BYTES);
+    readFiles?.add(abs);
     return withLineNumbers(content, offset, limit);
   },
 };
@@ -52,7 +53,8 @@ export const readFileTool: Tool = {
 export const writeFileTool: Tool = {
   spec: {
     name: 'write_file',
-    description: '创建或整体覆盖工作区内的文件。修改已有文件优先使用 edit_file。',
+    description:
+      '创建新文件或整体覆盖工作区内的文件。覆盖已有文件前必须先 read_file 该文件；修改局部内容优先使用 edit_file。',
     parameters: {
       type: 'object',
       properties: {
@@ -63,12 +65,17 @@ export const writeFileTool: Tool = {
     },
   },
   sensitive: true,
-  async execute(input, { host, workspace }) {
+  async execute(input, { host, workspace, readFiles }) {
     const { path: rel, content } = input as { path: string; content: string };
     const abs = resolveWorkspacePath(workspace, rel, host);
+    const stat = await host.fs.stat(abs);
+    if (stat && readFiles && !readFiles.has(abs)) {
+      throw new Error(`覆盖已有文件前请先 read_file: ${rel}（防盲改保护）`);
+    }
     const dir = host.paths.dirname(abs);
     if (dir && dir !== abs) await host.fs.mkdir(dir, { recursive: true });
     await host.fs.writeFile(abs, content);
+    readFiles?.add(abs);
     return `已写入 ${rel}（${content.split('\n').length} 行, ${content.length} 字符）`;
   },
 };
@@ -77,7 +84,7 @@ export const editFileTool: Tool = {
   spec: {
     name: 'edit_file',
     description:
-      '对文件做精确字符串替换。old_string 必须在文件中唯一（除非 replace_all=true），否则报错。',
+      '对文件做精确字符串替换。仅可编辑本会话已 read_file 过的文件。old_string 必须在文件中唯一（除非 replace_all=true），否则报错。',
     parameters: {
       type: 'object',
       properties: {
@@ -90,7 +97,7 @@ export const editFileTool: Tool = {
     },
   },
   sensitive: true,
-  async execute(input, { host, workspace }) {
+  async execute(input, { host, workspace, readFiles }) {
     const { path: rel, old_string: oldStr, new_string: newStr, replace_all = false } =
       input as {
         path: string;
@@ -100,6 +107,9 @@ export const editFileTool: Tool = {
       };
     if (oldStr === newStr) throw new Error('old_string 与 new_string 相同，无需修改');
     const abs = resolveWorkspacePath(workspace, rel, host);
+    if (readFiles && !readFiles.has(abs)) {
+      throw new Error(`尚未读取该文件，请先 read_file 后再编辑: ${rel}（防盲改保护）`);
+    }
     const content = await host.fs.readFile(abs);
     const count = content.split(oldStr).length - 1;
     if (count === 0) throw new Error(`old_string 在文件中不存在: ${rel}`);
@@ -108,6 +118,7 @@ export const editFileTool: Tool = {
     }
     const next = replace_all ? content.split(oldStr).join(newStr) : content.replace(oldStr, newStr);
     await host.fs.writeFile(abs, next);
+    readFiles?.add(abs);
     return `已修改 ${rel}（替换 ${replace_all ? count : 1} 处）`;
   },
 };

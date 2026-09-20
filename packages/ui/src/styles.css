@@ -1158,8 +1158,8 @@ select:focus-visible,
 .update-pop {
   position: absolute;
   bottom: calc(100% + 8px);
-  right: 0;
-  width: 300px;
+  left: 0;
+  width: 320px;
   background: var(--panel);
   border: 1px solid var(--border2);
   border-radius: var(--radius);

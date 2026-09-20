@@ -28,6 +28,9 @@ export type ApprovalItem = {
 };
 export type ErrorItem = { kind: 'error'; id: string; message: string };
 
+/** 回合内条目：过程性内容（思考/工具/审批/错误），与顶层用户消息、回合容器相区分 */
+export type TurnEntry = AssistantItem | ToolItem | ApprovalItem | ErrorItem;
+
 /** 一个回合：一次发送的完整执行（思考 + 工具调用 + 中间说明 + 最终回答） */
 export type TurnItem = {
   kind: 'turn';
@@ -36,10 +39,11 @@ export type TurnItem = {
   durationMs?: number;
   /** 折叠时只显示最终结果；运行中默认展开 */
   collapsed: boolean;
-  items: (AssistantItem | ToolItem | ApprovalItem | ErrorItem)[];
+  items: TurnEntry[];
 };
 
-export type TranscriptItem = UserItem | TurnItem;
+/** 顶层时间线条目：用户消息、回合容器，以及回合聚合前的兜底平铺条目 */
+export type TranscriptItem = UserItem | TurnItem | TurnEntry;
 
 /**
  * 应用状态仓库（框架无关，React 通过 useSyncExternalStore 订阅）。
@@ -475,12 +479,12 @@ export class AppStore {
   currentTurn: TurnItem | null = null;
 
   /** 事件产生的条目进入当前回合 */
-  private pushToTurn(item: AssistantItem | ToolItem | ApprovalItem | ErrorItem): void {
+  private pushToTurn(item: TurnEntry): void {
     if (this.currentTurn) this.currentTurn.items.push(item);
-    else this.items.push(item as TranscriptItem);
+    else this.items.push(item);
   }
 
-  private findInTurn<T extends TranscriptItem>(pred: (i: TranscriptItem) => i is T): T | undefined {
+  private findInTurn<T extends TurnEntry>(pred: (i: TurnEntry) => i is T): T | undefined {
     return (this.currentTurn?.items ?? []).find(pred);
   }
 

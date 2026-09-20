@@ -534,7 +534,8 @@ export function Transcript() {
               store.items.lastIndexOf(item) === store.items.length - 1 - (store.items.length > 1 && store.items[store.items.length - 1].kind === 'turn' ? 1 : 0);
             return <UserView key={item.id} item={item} canEdit={isLastUser} />;
           }
-          return <TurnView key={item.id} turn={item} />;
+          if (item.kind === 'turn') return <TurnView key={item.id} turn={item} />;
+          return null; // TurnEntry 兜底条目不会出现在顶层：回合聚合总是先建容器
         })}
         <div ref={bottomRef} />
       </div>

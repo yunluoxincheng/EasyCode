@@ -53,11 +53,12 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
     signal,
     approval,
     emit,
-    maxSteps = 25,
+    maxSteps = 200,
     reasoningEffort,
   } = options;
 
   try {
+    const readFiles = new Set<string>();
     for (let step = 0; step < maxSteps; step++) {
       if (signal.aborted) return finish('aborted');
 
@@ -93,6 +94,7 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
           workspace,
           signal,
           approval,
+          readFiles,
         });
         emit({
           type: 'tool_result',
