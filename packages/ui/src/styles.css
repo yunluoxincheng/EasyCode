@@ -265,7 +265,7 @@ body::after {
 .msg-icon:hover, .copy-btn:hover, .msg-copy:hover { color: var(--green); background: var(--panel2); }
 .msg.user { position: relative; flex-direction: column; }
 .msg-meta {
-  display: flex; justify-content: flex-end; align-items: center; gap: 4px;
+  display: flex; justify-content: flex-start; align-items: center; gap: 4px;
   margin-top: 3px; opacity: .55; transition: opacity .12s;
 }
 .msg.user:hover .msg-meta { opacity: 1; }
@@ -281,7 +281,7 @@ body::after {
 
 /* 用户消息 = 提示符行 */
 .msg { margin-bottom: 14px; display: flex; }
-.msg.user { align-items: flex-end; }
+.msg.user { align-items: flex-start; }
 .msg.user .msg-content {
   background: var(--panel2);
   border: 1px solid var(--border2);
