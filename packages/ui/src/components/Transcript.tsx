@@ -340,11 +340,41 @@ export function Transcript() {
   const [hover, setHover] = useState<{ top: number; text: string } | null>(null);
   const [railH, setRailH] = useState(0);
 
-  // 仅发送消息与切换会话时滚到底部；流式输出/工具事件不滚动（#3）
+  // 贴底跟随：pinned 时内容变化（流式输出/工具）自动贴底；脱离后不打扰
   useEffect(() => {
-    if (!store.autoScrollOn) return;
-    bottomRef.current?.scrollIntoView({ behavior: 'auto', block: 'end' });
-  }, [store.scrollTick, store.activeId, store.autoScrollOn]);
+    const el = scrollRef.current;
+    if (!el || !store.autoScrollOn || !store.atBottom) return;
+    el.scrollTop = el.scrollHeight;
+  }, [store.version, store.atBottom, store.activeId, store.autoScrollOn]);
+
+  // 发送/切换会话：强制贴底并恢复跟随
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el || !store.autoScrollOn) return;
+    el.scrollTop = el.scrollHeight;
+    store.setAtBottom(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [store.scrollTick, store.activeId]);
+
+  // 滚动位置 → 贴底状态（贴近底部=跟随；离开=自由阅读）
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const onScroll = (): void => {
+      const max = el.scrollHeight - el.clientHeight;
+      store.setAtBottom(el.scrollTop >= max - 80);
+    };
+    // 滚轮向上：立即脱离跟随（保证第一格滚轮就生效，不被贴底拉回）
+    const onWheel = (e: WheelEvent): void => {
+      if (e.deltaY < 0) store.setAtBottom(false);
+    };
+    el.addEventListener('scroll', onScroll);
+    el.addEventListener('wheel', onWheel);
+    return () => {
+      el.removeEventListener('scroll', onScroll);
+      el.removeEventListener('wheel', onWheel);
+    };
+  }, []);
 
   /** 收集对话 exchanges：一条用户消息 + 其后的模型回合 = 一个刻度 */
   const measure = (): void => {
@@ -471,6 +501,20 @@ export function Transcript() {
           </div>
         )}
       </div>
+      {!store.atBottom && store.items.length > 0 && (
+        <button
+          className="jump-bottom"
+          title="回到底部"
+          onClick={() => {
+            const el = scrollRef.current;
+            if (!el) return;
+            el.scrollTop = el.scrollHeight;
+            store.setAtBottom(true);
+          }}
+        >
+          ↓
+        </button>
+      )}
       <div className="transcript-scroll" ref={scrollRef}>
         {store.items.length === 0 && (
           <div className="hero">

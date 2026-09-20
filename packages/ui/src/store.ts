@@ -339,8 +339,17 @@ export class AppStore {
     this.notify();
   }
 
-  /** 发送时递增，驱动会话区滚动到底部（流式输出与工具事件不触发滚动） */
+  /** 发送时递增，驱动会话区滚动到底部 */
   scrollTick = 0;
+  /** 贴底跟随：true=位于底部跟随输出；用户上翻后为 false，停止跟随 */
+  atBottom = true;
+
+  setAtBottom(v: boolean): void {
+    if (this.atBottom !== v) {
+      this.atBottom = v;
+      this.notify();
+    }
+  }
 
   async send(text: string): Promise<void> {
     if (!this.activeId || this.running || !text.trim()) return;
@@ -355,7 +364,10 @@ export class AppStore {
     };
     this.items.push(turn);
     this.currentTurn = turn;
-    if (this.autoScrollOn) this.scrollTick++;
+    if (this.autoScrollOn) {
+      this.scrollTick++;
+      this.atBottom = true;
+    }
     this.notify();
     try {
       await this.client.sendMessage(this.activeId, text.trim());
