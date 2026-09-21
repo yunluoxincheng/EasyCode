@@ -7,8 +7,8 @@ function fmtTk(n: number | undefined): string {
   return v >= 1000 ? `${(v / 1000).toFixed(1)}k` : String(v);
 }
 
-/** token 用量 chip + 明细 popover（累计输入/输出/合计/步数/最近一步） */
-export function UsageChip() {
+/** token 用量 chip + 明细 popover（累计输入/输出/合计/步数/最近一步）；紧凑态收敛为微型图标 + 悬停浮出明细（TODOS #20） */
+export function UsageChip({ compact = false }: { compact?: boolean }) {
   const store = useStore();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -29,14 +29,31 @@ export function UsageChip() {
   const total = (su.input ?? 0) + (su.output ?? 0);
 
   return (
-    <div className="usage-wrap" ref={ref}>
+    <div
+      className="usage-wrap"
+      ref={ref}
+      onMouseEnter={compact ? () => setOpen(true) : undefined}
+      onMouseLeave={compact ? () => setOpen(false) : undefined}
+    >
       <button
         className="chip usage-chip"
-        title="用量明细"
+        title={
+          compact
+            ? `用量明细：↑${fmtTk(u.inputTokens)} ↓${fmtTk(u.outputTokens)} tk · 悬停查看`
+            : '用量明细'
+        }
         onClick={() => setOpen(!open)}
       >
-        ↑{fmtTk(u.inputTokens)} ↓{fmtTk(u.outputTokens)} tk
-        <span className="usage-caret">▾</span>
+        {compact ? (
+          <span className="chip-mini" aria-label="用量明细">
+            ⇅
+          </span>
+        ) : (
+          <>
+            ↑{fmtTk(u.inputTokens)} ↓{fmtTk(u.outputTokens)} tk
+          </>
+        )}
+        {!compact && <span className="usage-caret">▾</span>}
       </button>
       {open && (
         <div className="usage-pop">

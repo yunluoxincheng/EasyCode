@@ -18,9 +18,12 @@ function fmtTk(n: number): string {
 }
 
 const DEFAULT_WINDOW = 1_000_000;
+/** 紧凑态进度环（TODOS #20）：半径与周长，SVG 逆时针从顶部起描 */
+const RING_R = 5.5;
+const RING_C = 2 * Math.PI * RING_R;
 
-/** 上下文容量 chip + 面板（ZCode 同款）：当前会话在模型上下文窗口中的精确占用 */
-export function ContextChip() {
+/** 上下文容量 chip + 面板（ZCode 同款）：当前会话在模型上下文窗口中的精确占用；紧凑态收敛为进度环 + 悬停浮出看板（TODOS #20） */
+export function ContextChip({ compact = false }: { compact?: boolean }) {
   const store = useStore();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -106,10 +109,37 @@ export function ContextChip() {
     su.input > 0 && su.cached > 0 ? `${((su.cached / su.input) * 100).toFixed(1)}%` : '0%';
 
   return (
-    <div className="usage-wrap" ref={ref}>
-      <button className="chip ctx-chip" title="上下文容量" onClick={() => setOpen(!open)}>
-        ⧉ {fmtTk(used)}
-        <span className="usage-caret">▾</span>
+    <div
+      className="usage-wrap"
+      ref={ref}
+      onMouseEnter={compact ? () => setOpen(true) : undefined}
+      onMouseLeave={compact ? () => setOpen(false) : undefined}
+    >
+      <button
+        className="chip ctx-chip"
+        title={
+          compact
+            ? `上下文容量 ${fmtTk(used)} / ${fmtTk(windowTok)} tk（${pct.toFixed(1)}%）· 悬停查看`
+            : '上下文容量'
+        }
+        onClick={() => setOpen(!open)}
+      >
+        {compact ? (
+          <svg className="ctx-ring" width="14" height="14" viewBox="0 0 14 14" aria-label="上下文容量">
+            <circle className="ctx-ring-bg" cx="7" cy="7" r={RING_R} />
+            <circle
+              className="ctx-ring-fill"
+              cx="7"
+              cy="7"
+              r={RING_R}
+              strokeDasharray={RING_C}
+              strokeDashoffset={RING_C * (1 - Math.min(pct, 100) / 100)}
+            />
+          </svg>
+        ) : (
+          <>⧉ {fmtTk(used)}</>
+        )}
+        {!compact && <span className="usage-caret">▾</span>}
       </button>
       {open && (
         <div className="usage-pop ctx-pop">

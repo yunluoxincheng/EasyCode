@@ -19,14 +19,39 @@ function Md({ text }: { text: string }) {
   return <div className="md" dangerouslySetInnerHTML={{ __html: renderMarkdown(text) }} />;
 }
 
-/** 思考过程：可折叠的暗色引用块 */
-function Thinking({ text }: { text: string }) {
-  const [open, setOpen] = useState(false);
+/** 思考过程折叠卡片：统一终端极客风、支持吸顶、一键复制与字符统计 */
+function Thinking({ text, live }: { text: string; live?: boolean }) {
+  const [userToggled, setUserToggled] = useState<boolean | null>(null);
+  const open = userToggled !== null ? userToggled : Boolean(live);
+  const charCount = text.length;
+  const summaryText = charCount >= 1000 ? `${(charCount / 1000).toFixed(1)}k 字推理` : `${charCount} 字推理`;
+
   return (
-    <details className="thinking" open={open} onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}>
-      <summary>思考过程</summary>
-      <div className="thinking-body">{text}</div>
-    </details>
+    <div className={`thinking-card ${open ? 'open' : 'closed'}`}>
+      <button
+        className="thinking-head"
+        onClick={() => setUserToggled(!open)}
+        type="button"
+        title={open ? '收起思考过程' : '展开思考过程'}
+      >
+        <span className={`thinking-badge ${live ? 'live' : ''}`}>
+          {live ? '[ THINK · 思考中... ]' : '[ THINK ]'}
+        </span>
+        <span className="thinking-title">思考过程</span>
+        <span className="thinking-summary">{summaryText}</span>
+        <span className="spacer" />
+        <span className="thinking-chevron">{open ? '▾' : '▸'}</span>
+      </button>
+      {open && (
+        <div className="thinking-body">
+          <div className="thinking-toolbar">
+            <span className="thinking-toolbar-label">// 推理思考内容</span>
+            <CopyButton text={text} />
+          </div>
+          <div className="thinking-content">{text}</div>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -171,10 +196,13 @@ function ToolCard({ item }: { item: ToolItem }) {
       {open && (
         <div className="tool-body">
           <ToolDiff name={item.name} input={item.input} />
-          <div className="kv">
-            <span className="k">输入</span>
-            <pre>{JSON.stringify(item.input, null, 2)}</pre>
-          </div>
+          {/* 文件修改类工具已有结构化 Diff 视窗，raw JSON 输入纯属重复且挤占视线（TODOS #23） */}
+          {item.name !== 'write_file' && item.name !== 'edit_file' && (
+            <div className="kv">
+              <span className="k">输入</span>
+              <pre>{JSON.stringify(item.input, null, 2)}</pre>
+            </div>
+          )}
           {item.result !== undefined && (
             <div className="kv">
               <span className="k">结果</span>
@@ -189,7 +217,7 @@ function ToolCard({ item }: { item: ToolItem }) {
 
 /** run_command 拟终端控制台卡片（TODOS #21） */
 function TerminalCard({ item }: { item: ToolItem }) {
-  const [open, setOpen] = useState(true);
+  const [open, setOpen] = useState(false);
   const i = (item.input ?? {}) as { command?: string; timeout_ms?: number };
   const command = String(i.command ?? '');
 
@@ -704,7 +732,7 @@ function TurnView({ turn }: { turn: TurnItem }) {
           onWheel={onBodyWheel}
         >
           {live && <LiveTicker />}
-          {allThinking ? <Thinking text={allThinking} /> : null}
+          {allThinking ? <Thinking text={allThinking} live={live} /> : null}
           {turn.items.map((it) => (
             <ItemView key={it.id} item={it} />
           ))}

@@ -5,7 +5,7 @@ import {
   type SessionData,
   type SessionMeta,
 } from '@easycode/core';
-import { AgentServer, type AgentClient, type Settings } from '@easycode/engine';
+import { AgentServer, type AgentClient, type ProviderEntry, type Settings } from '@easycode/engine';
 import type { ModelTestResult, ProviderModelInfo, ShellInfo } from '@easycode/engine';
 
 export type { AgentClient };
@@ -135,12 +135,28 @@ export function createDemoClient(): AgentClient {
   });
   const server = new AgentServer(host);
 
+  // 旧版设置迁移会剔除内置演示供应商（demo），浏览器演示模式在设置加载后重新注入 mock 服务
+  const demoProvider: ProviderEntry = {
+    kind: 'mock',
+    baseURL: '',
+    name: '演示 (Mock)',
+    enabled: true,
+    models: [{ name: 'mock-1', enabled: true }],
+  };
+
   // 预创建一个演示会话
-  let ready = server.createSession({
-    workspaceRoot: '/demo-workspace',
-    providerId: 'demo',
-    title: '演示会话',
-  });
+  const ready = (async () => {
+    const current = await server.getSettings();
+    await server.updateSettings({
+      ...current,
+      providers: { ...current.providers, demo: demoProvider },
+    });
+    return server.createSession({
+      workspaceRoot: '/demo-workspace',
+      providerId: 'demo',
+      title: '演示会话',
+    });
+  })();
 
   const wrap = async <T>(fn: () => T | Promise<T>): Promise<T> => {
     await ready;

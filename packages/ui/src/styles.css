@@ -257,7 +257,12 @@ html.crt-off body::after {
 }
 .turn-head {
   display: flex; align-items: center; gap: 8px; width: 100%;
-  background: none; border: none; color: var(--faint);
+  /* 折叠头吸顶（TODOS #24）：容器可见期间常驻视口顶部，实色背景防穿模。
+     Chromium 的 sticky 钉位以滚动容器 padding box 为基准，-22px 补偿 .transcript-scroll 的 padding-top 贴平顶缘 */
+  position: sticky; top: -22px; z-index: 5;
+  background: var(--bg);
+  box-shadow: 0 8px 12px -10px rgba(0, 0, 0, .85);
+  border: none; color: var(--faint);
   font-family: var(--font); font-size: 11.5px; letter-spacing: 1px;
   padding: 6px 10px; text-align: left;
 }
@@ -287,10 +292,17 @@ html.crt-off body::after {
 }
 .turn-final { position: relative; padding: 4px 10px 8px; }
 
+/* 吸顶避让（TODOS #24）：运行态 Live Ticker / 任务清单吸顶栏在场时，折叠头贴附其下不互相遮挡 */
+.turn-body:has(.live-ticker) .tool-head,
+.turn-body:has(.live-ticker) .term-head,
+.turn-body:has(.live-ticker) .thinking-head { top: 29px; }
+/* sticky-todo 钉位 -12px/高约 29px（贴平补偿后底缘在 17px），回合头贴其下 */
+.transcript-scroll:has(.sticky-todo) .turn-head { top: 17px; }
+
 /* 实时动作指示器（TODOS #21 顶部固定常驻优化） */
 .live-ticker {
   position: sticky;
-  top: 0;
+  top: -4px; /* 贴平视窗顶缘（补偿 .turn-body padding-top，TODOS #24 统一钉位） */
   z-index: 10;
   display: flex;
   align-items: center;
@@ -556,35 +568,117 @@ html.crt-off body::after {
 .md th { background: var(--panel2); color: var(--green); font-weight: 700; letter-spacing: .5px; }
 .md tr:hover td { background: rgba(74, 222, 128, .04); }
 
-/* 思考 = 虚线框 */
-.thinking {
+/* ---------------- 思考过程卡片（#24 吸顶 + 统一终端极客风） ---------------- */
+.thinking-card {
   margin: 8px 0;
   border: 1px dashed var(--border);
   border-radius: var(--radius);
-  padding: 6px 12px;
-  color: var(--faint);
+  background: var(--panel);
+  transition: border-color .15s ease;
+}
+.thinking-card:hover { border-color: var(--green-dim); }
+.thinking-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  position: sticky; top: -4px; z-index: 5;
+  background: var(--panel);
+  box-shadow: 0 8px 12px -10px rgba(0, 0, 0, .85);
+  border: none;
+  color: var(--dim);
+  padding: 6px 10px;
+  cursor: pointer;
+  font-family: var(--font);
+  font-size: 11.5px;
+  text-align: left;
+  user-select: none;
+}
+.thinking-card.closed .thinking-head,
+.thinking-card:not(.open) .thinking-head {
+  border-radius: var(--radius);
+}
+.thinking-card.open .thinking-head {
+  border-radius: var(--radius) var(--radius) 0 0;
+  border-bottom: 1px dashed var(--border);
+}
+.thinking-head:hover { background: var(--panel2); }
+.thinking-badge {
+  font-weight: 700;
+  letter-spacing: .5px;
+  font-size: 11px;
+  color: var(--green-dim);
+}
+.thinking-badge.live {
+  color: var(--green);
+  animation: pulse 1.2s infinite;
+}
+.thinking-title {
+  font-weight: 700;
+  color: var(--text);
   font-size: 12px;
 }
-.thinking summary { cursor: pointer; user-select: none; }
-.thinking summary::-webkit-details-marker { display: none; }
-.thinking summary::before { content: '· thinking · '; color: var(--green-dim); letter-spacing: 1px; }
-.thinking-body { padding-top: 6px; white-space: pre-wrap; }
+.thinking-summary {
+  color: var(--faint);
+  font-size: 11.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.thinking-chevron {
+  color: var(--faint);
+  font-size: 10px;
+}
+.thinking-body {
+  padding: 0;
+  background: #050806;
+  border-radius: 0 0 var(--radius) var(--radius);
+}
+.thinking-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(255, 255, 255, .02);
+}
+.thinking-toolbar-label {
+  font-size: 10px;
+  color: var(--faint);
+  letter-spacing: 1px;
+}
+.thinking-content {
+  padding: 8px 12px 10px;
+  font-family: var(--font);
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--dim);
+  max-height: 360px;
+  overflow-y: auto;
+}
 
-/* 工具卡片 = [ OK ] 盒子 */
+/* 工具卡片 = [ OK ] 盒子（overflow 须为 visible，否则内部 sticky 头部失效，TODOS #24） */
 .tool-card {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   margin: 10px 0;
   background: var(--panel);
-  overflow: hidden;
 }
 .tool-head {
   display: flex; align-items: center; gap: 10px;
   width: 100%;
-  background: none; border: none; color: var(--dim);
+  /* 折叠头吸顶（TODOS #24）；-4px 补偿 .turn-body 的 padding-top 贴平视窗顶缘 */
+  position: sticky; top: -4px; z-index: 5;
+  background: var(--panel);
+  box-shadow: 0 8px 12px -10px rgba(0, 0, 0, .85);
+  border: none; color: var(--dim);
   padding: 7px 12px; cursor: pointer; font-size: 12px;
   text-align: left; font-family: var(--font);
 }
+.tool-card:not(.open) .tool-head { border-radius: var(--radius); }
+.tool-card.open .tool-head { border-radius: var(--radius) var(--radius) 0 0; }
 .tool-head:hover { background: var(--panel2); }
 .tool-status { font-weight: 700; letter-spacing: 1px; font-size: 11px; }
 .tool-status::before { content: '[ '; color: var(--faint); }
@@ -749,8 +843,7 @@ html.crt-off body::after {
   border-radius: var(--radius);
   margin: 8px 0;
   background: #050806;
-  overflow: hidden;
-  transition: border-color .15s ease;
+  transition: border-color .15s ease; /* 不设 overflow:hidden，保证头部吸顶生效（TODOS #24） */
 }
 .term-card:hover { border-color: var(--green-dim); }
 .term-card.status-running { border-color: var(--amber); }
@@ -760,7 +853,9 @@ html.crt-off body::after {
   align-items: center;
   gap: 8px;
   width: 100%;
+  position: sticky; top: -4px; z-index: 5; /* 折叠头吸顶（TODOS #24），-4px 补偿 padding-top */
   background: var(--panel2);
+  box-shadow: 0 8px 12px -10px rgba(0, 0, 0, .85);
   border: none;
   border-bottom: 1px solid var(--border);
   color: var(--dim);
@@ -769,6 +864,14 @@ html.crt-off body::after {
   font-size: 12px;
   text-align: left;
   font-family: var(--font);
+}
+.term-card.closed .term-head,
+.term-card:not(.open) .term-head {
+  border-radius: var(--radius);
+  border-bottom: none;
+}
+.term-card.open .term-head {
+  border-radius: var(--radius) var(--radius) 0 0;
 }
 .term-head:hover { background: var(--panel); }
 .term-status-badge {
@@ -1092,7 +1195,7 @@ html.crt-off body::after {
   display: inline-flex; align-items: center;
   border: 1px solid var(--border); border-radius: var(--radius);
   padding: 1px 9px; font-size: 11px; color: var(--dim);
-  background: none;
+  background: none; white-space: nowrap; flex: none;
 }
 .spacer { flex: 1; }
 .running-dot {
@@ -1105,7 +1208,7 @@ html.crt-off body::after {
 .composer-input { display: flex; gap: 10px; align-items: flex-end; position: relative; }
 .composer-input::before {
   content: '❯';
-  position: absolute; left: 12px; bottom: 12px;
+  position: absolute; left: 12px; top: 10px;
   color: var(--green); font-size: 13px; pointer-events: none;
 }
 .composer-input textarea {
@@ -1120,11 +1223,39 @@ html.crt-off body::after {
   resize: none;
   outline: none;
   line-height: 1.55;
+  /* 自适应高度（TODOS #20）：2 行起步、最多 8 行，超出出纵向滚动条；JS 侧按内容撑高 */
+  min-height: 60px;
+  max-height: 181px;
+  overflow-y: auto;
+  transition: height .12s ease;
 }
 .composer-input textarea:focus { border-color: var(--green-dim); }
 .composer-input textarea:disabled { opacity: .55; }
 .composer-input textarea::placeholder { color: var(--faint); }
 .send { height: 40px; min-width: 84px; }
+
+/* 拖拽悬停高亮态（TODOS #20）：文件拖至输入框上时给出行内提示与绿色高亮 */
+.composer-input.drag-over::before { color: var(--text-bright); }
+.composer-input.drag-over textarea {
+  border-color: var(--green);
+  background: rgba(74, 222, 128, .04);
+  box-shadow: 0 0 0 1px var(--green-dim);
+}
+.drop-hint {
+  position: absolute; top: 9px; right: 108px; z-index: 2;
+  color: var(--green); font-size: 10.5px; letter-spacing: 1px;
+  pointer-events: none; user-select: none;
+}
+
+/* 顶部栏紧凑态（TODOS #20）：窗口可用宽度紧张时用量/容量 chip 收敛为微型图标与进度环 */
+.chip-mini { display: inline-flex; align-items: center; font-size: 11px; line-height: 1; }
+.ctx-ring { display: block; }
+.ctx-ring-bg { fill: none; stroke: var(--border2); stroke-width: 2.5; }
+.ctx-ring-fill {
+  fill: none; stroke: var(--green); stroke-width: 2.5;
+  transform: rotate(-90deg); transform-origin: 50% 50%;
+  transition: stroke-dashoffset .3s ease;
+}
 
 /* 终端风按钮统一方括号装饰 */
 .btn::before { content: '[ '; color: var(--faint); }
@@ -1985,6 +2116,7 @@ select:focus-visible,
   .help-menu,
   .usage-pop,
   .ctx-pop,
+  .composer-input textarea,
   .toast {
     animation: none !important;
     transition: none !important;
