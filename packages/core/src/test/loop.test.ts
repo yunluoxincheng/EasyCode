@@ -157,6 +157,36 @@ test('安全：路径逃逸被拒绝', async () => {
   assert.match(toolResult.content, /越界|失败/);
 });
 
+test('循环：maxSteps 步数上限生效', async () => {
+  const env = makeEnv('yolo');
+  const infiniteCall: ToolCallBlock = {
+    type: 'tool_call',
+    id: 'c1',
+    name: 'read_file',
+    input: { path: 'hello.txt' },
+  };
+  let count = 0;
+  const infiniteProvider: Provider = {
+    id: 'infinite',
+    async stream() {
+      count++;
+      return { blocks: [infiniteCall] };
+    },
+  };
+  const result = await runAgentLoop({
+    ...env,
+    provider: infiniteProvider,
+    tools: toolsFor(),
+    workspace: '/ws',
+    systemPrompt: 's',
+    maxSteps: 3,
+  });
+  assert.equal(result.reason, 'error');
+  assert.match(result.errorMessage ?? '', /已达单次任务最大步数（3）/);
+  assert.equal(count, 3);
+});
+
+
 test('中止：abort 后循环以 aborted 结束', async () => {
   const env = makeEnv();
   const controller = new AbortController();

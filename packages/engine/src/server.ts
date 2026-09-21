@@ -275,6 +275,7 @@ export class AgentServer {
         },
         reasoningEffort: rt.data.meta.reasoningEffort ?? '',
         shell: this.settings.shell ?? 'auto',
+        maxSteps: this.settings.maxSteps ?? 200,
       });
       if (result.reason === 'error' && result.errorMessage) {
         this.events.emit({ sessionId: id, event: { type: 'error', message: result.errorMessage } });

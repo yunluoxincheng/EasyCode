@@ -877,6 +877,23 @@ export function SettingsPage() {
                   onChange={(v) => patch({ shell: v as any })}
                 />
               </label>
+              <label className="field">
+                <span>单次任务最大步数</span>
+                <input
+                  type="number"
+                  min={10}
+                  max={500}
+                  step={5}
+                  value={draft.maxSteps ?? 200}
+                  onChange={(e) => {
+                    const val = Number(e.target.value);
+                    patch({ maxSteps: isNaN(val) ? 200 : Math.max(10, Math.min(500, val)) });
+                  }}
+                />
+              </label>
+              <p className="hint">
+                单次任务最大步数：模型与工具交互的最大轮数上限（防死循环与异常空转保险），缺省为 200 步（可调范围 10~500 步）。
+              </p>
               <p className="hint">
                 Windows 平台优先推荐 Git Bash 或 PowerShell 7，模型可直接执行 Linux/Unix 惯用命令（ls、cat、rm 等）且原生 UTF-8 解码杜绝乱码。
               </p>

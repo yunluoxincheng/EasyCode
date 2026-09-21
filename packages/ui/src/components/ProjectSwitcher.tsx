@@ -8,15 +8,19 @@ export function ProjectSwitcher() {
 
   const projects = store.settings?.projects ?? [];
   const current = projects.find((p) => p.folder === session.workspaceRoot);
+  const folderName = session.workspaceRoot
+    ? session.workspaceRoot.split(/[\\/]/).filter(Boolean).pop() || session.workspaceRoot
+    : '';
+  const displayLabel = current ? current.name : (folderName || '不在项目中工作');
 
   return (
     <div className="proj-switch" onClick={(e) => e.stopPropagation()}>
       <button
-        className={`chip proj-chip ${current ? '' : 'unbound'}`}
-        title="切换项目"
+        className={`chip proj-chip ${session.workspaceRoot ? '' : 'unbound'}`}
+        title={session.workspaceRoot ? `${displayLabel} (${session.workspaceRoot})` : '未绑定工作区'}
         onClick={() => store.toggleProjectSwitcher()}
       >
-        {current ? current.name : '不在项目中工作'}
+        {displayLabel}
         <span className="proj-caret">▾</span>
       </button>
       {store.projectSwitcherOpen && (
@@ -63,6 +67,20 @@ export function ProjectSwitcher() {
             >
               ⌂ 打开文件夹
             </button>
+            {session.workspaceRoot && !current && (
+              <button
+                className="proj-foot-item"
+                onClick={() => {
+                  store.toggleProjectSwitcher();
+                  void store
+                    .createProject(folderName, session.workspaceRoot)
+                    .then(() => store.showToast(`已将「${folderName}」添加到项目列表`))
+                    .catch((err) => store.showToast(err instanceof Error ? err.message : String(err)));
+                }}
+              >
+                ＋ 将当前目录存为项目
+              </button>
+            )}
             {session.workspaceRoot && (
               <button
                 className="proj-foot-item"

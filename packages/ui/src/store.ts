@@ -199,6 +199,40 @@ export class AppStore {
     return entry;
   }
 
+  /** 重命名项目别名 */
+  async renameProject(id: string, name: string): Promise<void> {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    const cur = this.settings?.projects ?? [];
+    const updated = cur.map((p) => (p.id === id ? { ...p, name: trimmed } : p));
+    await this.saveSettings({ projects: updated });
+    this.notify();
+  }
+
+  /** 从项目列表中移除（仅移除配置，不删除本地实际目录） */
+  async deleteProject(id: string): Promise<void> {
+    const cur = this.settings?.projects ?? [];
+    const updated = cur.filter((p) => p.id !== id);
+    if (this.activeProjectId === id) {
+      this.activeProjectId = null;
+    }
+    await this.saveSettings({ projects: updated });
+    this.notify();
+  }
+
+  /** 检查指定项目/文件夹分组是否处于折叠状态 */
+  isProjectFolded(key: string): boolean {
+    return (this.settings?.collapsedProjects ?? []).includes(key);
+  }
+
+  /** 切换项目/文件夹分组的折叠状态（并持久化） */
+  async toggleProjectFold(key: string): Promise<void> {
+    const cur = this.settings?.collapsedProjects ?? [];
+    const next = cur.includes(key) ? cur.filter((k) => k !== key) : [...cur, key];
+    await this.saveSettings({ collapsedProjects: next });
+    this.notify();
+  }
+
   /* ---------------- 初始化与加载 ---------------- */
 
   async init(): Promise<void> {
@@ -390,6 +424,17 @@ export class AppStore {
     });
     this.sessions = [meta, ...this.sessions];
     await this.selectSession(meta.id);
+  }
+
+  /** 重命名会话 */
+  async renameSession(id: string, title: string): Promise<void> {
+    const trimmed = title.trim();
+    if (!trimmed) return;
+    const current = this.sessions.find((s) => s.id === id);
+    if (current && current.title === trimmed) return;
+    const meta = await this.client.renameSession(id, trimmed);
+    this.sessions = this.sessions.map((s) => (s.id === id ? meta : s));
+    this.notify();
   }
 
   async deleteSession(id: string): Promise<void> {

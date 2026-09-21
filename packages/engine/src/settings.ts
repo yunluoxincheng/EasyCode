@@ -107,6 +107,10 @@ export interface Settings {
   shell?: ShellType;
   /** 复古 CRT 扫描线质感；默认开 */
   crtScanline?: boolean;
+  /** 单次任务最大步数；缺省 200，范围 10~500 */
+  maxSteps?: number;
+  /** 侧栏折叠的项目 ID 或文件夹路径集合 */
+  collapsedProjects?: string[];
 }
 
 /** 内置 Provider 预设：均为 OpenAI 兼容端点（或 Anthropic），API Key 留空由用户填写 */
@@ -155,6 +159,8 @@ export const DEFAULT_SETTINGS: Settings = {
   defaultApprovalMode: 'ask',
   autoScroll: true,
   crtScanline: true,
+  maxSteps: 200,
+  collapsedProjects: [],
   webSearch: { enabled: false, backend: 'searxng', maxResults: 5 },
   shell: 'auto',
 };
