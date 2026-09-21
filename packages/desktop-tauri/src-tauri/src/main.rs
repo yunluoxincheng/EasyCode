@@ -406,7 +406,8 @@ async fn proc_run(
 ) -> Result<serde_json::Value, String> {
     let timeout = Duration::from_millis(timeout_ms.unwrap_or(120_000).clamp(1_000, 600_000));
 
-    let mut cmd = if cfg!(windows) {
+    #[cfg(windows)]
+    let mut cmd = {
         let shells = detect_available_shells();
         let (bin, shell_args) = resolve_windows_shell(shell.as_deref(), &shells);
         let mut c = Command::new(bin);
@@ -415,8 +416,14 @@ async fn proc_run(
         }
         c.arg(&command);
         c
-    } else {
-        let mut c = Command::new("sh");
+    };
+    #[cfg(not(windows))]
+    let mut cmd = {
+        let bin = match shell.as_deref() {
+            Some("bash") => "bash",
+            _ => "sh",
+        };
+        let mut c = Command::new(bin);
         c.arg("-c").arg(&command);
         c
     };
