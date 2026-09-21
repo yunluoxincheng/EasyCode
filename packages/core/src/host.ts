@@ -11,6 +11,14 @@ export interface ProcessResult {
   stderr: string;
 }
 
+export interface ProcessRunOptions {
+  cwd?: string;
+  timeoutMs?: number;
+  signal?: AbortSignal;
+  /** 执行所用的终端 shell；auto=由宿主自动探测，也可指定 git-bash / pwsh / powershell / cmd */
+  shell?: string;
+}
+
 export interface Host {
   fs: {
     readFile(path: string): Promise<string>;
@@ -23,7 +31,7 @@ export interface Host {
   process: {
     run(
       command: string,
-      options: { cwd?: string; timeoutMs?: number; signal?: AbortSignal },
+      options: ProcessRunOptions,
     ): Promise<ProcessResult>;
   };
   paths: {

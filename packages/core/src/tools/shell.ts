@@ -17,13 +17,13 @@ export const runCommandTool: Tool = {
     },
   },
   sensitive: true,
-  async execute(input, { host, workspace, signal }) {
+  async execute(input, { host, workspace, signal, shell }) {
     const { command, timeout_ms = 120_000 } = input as {
       command: string;
       timeout_ms?: number;
     };
     const timeoutMs = Math.min(Math.max(1000, timeout_ms), 600_000);
-    const result = await host.process.run(command, { cwd: workspace, timeoutMs, signal });
+    const result = await host.process.run(command, { cwd: workspace, timeoutMs, signal, shell });
     const parts: string[] = [`退出码: ${result.code ?? 'signal'}`];
     const stdout = result.stdout.slice(0, MAX_OUTPUT);
     const stderr = result.stderr.slice(0, MAX_OUTPUT);

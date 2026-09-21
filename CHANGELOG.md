@@ -2,6 +2,20 @@
 
 本文件记录 EasyCode 每个版本的变更。发布时，GitHub Release 说明自动取自对应版本的段落。
 
+## [0.1.10] - 2026-09-21
+
+### 新增
+- Windows Shell 增强：`run_command` 启动时自动探测系统最优可用 Shell（优先级：`PowerShell 7 (pwsh) → Git Bash → Windows PowerShell 5.1 → Command Prompt (cmd)`），模型可顺畅执行 Linux 习惯命令（`ls`、`cat`、`rm -rf` 等）（TODOS #1）
+- 设置页「常规」新增「命令行终端 (Shell)」下拉单选：动态展示系统各 Shell 探测状态（可用/未检测到），默认自动探测，支持用户手动覆盖（TODOS #1）
+
+### 修复
+- 修复 Windows 中文编码乱码：Rust 宿主对子进程输出增加自适应智能转码（`decode_output`），优先解析合法 UTF-8，包含非法字节时按 Windows 当前 ANSI 代码页（CP_ACP/GBK）无损转码，彻底杜绝 cmd 和 powershell 中文输出乱码（TODOS #1）
+
+### 技术
+- 新增宿主命令 `proc_detect_shells`，返回各终端可用性与探测路径
+- `proc_run` 扩展 `shell` 参数，支持动态路由与分流调用
+- Core 与 Engine 链路全打通：`ProcessRunOptions.shell`、`ToolContext.shell`、`Settings.shell`（默认 `auto`）
+
 ## [0.1.9] - 2026-09-21
 
 ### 新增

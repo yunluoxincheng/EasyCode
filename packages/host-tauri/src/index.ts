@@ -1,5 +1,5 @@
 import { invoke, Channel } from '@tauri-apps/api/core';
-import type { AgentClient } from '@easycode/engine';
+import type { AgentClient, ShellInfo } from '@easycode/engine';
 import { AgentServer } from '@easycode/engine';
 import type { Host, ProcessResult, FsDirent } from '@easycode/core';
 
@@ -103,6 +103,7 @@ export async function createTauriHost(): Promise<Host> {
             command,
             cwd: opts.cwd,
             timeoutMs: opts.timeoutMs ?? 120_000,
+            shell: opts.shell,
           });
           return result;
         } finally {
@@ -295,6 +296,7 @@ export async function createTauriClient(): Promise<AgentClient> {
     openPath: (path: string) => invoke<void>('open_path', { path }),
     openInVscode: (path: string) => invoke<void>('open_in_vscode', { path }),
     notify: (title: string, body: string) => invoke<void>('send_notification', { title, body }),
+    detectShells: () => invoke<ShellInfo[]>('proc_detect_shells'),
     onEvent: (listener) => server.onEvent(listener),
   };
 }

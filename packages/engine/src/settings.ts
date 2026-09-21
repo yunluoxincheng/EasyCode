@@ -80,6 +80,17 @@ export interface WebSearchConfig {
   maxResults?: number;
 }
 
+/** 命令行终端 Shell：auto=自动选择（默认），也可指定 git-bash / pwsh / powershell / cmd */
+export type ShellType = 'auto' | 'git-bash' | 'pwsh' | 'powershell' | 'cmd';
+
+/** 探测到的终端 Shell 信息 */
+export interface ShellInfo {
+  id: ShellType;
+  name: string;
+  path?: string;
+  available: boolean;
+}
+
 export interface Settings {
   providers: Record<string, ProviderEntry>;
   projects: ProjectEntry[];
@@ -92,6 +103,8 @@ export interface Settings {
   desktopNotify?: boolean;
   /** 「打开工作区」用的工具：explorer=系统文件管理器（默认）；vscode=VS Code（未安装时提示） */
   openWorkspaceWith?: 'explorer' | 'vscode';
+  /** 命令行终端 Shell：auto=自动选择最优（默认）；也可指定 git-bash / pwsh / powershell / cmd */
+  shell?: ShellType;
 }
 
 /** 内置 Provider 预设：均为 OpenAI 兼容端点（或 Anthropic），API Key 留空由用户填写 */
@@ -140,6 +153,7 @@ export const DEFAULT_SETTINGS: Settings = {
   defaultApprovalMode: 'ask',
   autoScroll: true,
   webSearch: { enabled: false, backend: 'searxng', maxResults: 5 },
+  shell: 'auto',
 };
 
 export function providerLabel(id: string, entry: ProviderEntry | undefined): string {

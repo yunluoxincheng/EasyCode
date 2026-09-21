@@ -20,6 +20,8 @@ export interface LoopOptions {
   maxSteps?: number;
   /** 思考强度（'' = 供应商默认），透传给 Provider */
   reasoningEffort?: string;
+  /** 命令行终端 Shell：auto=自动选择，也可指定 git-bash / pwsh / powershell / cmd */
+  shell?: string;
 }
 
 export interface LoopResult {
@@ -55,6 +57,7 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
     emit,
     maxSteps = 200,
     reasoningEffort,
+    shell,
   } = options;
 
   try {
@@ -95,6 +98,7 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
           signal,
           approval,
           readFiles,
+          shell,
         });
         emit({
           type: 'tool_result',

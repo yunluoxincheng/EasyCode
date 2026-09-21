@@ -1,5 +1,5 @@
 import type { AgentEvent, SessionData, SessionMeta, ApprovalMode } from '@easycode/core';
-import type { ModelTestResult, ProviderModelInfo, Settings } from './settings.js';
+import type { ModelTestResult, ProviderModelInfo, Settings, ShellInfo } from './settings.js';
 
 /**
  * UI 与引擎之间的传输抽象：
@@ -48,6 +48,8 @@ export interface AgentClient {
   openInVscode(path: string): Promise<void>;
   /** 发送系统通知（由宿主用原生通知中心发送） */
   notify(title: string, body: string): Promise<void>;
+  /** 探测系统可用的命令行终端 Shell 列表（由宿主探测） */
+  detectShells?(): Promise<ShellInfo[]>;
   pickWorkspace(): Promise<string | null>;
   onEvent(listener: (payload: { sessionId: string; event: AgentEvent }) => void): () => void;
 }

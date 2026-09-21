@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
-import type { Host } from '@easycode/core';
+import type { Host, ProcessRunOptions, ProcessResult } from '@easycode/core';
 
 export interface NodeHostOptions {
   /** 持久化数据目录（会话、设置），如 Electron 的 userData */
@@ -42,7 +42,7 @@ export class NodeHost implements Host {
     unlink: (p: string) => fsp.unlink(p),
   };
   readonly process = {
-    run: (command: string, opts: { cwd?: string; timeoutMs?: number; signal?: AbortSignal }) =>
+    run: (command: string, opts: ProcessRunOptions) =>
       runShell(command, opts),
   };
   readonly env: { dataDir(): string };
@@ -52,14 +52,33 @@ export class NodeHost implements Host {
   }
 }
 
+function resolveNodeShell(shell?: string): boolean | string {
+  if (!shell || shell === 'auto') return true;
+  if (process.platform === 'win32') {
+    switch (shell) {
+      case 'git-bash':
+        return 'bash.exe';
+      case 'pwsh':
+        return 'pwsh.exe';
+      case 'powershell':
+        return 'powershell.exe';
+      case 'cmd':
+        return 'cmd.exe';
+      default:
+        return true;
+    }
+  }
+  return true;
+}
+
 function runShell(
   command: string,
-  opts: { cwd?: string; timeoutMs?: number; signal?: AbortSignal },
-): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  opts: ProcessRunOptions,
+): Promise<ProcessResult> {
   return new Promise((resolve) => {
     const timeoutMs = opts.timeoutMs ?? 120_000;
     const child = spawn(command, {
-      shell: true,
+      shell: resolveNodeShell(opts.shell),
       cwd: opts.cwd,
       windowsHide: true,
     });

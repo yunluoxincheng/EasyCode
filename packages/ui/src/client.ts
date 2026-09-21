@@ -6,7 +6,7 @@ import {
   type SessionMeta,
 } from '@easycode/core';
 import { AgentServer, type AgentClient, type Settings } from '@easycode/engine';
-import type { ModelTestResult, ProviderModelInfo } from '@easycode/engine';
+import type { ModelTestResult, ProviderModelInfo, ShellInfo } from '@easycode/engine';
 
 export type { AgentClient };
 
@@ -101,6 +101,9 @@ export class IpcAgentClient implements AgentClient {
   notify(title: string, body: string) {
     return this.invoke<void>('send-notification', { title, body });
   }
+  detectShells() {
+    return this.invoke<ShellInfo[]>('detect-shells');
+  }
   onEvent(listener: (payload: { sessionId: string; event: AgentEvent }) => void) {
     this.bridge.onEvent(listener);
     return () => this.bridge.offEvent(listener);
@@ -194,6 +197,12 @@ export function createDemoClient(): AgentClient {
         await Notification.requestPermission().then((p) => { if (p === 'granted') send(); });
       }
     },
+    detectShells: async () => [
+      { id: 'git-bash', name: 'Git Bash', path: 'C:\\Program Files\\Git\\bin\\bash.exe', available: true },
+      { id: 'pwsh', name: 'PowerShell 7', path: 'C:\\Program Files\\PowerShell\\7\\pwsh.exe', available: true },
+      { id: 'powershell', name: 'Windows PowerShell', path: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe', available: true },
+      { id: 'cmd', name: 'Command Prompt', path: 'C:\\Windows\\System32\\cmd.exe', available: true },
+    ],
     onEvent: (listener) => server.onEvent(listener),
   };
 }

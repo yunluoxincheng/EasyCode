@@ -9,3 +9,5 @@ packages/desktop-tauri/src-tauri/target/
 # 原型截图
 prototypes/shot-*.png
 .tmp-shots/
+
+.zcode/

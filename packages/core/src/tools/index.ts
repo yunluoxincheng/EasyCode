@@ -22,6 +22,8 @@ export interface ToolContext {
   signal: AbortSignal;
   /** 本轮已成功读取的文件绝对路径集合；edit_file / 覆盖已有文件的 write_file 强制先读（防盲改） */
   readFiles?: Set<string>;
+  /** 命令行终端 Shell：auto=自动选择，也可指定 git-bash / pwsh / powershell / cmd */
+  shell?: string;
 }
 
 export interface Tool {

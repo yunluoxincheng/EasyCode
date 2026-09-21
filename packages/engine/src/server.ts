@@ -273,6 +273,7 @@ export class AgentServer {
           this.emitterFor(id)(event);
         },
         reasoningEffort: rt.data.meta.reasoningEffort ?? '',
+        shell: this.settings.shell ?? 'auto',
       });
       if (result.reason === 'error' && result.errorMessage) {
         this.events.emit({ sessionId: id, event: { type: 'error', message: result.errorMessage } });

@@ -9,6 +9,7 @@ import type {
   ProviderEntry,
   ProviderModel,
   Settings,
+  ShellInfo,
   WebSearchConfig,
 } from '@easycode/engine';
 import type { SettingsSection } from '../store.js';
@@ -67,6 +68,43 @@ export function SettingsPage() {
   useEffect(() => {
     if (!draft && store.settings) setDraft(structuredClone(store.settings));
   }, [store.settings, draft]);
+
+  const [detectedShells, setDetectedShells] = useState<ShellInfo[]>([]);
+
+  useEffect(() => {
+    if (store.client.detectShells) {
+      store.client.detectShells().then(setDetectedShells).catch(() => {});
+    }
+  }, [store.client]);
+
+  const shellOptions = useMemo(() => {
+    const autoPick = (() => {
+      const order = ['pwsh', 'git-bash', 'powershell', 'cmd'];
+      for (const id of order) {
+        const item = detectedShells.find((s) => s.id === id);
+        if (item && item.available) return item.name;
+      }
+      return undefined;
+    })();
+
+    const autoLabel = autoPick
+      ? `自动 (推荐: ${autoPick})`
+      : '自动 (按 pwsh 7 → Git Bash → PowerShell → cmd 取最优)';
+
+    const getStatus = (id: string) => {
+      const item = detectedShells.find((s) => s.id === id);
+      if (!item) return '';
+      return item.available ? ' (已检测到)' : ' (未检测到)';
+    };
+
+    return [
+      { value: 'auto', label: autoLabel },
+      { value: 'git-bash', label: `Git Bash${getStatus('git-bash')}` },
+      { value: 'pwsh', label: `PowerShell 7${getStatus('pwsh')}` },
+      { value: 'powershell', label: `Windows PowerShell${getStatus('powershell')}` },
+      { value: 'cmd', label: `Command Prompt (cmd)${getStatus('cmd')}` },
+    ];
+  }, [detectedShells]);
 
   const dirty = useMemo(
     () => !!draft && !!store.settings && JSON.stringify(draft) !== JSON.stringify(store.settings),
@@ -812,6 +850,17 @@ export function SettingsPage() {
                   onChange={(v) => patch({ openWorkspaceWith: v as 'explorer' | 'vscode' })}
                 />
               </label>
+              <label className="field">
+                <span>命令行终端 (Shell)</span>
+                <TerminalSelect
+                  value={draft.shell ?? 'auto'}
+                  options={shellOptions}
+                  onChange={(v) => patch({ shell: v as any })}
+                />
+              </label>
+              <p className="hint">
+                Windows 平台优先推荐 Git Bash 或 PowerShell 7，模型可直接执行 Linux/Unix 惯用命令（ls、cat、rm 等）且原生 UTF-8 解码杜绝乱码。
+              </p>
               <p className="hint">
                 API Key 保存在本机设置文件中，不会上传。接入 Ollama / LM Studio 等本地服务可完全离线使用。
               </p>

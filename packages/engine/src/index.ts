@@ -11,6 +11,8 @@ export type {
   ModelTestResult,
   WebSearchConfig,
   ProjectEntry,
+  ShellType,
+  ShellInfo,
 } from './settings.js';
 export { lookupCatalog, resolveModelMeta } from './model-catalog.js';
 export type { CatalogMeta } from './model-catalog.js';

@@ -167,6 +167,234 @@ fn fs_unlink(path: String) -> Result<(), String> {
     }
 }
 
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+struct ShellInfo {
+    id: String,
+    name: String,
+    path: Option<String>,
+    available: bool,
+}
+
+/// 智能解码子进程输出：优先合法 UTF-8；在 Windows 下若含非法字节，按系统当前 ANSI 代码页 (CP_ACP/GBK) 转码，杜绝乱码。
+fn decode_output(bytes: &[u8]) -> String {
+    if let Ok(s) = std::str::from_utf8(bytes) {
+        return s.to_string();
+    }
+    #[cfg(windows)]
+    {
+        extern "system" {
+            fn MultiByteToWideChar(
+                CodePage: u32,
+                dwFlags: u32,
+                lpMultiByteStr: *const u8,
+                cbMultiByte: i32,
+                lpWideCharStr: *mut u16,
+                cchWideChar: i32,
+            ) -> i32;
+        }
+        if !bytes.is_empty() {
+            let len = unsafe {
+                MultiByteToWideChar(
+                    0, // CP_ACP (系统当前 ANSI 代码页，如简体中文 Windows 下为 936/GBK)
+                    0,
+                    bytes.as_ptr(),
+                    bytes.len() as i32,
+                    std::ptr::null_mut(),
+                    0,
+                )
+            };
+            if len > 0 {
+                let mut wide_buf = vec![0u16; len as usize];
+                let converted = unsafe {
+                    MultiByteToWideChar(
+                        0,
+                        0,
+                        bytes.as_ptr(),
+                        bytes.len() as i32,
+                        wide_buf.as_mut_ptr(),
+                        len,
+                    )
+                };
+                if converted > 0 {
+                    return String::from_utf16_lossy(&wide_buf);
+                }
+            }
+        }
+    }
+    String::from_utf8_lossy(bytes).to_string()
+}
+
+#[cfg(windows)]
+fn probe_where(bin: &str) -> Option<String> {
+    let mut c = Command::new("cmd");
+    c.args(["/C", "where", bin]);
+    hide_window(&mut c);
+    if let Ok(o) = c.output() {
+        if o.status.success() {
+            let out = String::from_utf8_lossy(&o.stdout);
+            if let Some(first_line) = out.lines().next() {
+                let trimmed = first_line.trim();
+                if !trimmed.is_empty() {
+                    return Some(trimmed.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// 探测当前系统可用的 Shell
+fn detect_available_shells() -> Vec<ShellInfo> {
+    #[cfg(windows)]
+    {
+        let mut list = Vec::new();
+
+        // 1. pwsh (PowerShell 7)
+        let pwsh_path = probe_where("pwsh").or_else(|| {
+            let candidates = [
+                r"C:\Program Files\PowerShell\7\pwsh.exe",
+                r"C:\Program Files\PowerShell\7-preview\pwsh.exe",
+            ];
+            candidates.iter().find(|p| std::path::Path::new(p).exists()).map(|s| s.to_string())
+        });
+        list.push(ShellInfo {
+            id: "pwsh".into(),
+            name: "PowerShell 7".into(),
+            available: pwsh_path.is_some(),
+            path: pwsh_path,
+        });
+
+        // 2. git-bash (Git Bash)
+        let git_bash_path = {
+            let candidates = [
+                r"C:\Program Files\Git\bin\bash.exe",
+                r"C:\Program Files\Git\usr\bin\bash.exe",
+                r"C:\Program Files (x86)\Git\bin\bash.exe",
+            ];
+            let mut found = candidates.iter().find(|p| std::path::Path::new(p).exists()).map(|s| s.to_string());
+            if found.is_none() {
+                if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+                    let local_path = format!(r"{}\Programs\Git\bin\bash.exe", local_app_data);
+                    if std::path::Path::new(&local_path).exists() {
+                        found = Some(local_path);
+                    }
+                }
+            }
+            if found.is_none() {
+                if let Some(p) = probe_where("bash") {
+                    if p.to_lowercase().contains("git") {
+                        found = Some(p);
+                    }
+                }
+            }
+            found
+        };
+        list.push(ShellInfo {
+            id: "git-bash".into(),
+            name: "Git Bash".into(),
+            available: git_bash_path.is_some(),
+            path: git_bash_path,
+        });
+
+        // 3. powershell (Windows PowerShell 5.1)
+        let sys_root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+        let ps_path = format!(r"{}\System32\WindowsPowerShell\v1.0\powershell.exe", sys_root);
+        let ps_avail = std::path::Path::new(&ps_path).exists();
+        list.push(ShellInfo {
+            id: "powershell".into(),
+            name: "Windows PowerShell".into(),
+            available: ps_avail,
+            path: if ps_avail { Some(ps_path) } else { None },
+        });
+
+        // 4. cmd (Command Prompt)
+        let cmd_path = format!(r"{}\System32\cmd.exe", sys_root);
+        let cmd_avail = std::path::Path::new(&cmd_path).exists();
+        list.push(ShellInfo {
+            id: "cmd".into(),
+            name: "Command Prompt".into(),
+            available: cmd_avail,
+            path: if cmd_avail { Some(cmd_path) } else { None },
+        });
+
+        list
+    }
+    #[cfg(not(windows))]
+    {
+        vec![
+            ShellInfo {
+                id: "sh".into(),
+                name: "POSIX sh".into(),
+                path: Some("/bin/sh".into()),
+                available: true,
+            },
+            ShellInfo {
+                id: "bash".into(),
+                name: "Bash".into(),
+                path: Some("/bin/bash".into()),
+                available: std::path::Path::new("/bin/bash").exists(),
+            },
+        ]
+    }
+}
+
+#[cfg(windows)]
+fn resolve_windows_shell(
+    requested: Option<&str>,
+    shells: &[ShellInfo],
+) -> (String, Vec<String>) {
+    // 优先级：pwsh -> git-bash -> powershell -> cmd
+    let target_id = match requested {
+        Some("pwsh") => "pwsh",
+        Some("git-bash") => "git-bash",
+        Some("powershell") => "powershell",
+        Some("cmd") => "cmd",
+        _ => {
+            if shells.iter().any(|s| s.id == "pwsh" && s.available) {
+                "pwsh"
+            } else if shells.iter().any(|s| s.id == "git-bash" && s.available) {
+                "git-bash"
+            } else if shells.iter().any(|s| s.id == "powershell" && s.available) {
+                "powershell"
+            } else {
+                "cmd"
+            }
+        }
+    };
+
+    let shell_info = shells.iter().find(|s| s.id == target_id);
+    let bin = shell_info
+        .and_then(|s| s.path.as_ref())
+        .cloned()
+        .unwrap_or_else(|| match target_id {
+            "pwsh" => "pwsh.exe".into(),
+            "git-bash" => "bash.exe".into(),
+            "powershell" => "powershell.exe".into(),
+            _ => "cmd.exe".into(),
+        });
+
+    let args = match target_id {
+        "git-bash" => vec!["-c".to_string()],
+        "pwsh" => vec!["-NoProfile".to_string(), "-NonInteractive".to_string(), "-Command".to_string()],
+        "powershell" => vec![
+            "-NoProfile".to_string(),
+            "-NonInteractive".to_string(),
+            "-ExecutionPolicy".to_string(),
+            "Bypass".to_string(),
+            "-Command".to_string(),
+        ],
+        _ => vec!["/C".to_string()],
+    };
+
+    (bin, args)
+}
+
+#[tauri::command]
+fn proc_detect_shells() -> Vec<ShellInfo> {
+    detect_available_shells()
+}
+
 #[tauri::command]
 async fn proc_run(
     state: tauri::State<'_, PidMap>,
@@ -174,12 +402,18 @@ async fn proc_run(
     command: String,
     cwd: Option<String>,
     timeout_ms: Option<u64>,
+    shell: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let timeout = Duration::from_millis(timeout_ms.unwrap_or(120_000).clamp(1_000, 600_000));
 
     let mut cmd = if cfg!(windows) {
-        let mut c = Command::new("cmd");
-        c.arg("/C").arg(&command);
+        let shells = detect_available_shells();
+        let (bin, shell_args) = resolve_windows_shell(shell.as_deref(), &shells);
+        let mut c = Command::new(bin);
+        for a in shell_args {
+            c.arg(a);
+        }
+        c.arg(&command);
         c
     } else {
         let mut c = Command::new("sh");
@@ -241,8 +475,8 @@ async fn proc_run(
     }
     state.0.lock().unwrap().remove(&id);
 
-    let stdout = String::from_utf8_lossy(&out_handle.join().unwrap_or_default()).to_string();
-    let mut stderr = String::from_utf8_lossy(&err_handle.join().unwrap_or_default()).to_string();
+    let stdout = decode_output(&out_handle.join().unwrap_or_default());
+    let mut stderr = decode_output(&err_handle.join().unwrap_or_default());
     if timed_out {
         stderr.push_str(&format!(
             "\n[EasyCode] 命令超时（{}s），已终止。",
@@ -506,6 +740,7 @@ fn main() {
             pick_folder,
             open_path,
             open_in_vscode,
+            proc_detect_shells,
             send_notification,
             http_stream,
             http_stream_cancel
