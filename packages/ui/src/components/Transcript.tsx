@@ -66,18 +66,90 @@ function inputSummary(name: string, input: unknown): string {
   }
 }
 
-/** 若工具是文件写入/编辑，给出 diff 视图 */
+/** 若工具是文件写入/编辑，给出结构化 diff 视图 */
 function ToolDiff({ name, input }: { name: string; input: unknown }) {
   const i = (input ?? {}) as Record<string, unknown>;
-  if (name === 'write_file' && typeof i.path === 'string') {
+  if (typeof i.path !== 'string') return null;
+
+  if (name === 'write_file') {
     const lines = String(i.content ?? '').split('\n');
+    const displayLines = lines.slice(0, 200);
     return (
       <div className="diff">
-        <div className="diff-head">{i.path} · 新文件 · {lines.length} 行</div>
-        <pre>{lines.slice(0, 200).map((l) => `+ ${l}`).join('\n')}</pre>
+        <div className="diff-head">
+          <span className="diff-path">{i.path}</span>
+          <span className="diff-tag write">新文件 · {lines.length} 行</span>
+        </div>
+        <div className="diff-lines">
+          {displayLines.map((l, idx) => (
+            <div key={idx} className="diff-line add">
+              <span className="diff-no new">{idx + 1}</span>
+              <span className="diff-prefix">+</span>
+              <span className="diff-text">{l}</span>
+            </div>
+          ))}
+          {lines.length > 200 && (
+            <div className="diff-fold">… 其余 {lines.length - 200} 行已省略</div>
+          )}
+        </div>
       </div>
     );
   }
+
+  if (name === 'edit_file') {
+    const oldStr = typeof i.old_string === 'string' ? i.old_string : '';
+    const newStr = typeof i.new_string === 'string' ? i.new_string : '';
+    const isReplaceAll = Boolean(i.replace_all);
+    const diff = diffLines(oldStr, newStr);
+    const delCount = diff.filter((d) => d.type === 'del').length;
+    const addCount = diff.filter((d) => d.type === 'add').length;
+
+    let oldNo = 1;
+    let newNo = 1;
+    const displayDiff = diff.slice(0, 300);
+
+    return (
+      <div className="diff">
+        <div className="diff-head">
+          <span className="diff-path">{i.path}</span>
+          <span className="diff-tag edit">修改代码</span>
+          {isReplaceAll && <span className="diff-badge-all">全局替换</span>}
+          <span className="diff-stats">
+            {delCount > 0 && <span className="diff-stat-del">-{delCount}</span>}
+            {addCount > 0 && <span className="diff-stat-add">+{addCount}</span>}
+          </span>
+        </div>
+        <div className="diff-lines">
+          {displayDiff.map((d, idx) => {
+            let oLine = '';
+            let nLine = '';
+            if (d.type === 'same') {
+              oLine = String(oldNo++);
+              nLine = String(newNo++);
+            } else if (d.type === 'del') {
+              oLine = String(oldNo++);
+            } else if (d.type === 'add') {
+              nLine = String(newNo++);
+            }
+            return (
+              <div key={idx} className={`diff-line ${d.type}`}>
+                <span className="diff-no old">{oLine}</span>
+                <span className="diff-no new">{nLine}</span>
+                <span className="diff-prefix">
+                  {d.type === 'add' ? '+' : d.type === 'del' ? '-' : ' '}
+                </span>
+                <span className="diff-text">{d.text}</span>
+              </div>
+            );
+          })}
+          {diff.length > 300 && (
+            <div className="diff-fold">… 其余 {diff.length - 300} 行差异已折叠</div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   return null;
 }
 
@@ -127,8 +199,8 @@ function ApprovalCard({ item }: { item: ApprovalItem }) {
       <div className="approval-head">需要你的批准 · {TOOL_LABELS[item.name] ?? item.name}</div>
       <div className="approval-body">
         <code>{headline}</code>
-        {item.name === 'write_file' && typeof i.content === 'string' && (
-          <pre className="approval-content">{i.content.slice(0, 2000)}</pre>
+        {(item.name === 'write_file' || item.name === 'edit_file') && (
+          <ToolDiff name={item.name} input={item.input} />
         )}
       </div>
       {item.status === 'pending' ? (
@@ -468,6 +540,31 @@ export function Transcript() {
       el.removeEventListener('scroll', onScroll);
       el.removeEventListener('wheel', onWheel);
     };
+  }, []);
+
+  // 代码块一键复制事件委托（响应 Markdown 生成的 .code-copy-btn）
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const onClick = (e: MouseEvent): void => {
+      const btn = (e.target as HTMLElement).closest('.code-copy-btn') as HTMLButtonElement | null;
+      if (!btn) return;
+      const block = btn.closest('.code-block');
+      if (!block) return;
+      const codeEl = block.querySelector('code');
+      const codeText = codeEl?.textContent ?? '';
+      if (!codeText) return;
+      void navigator.clipboard.writeText(codeText).then(() => {
+        btn.textContent = '✓ 已复制';
+        btn.classList.add('copied');
+        setTimeout(() => {
+          btn.textContent = '⧉ 复制';
+          btn.classList.remove('copied');
+        }, 1500);
+      });
+    };
+    el.addEventListener('click', onClick);
+    return () => el.removeEventListener('click', onClick);
   }, []);
 
   /** 收集对话 exchanges：一条用户消息 + 其后的模型回合 = 一个刻度 */

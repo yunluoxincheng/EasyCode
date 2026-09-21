@@ -105,6 +105,8 @@ export interface Settings {
   openWorkspaceWith?: 'explorer' | 'vscode';
   /** 命令行终端 Shell：auto=自动选择最优（默认）；也可指定 git-bash / pwsh / powershell / cmd */
   shell?: ShellType;
+  /** 复古 CRT 扫描线质感；默认开 */
+  crtScanline?: boolean;
 }
 
 /** 内置 Provider 预设：均为 OpenAI 兼容端点（或 Anthropic），API Key 留空由用户填写 */
@@ -152,6 +154,7 @@ export const DEFAULT_SETTINGS: Settings = {
   defaultProvider: 'zhipu',
   defaultApprovalMode: 'ask',
   autoScroll: true,
+  crtScanline: true,
   webSearch: { enabled: false, backend: 'searxng', maxResults: 5 },
   shell: 'auto',
 };

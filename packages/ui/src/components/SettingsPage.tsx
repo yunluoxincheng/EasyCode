@@ -839,6 +839,25 @@ export function SettingsPage() {
                   </span>
                 </div>
               </div>
+              <div className="field">
+                <span>复古 CRT 扫描线</span>
+                <div className="auto-scroll-row">
+                  <button
+                    className={`switch ${draft.crtScanline !== false ? 'on' : ''}`}
+                    title={
+                      draft.crtScanline !== false
+                        ? '已开启（点击关闭，切换为纯黑极简现代终端风）'
+                        : '已关闭（点击开启复古微纹理质感）'
+                    }
+                    onClick={() => patch({ crtScanline: draft.crtScanline === false })}
+                  >
+                    <span className="knob" />
+                  </button>
+                  <span className="auto-scroll-text">
+                    {draft.crtScanline !== false ? '开启' : '关闭'}
+                  </span>
+                </div>
+              </div>
               <label className="field">
                 <span>打开工作区方式</span>
                 <TerminalSelect

@@ -2,6 +2,21 @@
 
 本文件记录 EasyCode 每个版本的变更。发布时，GitHub Release 说明自动取自对应版本的段落。
 
+## [0.1.11] - 2026-09-21
+
+### 新增
+- 代码块语法高亮：引入 highlight.js 覆盖 30+ 主流编程语言（TS/JS/Rust/Python/Bash/Go/JSON/HTML/CSS 等），配合 EasyCode 暗黑极客终端调色板（冷绿/青色/琥珀/品红等），代码阅读体验显著提升（TODOS #19）
+- 代码块顶部语言栏与一键复制：代码块顶部展示 `// 语言` 标识，右上角配备 `[ ⧉ 复制 ]` 按钮，点击一键提取纯净代码，1.5 秒内即时反馈 `✓ 已复制`（TODOS #19）
+- `edit_file` 可视化 Diff 视图：重构 `ToolDiff` 接入 `diffLines`，呈现红底 `-`（删除行）与绿底 `+`（新增行）并标注精确旧/新行号，支持全局替换徽标、实时增删统计（`-N +M`）与超长差异自动折叠保护（TODOS #19）
+- 审批卡片内置 Diff 预览：`ApprovalCard` 针对 `edit_file` 与 `write_file` 操作直接展示结构化差异对比，用户批准前即可全面审查改动详情（TODOS #19）
+- 设置页「常规」新增「复古 CRT 扫描线」开关：默认开启，关闭后全局扫描线平滑淡出，无缝切换为纯黑极简现代终端风，把视觉风格选择权交还给用户（TODOS #22）
+- 弹窗与浮层微动效：模态弹窗（`.modal-mask`, `.modal`）与下拉菜单/浮层（`.proj-pop`, `.me-pop`, `.effort-pop`, `.update-pop`, `.help-menu`, `.tsel-menu` 及 Toast）加入 140ms~200ms 平滑微缩放淡入动效，消除生硬瞬切感，并完备支持 `prefers-reduced-motion` 无障碍回退（TODOS #22）
+
+### 技术
+- `packages/ui` 引入 `highlight.js` 依赖，重构 `markdown.ts` 渲染器
+- `Transcript.tsx` 主容器挂载代码块一键复制事件委托
+- 扩展 `Settings` 接口与默认值：新增 `crtScanline?: boolean`（默认 `true`），`App.tsx` 动态同步根节点 `html.crt-off` 类名
+
 ## [0.1.10] - 2026-09-21
 
 ### 新增

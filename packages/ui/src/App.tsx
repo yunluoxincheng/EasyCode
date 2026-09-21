@@ -26,6 +26,11 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // 响应 CRT 扫描线设置：关闭时给 html 根元素添加 crt-off 类名
+  useEffect(() => {
+    document.documentElement.classList.toggle('crt-off', store.settings?.crtScanline === false);
+  }, [store.settings?.crtScanline]);
+
   return (
     <div className="app-shell">
       <TitleBar />
