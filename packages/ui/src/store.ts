@@ -1,4 +1,4 @@
-import type { AgentEvent, ApprovalMode, SessionData, SessionMeta, Usage } from '@easycode/core';
+import type { AgentEvent, ApprovalMode, SessionData, SessionMeta, Usage, TodoItem } from '@easycode/core';
 import { providerLabel, type ProjectEntry, type Settings } from '@easycode/engine';
 import type { AgentClient } from './client.js';
 
@@ -58,6 +58,8 @@ export class AppStore {
   settings: Settings | null = null;
   demoMode = false;
   lastUsage: Usage | null = null;
+  /** 当前会话活跃的任务清单（由 todo_write 驱动） */
+  activeTodos: TodoItem[] = [];
   sessionUsage: { input: number; output: number; steps: number; cached: number } = {
     input: 0,
     output: 0,
@@ -193,6 +195,7 @@ export class AppStore {
     this.currentTurn = null;
     const data = await this.client.getSession(id);
     this.items = this.itemsFromSession(data);
+    this.activeTodos = data.todos ?? this.extractTodosFromSession(data);
     // 同步该会话实际的审批模式到输入区（新会话用设置默认值）
     try {
       this.mode = await this.client.getApprovalMode(id);
@@ -331,6 +334,24 @@ export class AppStore {
     }
     closeTurn();
     return items;
+  }
+
+  private extractTodosFromSession(data: SessionData): TodoItem[] {
+    for (let i = data.messages.length - 1; i >= 0; i--) {
+      const msg = data.messages[i];
+      if (msg.role === 'assistant') {
+        for (let j = msg.blocks.length - 1; j >= 0; j--) {
+          const block = msg.blocks[j];
+          if (block.type === 'tool_call' && block.name === 'todo_write') {
+            const input = block.input as { todos?: TodoItem[] } | undefined;
+            if (Array.isArray(input?.todos)) {
+              return input.todos;
+            }
+          }
+        }
+      }
+    }
+    return [];
   }
 
   /* ---------------- 操作 ---------------- */
@@ -553,8 +574,14 @@ export class AppStore {
         this.appendToBlock(item, 'thinking', event.delta);
         break;
       }
-      case 'tool_call_start':
+      case 'tool_call_start': {
         this.flushAssistant();
+        if (event.call.name === 'todo_write') {
+          const input = event.call.input as { todos?: TodoItem[] } | undefined;
+          if (Array.isArray(input?.todos)) {
+            this.activeTodos = input.todos;
+          }
+        }
         this.pushToTurn({
           kind: 'tool',
           id: this.nextId(),
@@ -564,6 +591,7 @@ export class AppStore {
           status: 'running',
         });
         break;
+      }
       case 'tool_result': {
         // 同一回合可能出现相同 callId 的并行调用：优先匹配仍在运行的那张卡片
         const tool =
@@ -575,6 +603,12 @@ export class AppStore {
           tool.status = event.isError ? 'error' : event.content.includes('用户拒绝') ? 'denied' : 'ok';
           tool.result = event.content;
           tool.durationMs = event.durationMs;
+          if (tool.name === 'todo_write' && !event.isError) {
+            const input = tool.input as { todos?: TodoItem[] } | undefined;
+            if (Array.isArray(input?.todos)) {
+              this.activeTodos = input.todos;
+            }
+          }
         }
         break;
       }

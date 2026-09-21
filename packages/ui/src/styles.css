@@ -437,6 +437,84 @@ body::after {
   color: var(--dim);
 }
 
+/* 任务清单卡片 */
+.todo-card {
+  border: 1px solid var(--border2);
+  border-radius: var(--radius);
+  margin: 10px 0;
+  background: var(--panel);
+  overflow: hidden;
+  transition: border-color .15s ease;
+}
+.todo-card:hover { border-color: var(--green-dim); }
+.todo-card.err { border-color: var(--red); }
+.todo-head {
+  display: flex; align-items: center; gap: 10px;
+  width: 100%;
+  background: none; border: none; color: var(--text);
+  padding: 7px 12px; cursor: pointer; font-size: 12px;
+  text-align: left; font-family: var(--font);
+}
+.todo-head:hover { background: var(--panel2); }
+.todo-status-tag {
+  font-size: 11px; font-weight: 700; letter-spacing: 0.5px;
+}
+.todo-tag-live { color: var(--green); animation: pulse 1.5s infinite; }
+.todo-tag-done { color: var(--green); }
+.todo-tag-pending { color: var(--faint); }
+.todo-title { font-weight: 700; color: var(--text-bright); }
+.todo-percent {
+  font-size: 11px; color: var(--faint); font-family: var(--font);
+}
+.todo-chevron { color: var(--faint); font-size: 10px; }
+.todo-body {
+  padding: 6px 12px 10px; border-top: 1px solid var(--border);
+  background: rgba(0, 0, 0, 0.15);
+}
+.todo-list { display: flex; flex-direction: column; gap: 5px; }
+.todo-row {
+  display: flex; align-items: flex-start; gap: 8px;
+  font-size: 12.5px; line-height: 1.5; font-family: var(--font);
+}
+.todo-icon {
+  font-weight: 700; width: 14px; text-align: center; flex-shrink: 0;
+}
+.todo-icon.status-completed { color: var(--green); }
+.todo-icon.status-in_progress { color: var(--green); animation: pulse 1.2s infinite; }
+.todo-icon.status-pending { color: var(--faint); }
+.todo-row.status-completed .todo-text { color: var(--dim); }
+.todo-row.status-in_progress .todo-text { color: var(--text-bright); font-weight: 600; }
+.todo-row.status-pending .todo-text { color: var(--dim); }
+.todo-text { flex: 1; word-break: break-word; }
+.todo-pri {
+  font-size: 10px; font-weight: 700; letter-spacing: 0.5px; padding: 0 4px;
+  border-radius: 2px; flex-shrink: 0;
+}
+.todo-pri.pri-high { color: var(--red); background: rgba(248, 113, 113, 0.1); }
+.todo-pri.pri-medium { color: var(--amber); background: rgba(251, 191, 36, 0.1); }
+.todo-pri.pri-low { color: var(--faint); background: rgba(255, 255, 255, 0.05); }
+.todo-error-hint {
+  margin-top: 6px; font-size: 11.5px; color: var(--red); font-family: var(--font);
+}
+
+/* 回合折叠态下的任务清单摘要栏 */
+.turn-todo-summary {
+  display: flex; align-items: center; gap: 8px;
+  margin-bottom: 8px; padding: 4px 8px;
+  background: rgba(74, 222, 128, 0.04);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 11.5px; font-family: var(--font);
+}
+.turn-todo-badge {
+  font-weight: 700; letter-spacing: 0.5px; flex-shrink: 0;
+}
+.turn-todo-badge.done { color: var(--green); }
+.turn-todo-badge.live { color: var(--green); }
+.turn-todo-current {
+  color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
 /* 审批卡片 = [ WAIT ] 琥珀警示 */
 .approval-card {
   border: 1px solid var(--amber);

@@ -15,6 +15,7 @@ import {
   createBuiltinTools,
   runWebSearch,
   type ApprovalMode,
+  type TodoItem,
 } from '@easycode/core';
 import { Settings, DEFAULT_SETTINGS, PROVIDER_PRESETS } from './settings.js';
 import type { ModelTestResult, ProviderEntry, ProviderModel, ProviderModelInfo } from './settings.js';
@@ -282,6 +283,10 @@ export class AgentServer {
       rt.running = false;
       rt.controller = undefined;
       rt.data.meta.updatedAt = new Date().toISOString();
+      const latestTodos = extractLatestTodos(rt.data.messages);
+      if (latestTodos) {
+        rt.data.todos = latestTodos;
+      }
       await this.persistSession(rt);
     }
   }
@@ -651,6 +656,24 @@ export function supportsNativeWebSearch(modelName: string, kind: ProviderEntry['
   if (kind === 'responses') return /^(gpt-|codex-|chatgpt-|o[34](-|$))/i.test(modelName);
   if (kind === 'anthropic') return /^claude-/i.test(modelName);
   return false;
+}
+
+/** 从会话消息列表中提取最新的 todo_write 任务清单快照 */
+function extractLatestTodos(messages: ChatMessage[]): TodoItem[] | undefined {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg.role === 'assistant') {
+      for (const block of msg.blocks) {
+        if (block.type === 'tool_call' && block.name === 'todo_write') {
+          const input = block.input as { todos?: TodoItem[] } | undefined;
+          if (Array.isArray(input?.todos)) {
+            return input.todos;
+          }
+        }
+      }
+    }
+  }
+  return undefined;
 }
 
 /** 联网搜索后端配置是否齐全 */

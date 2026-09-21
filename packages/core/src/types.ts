@@ -60,11 +60,22 @@ export interface SessionMeta {
   updatedAt: string;
 }
 
+export type TodoStatus = 'pending' | 'in_progress' | 'completed';
+export type TodoPriority = 'high' | 'medium' | 'low';
+
+export interface TodoItem {
+  content: string;
+  status: TodoStatus;
+  priority?: TodoPriority;
+}
+
 export interface SessionData {
   meta: SessionMeta;
   messages: ChatMessage[];
   /** 会话累计 token 用量与步数（引擎累计并持久化） */
   usage?: { input: number; output: number; steps: number; cached?: number };
+  /** 当前任务清单（由 todo_write 工具维护） */
+  todos?: TodoItem[];
 }
 
 /** 会话审批模式：ask=写文件/执行命令需人工批准；yolo=自动放行 */

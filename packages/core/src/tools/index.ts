@@ -4,8 +4,10 @@ import type { ApprovalManager } from '../approval.js';
 import { readFileTool, writeFileTool, editFileTool, listDirTool } from './fs.js';
 import { searchFilesTool } from './search.js';
 import { runCommandTool } from './shell.js';
+import { todoWriteTool } from './todo.js';
 import { createWebSearchTool, type WebSearchBackendConfig } from './websearch.js';
 
+export { todoWriteTool } from './todo.js';
 export { createWebSearchTool, runWebSearch } from './websearch.js';
 export type { WebSearchBackendConfig, SearchHit } from './websearch.js';
 
@@ -74,7 +76,8 @@ export function createBuiltinTools(options?: {
     .register(editFileTool)
     .register(listDirTool)
     .register(searchFilesTool)
-    .register(runCommandTool);
+    .register(runCommandTool)
+    .register(todoWriteTool);
   if (options?.webSearch) registry.register(createWebSearchTool(options.webSearch));
   return registry;
 }

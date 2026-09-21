@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useStore } from '../useStore.js';
 import { renderMarkdown } from '../markdown.js';
-import { diffLines } from '@easycode/core';
+import { diffLines, type TodoItem } from '@easycode/core';
 import type {
   ApprovalItem,
   AssistantItem,
@@ -37,6 +37,7 @@ const TOOL_LABELS: Record<string, string> = {
   search_files: '搜索文件',
   run_command: '执行命令',
   web_search: '联网搜索',
+  todo_write: '任务清单',
 };
 
 /** 工具输入摘要（单行） */
@@ -55,6 +56,11 @@ function inputSummary(name: string, input: unknown): string {
       return String(i.command ?? '');
     case 'web_search':
       return String(i.query ?? '');
+    case 'todo_write': {
+      const todos = Array.isArray(i.todos) ? i.todos : [];
+      const done = todos.filter((t: any) => t?.status === 'completed').length;
+      return `进度 ${done}/${todos.length}`;
+    }
     default:
       return JSON.stringify(i).slice(0, 80);
   }
@@ -143,6 +149,62 @@ function ApprovalCard({ item }: { item: ApprovalItem }) {
   );
 }
 
+/** 任务清单卡片：以极客面板展示待办、进行中、已完成的步骤与总进度 */
+function TodoCard({ item }: { item: ToolItem }) {
+  const [open, setOpen] = useState(true);
+  const i = (item.input ?? {}) as { todos?: TodoItem[] };
+  const todos = Array.isArray(i.todos) ? i.todos : [];
+  const completed = todos.filter((t) => t.status === 'completed').length;
+  const inProgress = todos.filter((t) => t.status === 'in_progress').length;
+  const total = todos.length;
+  const percent = total > 0 ? Math.round((completed / total) * 100) : 0;
+
+  return (
+    <div className={`todo-card ${open ? 'open' : 'closed'} ${item.status === 'error' ? 'err' : ''}`}>
+      <button className="todo-head" onClick={() => setOpen(!open)} type="button">
+        <span className="todo-status-tag">
+          {inProgress > 0 ? (
+            <span className="todo-tag-live">◍ 进度 {completed}/{total}</span>
+          ) : completed === total && total > 0 ? (
+            <span className="todo-tag-done">✓ 已完成 {completed}/{total}</span>
+          ) : (
+            <span className="todo-tag-pending">○ 进度 {completed}/{total}</span>
+          )}
+        </span>
+        <span className="todo-title">任务清单</span>
+        <span className="todo-percent">{percent}%</span>
+        <span className="spacer" />
+        <span className="todo-chevron">{open ? '▾' : '▸'}</span>
+      </button>
+      {open && (
+        <div className="todo-body">
+          <div className="todo-list">
+            {todos.map((todo, idx) => {
+              const statusClass = `status-${todo.status}`;
+              const icon =
+                todo.status === 'completed' ? '✓' : todo.status === 'in_progress' ? '◍' : '○';
+              return (
+                <div key={idx} className={`todo-row ${statusClass}`}>
+                  <span className={`todo-icon ${statusClass}`}>{icon}</span>
+                  <span className="todo-text">{todo.content}</span>
+                  {todo.priority && (
+                    <span className={`todo-pri pri-${todo.priority}`}>
+                      [{todo.priority.toUpperCase()}]
+                    </span>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+          {item.status === 'error' && item.result && (
+            <div className="todo-error-hint">{item.result}</div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ItemView({ item }: { item: AssistantItem | ToolItem | ApprovalItem | ErrorItem }) {
   switch (item.kind) {
     case 'assistant':
@@ -160,6 +222,9 @@ function ItemView({ item }: { item: AssistantItem | ToolItem | ApprovalItem | Er
         </div>
       );
     case 'tool':
+      if (item.name === 'todo_write') {
+        return <TodoCard item={item} />;
+      }
       return <ToolCard item={item} />;
     case 'approval':
       return <ApprovalCard item={item} />;
@@ -292,6 +357,25 @@ function TurnView({ turn }: { turn: TurnItem }) {
   const finalText = finalTextOf(turn);
   const errors = turn.items.filter((i): i is ErrorItem => i.kind === 'error');
 
+  const latestTodoTool = turn.items
+    .slice()
+    .reverse()
+    .find((i): i is ToolItem => i.kind === 'tool' && i.name === 'todo_write');
+  const turnTodos = (() => {
+    if (!latestTodoTool) return null;
+    const i = (latestTodoTool.input ?? {}) as { todos?: TodoItem[] };
+    const list = Array.isArray(i.todos) ? i.todos : [];
+    if (list.length === 0) return null;
+    const completed = list.filter((t) => t.status === 'completed').length;
+    const inProgress = list.find((t) => t.status === 'in_progress');
+    return {
+      completed,
+      total: list.length,
+      current: inProgress?.content,
+      allDone: completed === list.length,
+    };
+  })();
+
   return (
     <div className={`turn ${expanded ? 'expanded' : 'collapsed'}`} data-anchor={turn.id}>
       <div className="turn-head">
@@ -318,6 +402,16 @@ function TurnView({ turn }: { turn: TurnItem }) {
       )}
       {!expanded && (
         <div className="turn-final">
+          {turnTodos && (
+            <div className="turn-todo-summary">
+              <span className={`turn-todo-badge ${turnTodos.allDone ? 'done' : 'live'}`}>
+                {turnTodos.allDone ? '✓' : '◍'} 任务进度 {turnTodos.completed}/{turnTodos.total}
+              </span>
+              <span className="turn-todo-current">
+                {turnTodos.current ? `进行中: ${turnTodos.current}` : '全部任务已完成'}
+              </span>
+            </div>
+          )}
           {finalText ? <Md text={finalText} /> : null}
           {errors.map((e) => (
             <div key={e.id} className="error-line">

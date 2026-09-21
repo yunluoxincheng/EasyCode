@@ -5,6 +5,9 @@
 ## [0.1.10] - 2026-09-21
 
 ### 新增
+- 任务清单 TodoWrite：新增内置 `todo_write` 工具，Agent 执行多步骤复杂开发任务时自主规划并维护清单状态（待办 pending / 运行中 in_progress / 完成 completed）（TODOS #12）
+- 终端极客风 TodoCard 面板：Transcript 会话流中定制展示任务进度（`[◍] 进度 N/M (百分比)`），各项清晰呈现状态图标与优先级，支持面板折叠与展开（TODOS #12）
+- 回合折叠态进度指示：回合执行完毕折叠后，在最终输出上方保留任务清单进度汇总条，任务完成进展一目了然（TODOS #12）
 - Windows Shell 增强：`run_command` 启动时自动探测系统最优可用 Shell（优先级：`PowerShell 7 (pwsh) → Git Bash → Windows PowerShell 5.1 → Command Prompt (cmd)`），模型可顺畅执行 Linux 习惯命令（`ls`、`cat`、`rm -rf` 等）（TODOS #1）
 - 设置页「常规」新增「命令行终端 (Shell)」下拉单选：动态展示系统各 Shell 探测状态（可用/未检测到），默认自动探测，支持用户手动覆盖（TODOS #1）
 
@@ -12,6 +15,8 @@
 - 修复 Windows 中文编码乱码：Rust 宿主对子进程输出增加自适应智能转码（`decode_output`），优先解析合法 UTF-8，包含非法字节时按 Windows 当前 ANSI 代码页（CP_ACP/GBK）无损转码，彻底杜绝 cmd 和 powershell 中文输出乱码（TODOS #1）
 
 ### 技术
+- 新增 `todo_write` 工具与 `TodoItem` 类型定义，`SessionData.todos` 随会话自动持久化
+- 系统提示词工作纪律注入多步骤任务使用 `todo_write` 规划的主动引导
 - 新增宿主命令 `proc_detect_shells`，返回各终端可用性与探测路径
 - `proc_run` 扩展 `shell` 参数，支持动态路由与分流调用
 - Core 与 Engine 链路全打通：`ProcessRunOptions.shell`、`ToolContext.shell`、`Settings.shell`（默认 `auto`）

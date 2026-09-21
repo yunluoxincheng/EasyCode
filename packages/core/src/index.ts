@@ -11,6 +11,7 @@ export type { Tool, ToolSpec, ToolContext, ToolExecution } from './tools/index.j
 export { readFileTool, writeFileTool, editFileTool, listDirTool } from './tools/fs.js';
 export { searchFilesTool } from './tools/search.js';
 export { runCommandTool } from './tools/shell.js';
+export { todoWriteTool } from './tools/todo.js';
 // Provider
 export * from './providers/index.js';
 export { OpenAICompatibleProvider } from './providers/openai.js';

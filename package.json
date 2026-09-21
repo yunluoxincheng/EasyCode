@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "build": "pnpm -r run build",
-    "test": "pnpm --filter @easycode/core run build && node --test packages/core/dist/test/shell.test.js",
+    "test": "pnpm --filter @easycode/core run build && node --test packages/core/dist/test/shell.test.js packages/core/dist/test/todo.test.js",
     "dev:ui": "pnpm --filter @easycode/ui run dev",
     "start": "pnpm --filter @easycode/desktop run start",
     "cli": "node packages/engine/dist/bin.js"
