@@ -17,6 +17,7 @@ export type ToolItem = {
   status: 'running' | 'ok' | 'error' | 'denied';
   result?: string;
   durationMs?: number;
+  startedAt?: number;
 };
 export type ApprovalItem = {
   kind: 'approval';
@@ -114,6 +115,30 @@ export class AppStore {
   /** 自动滚底开关（未配置视为开启） */
   get autoScrollOn(): boolean {
     return this.settings?.autoScroll !== false;
+  }
+
+  /** 当前活动回合正在执行中的工具（若有） */
+  get activeTool(): ToolItem | null {
+    if (!this.running || !this.currentTurn) return null;
+    for (let i = this.currentTurn.items.length - 1; i >= 0; i--) {
+      const item = this.currentTurn.items[i];
+      if (item.kind === 'tool' && item.status === 'running') {
+        return item;
+      }
+    }
+    return null;
+  }
+
+  /** 当前是否有待审批项 */
+  get pendingApproval(): ApprovalItem | null {
+    if (!this.running || !this.currentTurn) return null;
+    for (let i = this.currentTurn.items.length - 1; i >= 0; i--) {
+      const item = this.currentTurn.items[i];
+      if (item.kind === 'approval' && item.status === 'pending') {
+        return item;
+      }
+    }
+    return null;
   }
 
   get activeProject(): ProjectEntry | null {
@@ -589,6 +614,7 @@ export class AppStore {
           name: event.call.name,
           input: event.call.input,
           status: 'running',
+          startedAt: Date.now(),
         });
         break;
       }

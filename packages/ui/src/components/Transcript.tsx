@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useStore } from '../useStore.js';
 import { renderMarkdown } from '../markdown.js';
+import { renderAnsi } from '../ansi.js';
 import { diffLines, type TodoItem } from '@easycode/core';
 import type {
   ApprovalItem,
@@ -186,6 +187,74 @@ function ToolCard({ item }: { item: ToolItem }) {
   );
 }
 
+/** run_command 拟终端控制台卡片（TODOS #21） */
+function TerminalCard({ item }: { item: ToolItem }) {
+  const [open, setOpen] = useState(true);
+  const i = (item.input ?? {}) as { command?: string; timeout_ms?: number };
+  const command = String(i.command ?? '');
+
+  // 解析第一行退出码并与输出文本分离
+  const parsed = (() => {
+    if (item.result === undefined) return null;
+    const match = item.result.match(/^退出码:\s*(\d+|signal)\r?\n?/);
+    if (!match) return { exitCode: null, isSuccess: item.status === 'ok', text: item.result };
+    const exitCode = match[1];
+    const isSuccess = exitCode === '0';
+    const text = item.result.slice(match[0].length);
+    return { exitCode, isSuccess, text };
+  })();
+
+  const isRunning = item.status === 'running';
+  const statusClass = isRunning
+    ? 'running'
+    : parsed
+      ? parsed.isSuccess
+        ? 'ok'
+        : 'error'
+      : item.status;
+
+  return (
+    <div className={`term-card status-${statusClass} ${open ? 'open' : 'closed'}`}>
+      <button className="term-head" onClick={() => setOpen(!open)} type="button">
+        <span className={`term-status-badge ${statusClass}`}>
+          {isRunning ? 'RUN' : parsed ? (parsed.isSuccess ? 'OK' : 'ERR') : statusClass.toUpperCase()}
+        </span>
+        <span className="term-cmd-preview">$ {command}</span>
+        {parsed?.exitCode !== null && parsed?.exitCode !== undefined && (
+          <span className={`term-exit-badge ${parsed.isSuccess ? 'ok' : 'err'}`}>
+            exit: {parsed.exitCode}
+          </span>
+        )}
+        {item.durationMs !== undefined && <span className="term-duration">{item.durationMs}ms</span>}
+        <span className="spacer" />
+        <span className="term-chevron">{open ? '▾' : '▸'}</span>
+      </button>
+      {open && (
+        <div className="term-body">
+          <div className="term-bar">
+            <span className="term-bar-title">// 控制台输出</span>
+            {parsed?.text && <CopyButton text={parsed.text} />}
+          </div>
+          <div className="term-screen">
+            {isRunning && !parsed && (
+              <div className="term-running-line">
+                <span className="term-prompt">$</span> {command} <span className="term-cursor">█</span>
+              </div>
+            )}
+            {parsed && (
+              parsed.text.trim().length > 0 ? (
+                <pre className="term-pre">{renderAnsi(parsed.text)}</pre>
+              ) : (
+                <div className="term-empty">(命令已执行完成，控制台无输出)</div>
+              )
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /** 审批卡片（内联在回合里） */
 function ApprovalCard({ item }: { item: ApprovalItem }) {
   const store = useStore();
@@ -279,23 +348,27 @@ function TodoCard({ item }: { item: ToolItem }) {
 
 function ItemView({ item }: { item: AssistantItem | ToolItem | ApprovalItem | ErrorItem }) {
   switch (item.kind) {
-    case 'assistant':
+    case 'assistant': {
+      // 思考过程已统一汇聚在回合顶部单一呈现，此处仅渲染助手实际回复的正文文本；无文本时不渲染空外框
+      const textBlocks = item.blocks.filter((b) => b.type === 'text' && b.text.trim().length > 0);
+      if (textBlocks.length === 0) return null;
       return (
         <div className="msg assistant">
           <div className="msg-content">
-            {item.blocks.map((b: ViewBlock, idx: number) =>
-              b.type === 'thinking' ? (
-                <Thinking key={idx} text={b.text} />
-              ) : (
-                <Md key={idx} text={b.text} />
-              ),
-            )}
+            {textBlocks.map((b: ViewBlock, idx: number) => (
+              <Md key={idx} text={b.text} />
+            ))}
           </div>
         </div>
       );
+    }
     case 'tool':
       if (item.name === 'todo_write') {
-        return <TodoCard item={item} />;
+        // 独立视窗内移除重复的 TodoCard，仅保留顶部吸顶任务清单与回合折叠态汇总
+        return null;
+      }
+      if (item.name === 'run_command') {
+        return <TerminalCard item={item} />;
       }
       return <ToolCard item={item} />;
     case 'approval':
@@ -420,14 +493,172 @@ function UserView({ item, canEdit }: { item: UserItem; canEdit: boolean }) {
   );
 }
 
+/** 实时动作指示器（TODOS #21） */
+function LiveTicker() {
+  const store = useStore();
+  const [elapsed, setElapsed] = useState('0.0');
+  const activeTool = store.activeTool;
+  const pendingApproval = store.pendingApproval;
+  const startedAt = activeTool?.startedAt;
+
+  useEffect(() => {
+    if (!startedAt) {
+      setElapsed('0.0');
+      return;
+    }
+    const update = () => {
+      const sec = Math.max(0, (Date.now() - startedAt) / 1000).toFixed(1);
+      setElapsed(sec);
+    };
+    update();
+    const timer = setInterval(update, 100);
+    return () => clearInterval(timer);
+  }, [startedAt]);
+
+  if (pendingApproval) {
+    const label = TOOL_LABELS[pendingApproval.name] ?? pendingApproval.name;
+    return (
+      <div className="live-ticker waiting">
+        <span className="live-ticker-prefix">❯</span>
+        <span className="live-ticker-badge wait">[{label}]</span>
+        <span className="live-ticker-text">等待用户审批操作...</span>
+        <span className="live-ticker-cursor">█</span>
+      </div>
+    );
+  }
+
+  if (activeTool) {
+    const label = TOOL_LABELS[activeTool.name] ?? activeTool.name;
+    const summary = inputSummary(activeTool.name, activeTool.input);
+    return (
+      <div className="live-ticker running">
+        <span className="live-ticker-prefix">❯</span>
+        <span className="live-ticker-badge run">[{label}]</span>
+        <span className="live-ticker-text">正在执行: {summary}</span>
+        <span className="live-ticker-time">(已耗时 {elapsed}s)</span>
+        <span className="live-ticker-cursor">█</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="live-ticker streaming">
+      <span className="live-ticker-prefix">❯</span>
+      <span className="live-ticker-text">Agent 正在思考并组织回答...</span>
+      <span className="live-ticker-cursor">█</span>
+    </div>
+  );
+}
+
+/** 任务清单常驻吸顶栏（TODOS #18） */
+function StickyTodoBar() {
+  const store = useStore();
+  const [open, setOpen] = useState(false);
+  const todos = store.activeTodos;
+
+  if (!todos || todos.length === 0) return null;
+
+  const completed = todos.filter((t) => t.status === 'completed').length;
+  const inProgress = todos.filter((t) => t.status === 'in_progress').length;
+  const current = todos.find((t) => t.status === 'in_progress');
+  const total = todos.length;
+  const allDone = completed === total && total > 0;
+  const percent = total > 0 ? Math.round((completed / total) * 100) : 0;
+
+  return (
+    <div className={`sticky-todo ${open ? 'open' : 'closed'}`}>
+      <button
+        className="sticky-todo-bar"
+        onClick={() => setOpen(!open)}
+        type="button"
+        title={open ? '收起任务清单' : '展开查看任务详情'}
+      >
+        <span className={`sticky-todo-badge ${allDone ? 'done' : inProgress > 0 ? 'live' : 'pending'}`}>
+          {allDone ? '✓' : '◍'} 任务进度 {completed}/{total} · {percent}%
+        </span>
+        <span className="sticky-todo-current">
+          {current ? `正在进行: ${current.content}` : allDone ? '全部任务已完成' : '就绪'}
+        </span>
+        <span className="spacer" />
+        <span className="sticky-todo-chevron">{open ? '▴' : '▾'}</span>
+      </button>
+      {open && (
+        <div className="sticky-todo-dropdown">
+          <div className="todo-list">
+            {todos.map((todo, idx) => {
+              const statusClass = `status-${todo.status}`;
+              const icon =
+                todo.status === 'completed' ? '✓' : todo.status === 'in_progress' ? '◍' : '○';
+              return (
+                <div key={idx} className={`todo-row ${statusClass}`}>
+                  <span className={`todo-icon ${statusClass}`}>{icon}</span>
+                  <span className="todo-text">{todo.content}</span>
+                  {todo.priority && (
+                    <span className={`todo-pri pri-${todo.priority}`}>
+                      [{todo.priority.toUpperCase()}]
+                    </span>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /** 回合块：头部（用时）+ 折叠的过程 + 常显的最终结果 */
 function TurnView({ turn }: { turn: TurnItem }) {
   const store = useStore();
   const live = store.running && turn.durationMs === undefined;
   const expanded = live ? true : !turn.collapsed;
-  const elapsed = turn.durationMs ?? Date.now() - turn.startedAt;
+  const [liveElapsed, setLiveElapsed] = useState(Date.now() - turn.startedAt);
+
+  // 运行态平滑计时器：每 500ms 自动自增刷新，彻底解决事件间隔期间计时卡顿
+  useEffect(() => {
+    if (!live) return;
+    const update = () => setLiveElapsed(Date.now() - turn.startedAt);
+    update();
+    const timer = setInterval(update, 500);
+    return () => clearInterval(timer);
+  }, [live, turn.startedAt]);
+
+  const elapsed = turn.durationMs ?? (live ? liveElapsed : Date.now() - turn.startedAt);
   const finalText = finalTextOf(turn);
   const errors = turn.items.filter((i): i is ErrorItem => i.kind === 'error');
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const localAtBottomRef = useRef(true);
+
+  // 汇总整个回合的所有思考过程，只保留单个统一的 Thinking 折叠块
+  const allThinking = turn.items
+    .filter((i): i is AssistantItem => i.kind === 'assistant')
+    .flatMap((a) => a.blocks)
+    .filter((b) => b.type === 'thinking')
+    .map((b) => b.text.trim())
+    .filter(Boolean)
+    .join('\n\n---\n\n');
+
+  // 局部独立滚动视窗自动贴底（仅在当前活跃 live 且未手动向上翻看时）
+  useEffect(() => {
+    const el = bodyRef.current;
+    if (!el || !live || !expanded || !localAtBottomRef.current) return;
+    el.scrollTop = el.scrollHeight;
+  }, [turn.items.length, store.version, live, expanded]);
+
+  const onBodyScroll = () => {
+    const el = bodyRef.current;
+    if (!el) return;
+    const isAtBottom = el.scrollTop >= el.scrollHeight - el.clientHeight - 40;
+    localAtBottomRef.current = isAtBottom;
+  };
+
+  const onBodyWheel = (e: React.WheelEvent) => {
+    e.stopPropagation();
+    if (e.deltaY < 0) {
+      localAtBottomRef.current = false;
+    }
+  };
 
   const latestTodoTool = turn.items
     .slice()
@@ -466,7 +697,14 @@ function TurnView({ turn }: { turn: TurnItem }) {
         {finalText && <CopyButton text={finalText} />}
       </div>
       {expanded && (
-        <div className="turn-body">
+        <div
+          className="turn-body"
+          ref={bodyRef}
+          onScroll={onBodyScroll}
+          onWheel={onBodyWheel}
+        >
+          {live && <LiveTicker />}
+          {allThinking ? <Thinking text={allThinking} /> : null}
           {turn.items.map((it) => (
             <ItemView key={it.id} item={it} />
           ))}
@@ -506,14 +744,7 @@ export function Transcript() {
   const [hover, setHover] = useState<{ top: number; text: string } | null>(null);
   const [railH, setRailH] = useState(0);
 
-  // 贴底跟随：pinned 时内容变化（流式输出/工具）自动贴底；脱离后不打扰
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (!el || !store.autoScrollOn || !store.atBottom) return;
-    el.scrollTop = el.scrollHeight;
-  }, [store.version, store.atBottom, store.activeId, store.autoScrollOn]);
-
-  // 发送/切换会话：强制贴底并恢复跟随
+  // 发送/切换会话：平滑贴底并恢复跟随（过程输出的自动贴底转移至当前回合的局部独立视窗中，防止主视口拉走用户提问）
   useEffect(() => {
     const el = scrollRef.current;
     if (!el || !store.autoScrollOn) return;
@@ -530,8 +761,9 @@ export function Transcript() {
       const max = el.scrollHeight - el.clientHeight;
       store.setAtBottom(el.scrollTop >= max - 80);
     };
-    // 滚轮向上：立即脱离跟随（保证第一格滚轮就生效，不被贴底拉回）
+    // 滚轮向上：立即脱离跟随（避免子容器如 .turn-body 的内部滚动误触发外层脱离跟随）
     const onWheel = (e: WheelEvent): void => {
+      if ((e.target as HTMLElement)?.closest?.('.turn-body')) return;
       if (e.deltaY < 0) store.setAtBottom(false);
     };
     el.addEventListener('scroll', onScroll);
@@ -609,7 +841,8 @@ export function Transcript() {
       const probe = el.scrollTop + el.clientHeight * 0.35;
       let idx = 0;
       nodes.forEach((n, i) => {
-        if (n.offsetTop <= probe) idx = i;
+        const top = n.getBoundingClientRect().top - el.getBoundingClientRect().top + el.scrollTop;
+        if (top <= probe) idx = i;
       });
       setHighlight(idx);
     };
@@ -707,6 +940,7 @@ export function Transcript() {
         </button>
       )}
       <div className="transcript-scroll" ref={scrollRef}>
+        <StickyTodoBar />
         {store.items.length === 0 && (
           <div className="hero">
             <h1>EasyCode</h1>
