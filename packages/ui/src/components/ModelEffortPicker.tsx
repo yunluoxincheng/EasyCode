@@ -147,6 +147,18 @@ export function ModelEffortPicker() {
           {allProviders.length === 0 && currentEntry === undefined && (
             <div className="me-empty">该服务还没有模型，到 设置 › 模型服务 中获取</div>
           )}
+
+          <div className="me-pop-foot">
+            <button
+              className="proj-foot-item"
+              onClick={() => {
+                setOpen(null);
+                store.openSettings('models');
+              }}
+            >
+              ⚙ 管理模型
+            </button>
+          </div>
         </div>
       )}
 

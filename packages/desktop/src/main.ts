@@ -4,6 +4,7 @@
  * 业务逻辑全部在 @easycode/engine / @easycode/core。
  */
 import { app, BrowserWindow, dialog, ipcMain, Notification, shell } from 'electron';
+import cp from 'node:child_process';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
@@ -105,6 +106,21 @@ const handlers: Record<string, Handler> = {
   'open-path': async (args) => {
     const err = await shell.openPath(String(args.path));
     if (err) throw new Error(err);
+    return null;
+  },
+  'open-in-vscode': (args) => {
+    const p = String(args.path);
+    const isWin = process.platform === 'win32';
+    try {
+      const found = isWin
+        ? cp.execFileSync('cmd', ['/C', 'where', 'code'], { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim()
+        : cp.execFileSync('which', ['code'], { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+      if (!found) throw new Error();
+    } catch {
+      throw new Error('未检测到 VS Code，请先安装并在 PATH 中注册 code 命令');
+    }
+    if (isWin) cp.spawn('cmd', ['/C', 'code', p], { detached: true, windowsHide: true, stdio: 'ignore' }).unref();
+    else cp.spawn('code', [p], { detached: true, stdio: 'ignore' }).unref();
     return null;
   },
   'send-notification': (args) => {

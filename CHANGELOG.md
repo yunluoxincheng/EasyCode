@@ -2,6 +2,20 @@
 
 本文件记录 EasyCode 每个版本的变更。发布时，GitHub Release 说明自动取自对应版本的段落。
 
+## [0.1.9] - 2026-09-21
+
+### 新增
+- 模型弹窗底部新增「⚙ 管理模型」入口，一键跳转设置页模型服务分区（TODOS #6 子项）
+- 通知点击唤起：Windows 上点击系统通知即还原主窗口并聚焦（winrt toast on_activated 回调）（TODOS #13 子项）
+- 任务出错也通知：回合内出现错误时，通知文案区分「任务出错 / Agent 完成」（TODOS #13 子项）
+- 设置页「常规」新增「任务完成桌面通知」开关（默认开，关闭后不再发系统通知）（TODOS #13 子项）
+- 「打开工作区」支持 VS Code：探测 PATH 中的 code 命令，未安装时 toast 提示；设置页「常规」新增「打开工作区方式」下拉（文件管理器 / VS Code），项目切换器按钮文案与行为跟随默认方式（TODOS #14 子项）
+
+### 技术
+- Windows 通知改为直接构建 winrt toast（新增 tauri-winrt-notification 依赖）以挂点击回调；非 Windows 仍走 notification 插件；dev 构建回退 PowerShell AUMID 的策略与插件保持一致
+- 新增宿主命令 `open_in_vscode`（Rust where/which 探测 + 隐藏窗口 spawn；Electron 同语义实现）
+- Settings 新增 `desktopNotify`、`openWorkspaceWith` 两个可选项，缺省行为与旧版一致
+
 ## [0.1.8] - 2026-09-20
 
 ### 新增

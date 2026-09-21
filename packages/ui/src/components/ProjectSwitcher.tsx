@@ -69,10 +69,12 @@ export function ProjectSwitcher() {
                 title={session.workspaceRoot}
                 onClick={() => {
                   store.toggleProjectSwitcher();
-                  store.openPath(session.workspaceRoot);
+                  store.openWorkspace(session.workspaceRoot);
                 }}
               >
-                ⧉ 在文件管理器中打开
+                {(store.settings?.openWorkspaceWith ?? 'explorer') === 'vscode'
+                  ? '⌨ 在 VS Code 中打开'
+                  : '⧉ 在文件管理器中打开'}
               </button>
             )}
             <button

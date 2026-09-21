@@ -88,6 +88,10 @@ export interface Settings {
   /** 发送/流式输出时自动滚到底部；默认开 */
   autoScroll?: boolean;
   webSearch?: WebSearchConfig;
+  /** Agent 任务完成后发桌面通知（仅窗口不在前台时）；默认开 */
+  desktopNotify?: boolean;
+  /** 「打开工作区」用的工具：explorer=系统文件管理器（默认）；vscode=VS Code（未安装时提示） */
+  openWorkspaceWith?: 'explorer' | 'vscode';
 }
 
 /** 内置 Provider 预设：均为 OpenAI 兼容端点（或 Anthropic），API Key 留空由用户填写 */

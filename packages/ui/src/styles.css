@@ -1053,6 +1053,8 @@ select:focus-visible,
 .me-section::before { content: '// '; }
 /* 其他 Provider 分组标题：顶部分隔线 + 略暗色区分 */
 .me-section-other { border-top: 1px solid var(--border); margin-top: 4px; color: var(--faint); opacity: 0.75; }
+/* 模型弹窗底部操作区（管理模型入口） */
+.me-pop-foot { border-top: 1px solid var(--border); margin-top: 4px; padding: 2px; }
 .me-opt {
   display: flex;
   align-items: center;

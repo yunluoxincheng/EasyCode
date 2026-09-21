@@ -293,6 +293,7 @@ export async function createTauriClient(): Promise<AgentClient> {
     testWebSearch: () => server.testWebSearch(),
     pickWorkspace: () => invoke<string | null>('pick_folder'),
     openPath: (path: string) => invoke<void>('open_path', { path }),
+    openInVscode: (path: string) => invoke<void>('open_in_vscode', { path }),
     notify: (title: string, body: string) => invoke<void>('send_notification', { title, body }),
     onEvent: (listener) => server.onEvent(listener),
   };

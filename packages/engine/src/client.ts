@@ -44,6 +44,8 @@ export interface AgentClient {
   testWebSearch(): Promise<{ ok: boolean; latencyMs: number; resultCount?: number; error?: string }>;
   /** 会话级工作区打开（由宿主用系统文件管理器打开指定路径） */
   openPath(path: string): Promise<void>;
+  /** 用 VS Code 打开目录（宿主探测 code 命令，未安装时抛错） */
+  openInVscode(path: string): Promise<void>;
   /** 发送系统通知（由宿主用原生通知中心发送） */
   notify(title: string, body: string): Promise<void>;
   pickWorkspace(): Promise<string | null>;

@@ -481,13 +481,32 @@ export class AppStore {
     void this.client.openPath(path).catch(() => {/* 静默：路径可能不存在 */});
   }
 
-  /** Agent 完成后发桌面通知（窗口在后台时才发，避免打断当前窗口的用户） */
-  private sendDesktopNotification(): void {
+  /** 按设置的默认方式打开工作区（explorer / vscode） */
+  openWorkspace(path: string): void {
+    if ((this.settings?.openWorkspaceWith ?? 'explorer') === 'vscode') {
+      void this.openInVscode(path);
+    } else {
+      this.openPath(path);
+    }
+  }
+
+  /** 用 VS Code 打开目录；未安装时 toast 提示 */
+  async openInVscode(path: string): Promise<void> {
+    try {
+      await this.client.openInVscode(path);
+    } catch (err) {
+      this.showToast(err instanceof Error ? err.message : String(err), 'err');
+    }
+  }
+
+  /** Agent 回合结束后发桌面通知（窗口在后台且设置开启时才发，出错时文案区分） */
+  private sendDesktopNotification(hadError: boolean): void {
     if (document.hasFocus()) return;
+    if (this.settings?.desktopNotify === false) return;
     const session = this.activeSession;
-    const title = session?.title ?? '任务完成';
+    const title = session?.title ?? (hadError ? '任务出错' : '任务完成');
     void this.client
-      .notify('EasyCode — Agent 完成', title)
+      .notify(hadError ? 'EasyCode — 任务出错' : 'EasyCode — Agent 完成', title)
       .catch(() => {/* 通知失败不影响主流程 */});
   }
 
@@ -598,10 +617,14 @@ export class AppStore {
         if (this.currentTurn) {
           this.currentTurn.durationMs = Date.now() - this.currentTurn.startedAt;
           this.currentTurn.collapsed = true;
+          // 回合内出现过错误条目则通知文案区分（loop 保证 error 后必发 done，不会双发）
+          const hadError = this.currentTurn.items.some((i) => i.kind === 'error');
           this.currentTurn = null;
+          this.running = false;
+          this.sendDesktopNotification(hadError);
+        } else {
+          this.running = false;
         }
-        this.running = false;
-        this.sendDesktopNotification();
         break;
     }
     this.notify();

@@ -782,6 +782,36 @@ export function SettingsPage() {
                   <span className="auto-scroll-text">{draft.autoScroll !== false ? '开启' : '关闭'}</span>
                 </div>
               </div>
+              <div className="field">
+                <span>任务完成桌面通知</span>
+                <div className="auto-scroll-row">
+                  <button
+                    className={`switch ${draft.desktopNotify !== false ? 'on' : ''}`}
+                    title={
+                      draft.desktopNotify !== false
+                        ? '已开启（点击关闭）——仅窗口不在前台时通知'
+                        : '已关闭（点击开启）'
+                    }
+                    onClick={() => patch({ desktopNotify: draft.desktopNotify === false })}
+                  >
+                    <span className="knob" />
+                  </button>
+                  <span className="auto-scroll-text">
+                    {draft.desktopNotify !== false ? '开启（仅窗口在后台时）' : '关闭'}
+                  </span>
+                </div>
+              </div>
+              <label className="field">
+                <span>打开工作区方式</span>
+                <TerminalSelect
+                  value={draft.openWorkspaceWith ?? 'explorer'}
+                  options={[
+                    { value: 'explorer', label: '系统文件管理器' },
+                    { value: 'vscode', label: 'VS Code' },
+                  ]}
+                  onChange={(v) => patch({ openWorkspaceWith: v as 'explorer' | 'vscode' })}
+                />
+              </label>
               <p className="hint">
                 API Key 保存在本机设置文件中，不会上传。接入 Ollama / LM Studio 等本地服务可完全离线使用。
               </p>

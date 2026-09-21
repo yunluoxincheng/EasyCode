@@ -95,6 +95,9 @@ export class IpcAgentClient implements AgentClient {
   openPath(path: string) {
     return this.invoke<void>('open-path', { path });
   }
+  openInVscode(path: string) {
+    return this.invoke<void>('open-in-vscode', { path });
+  }
   notify(title: string, body: string) {
     return this.invoke<void>('send-notification', { title, body });
   }
@@ -181,6 +184,7 @@ export function createDemoClient(): AgentClient {
       wrap(() => ({ ok: false, latencyMs: 0, error: '演示模式无搜索后端' })),
     pickWorkspace: async () => '/demo-workspace',
     openPath: async (_path) => { /* 演示模式：无实际文件系统 */ },
+    openInVscode: async (_path) => { /* 演示模式：无实际文件系统 */ },
     notify: async (title, body) => {
       // 演示模式（浏览器）：退回 Web Notification
       if (!('Notification' in window)) return;

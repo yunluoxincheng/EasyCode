@@ -290,16 +290,92 @@ async fn open_path(app: AppHandle, path: String) -> Result<(), String> {
     app.opener().open_path(&path, None::<&str>).map_err(|e| e.to_string())
 }
 
-/// 发送系统通知（Agent 任务完成等）
+/// 探测 PATH 中的 code 命令（VS Code CLI）。返回是否找到。
+fn probe_vscode() -> bool {
+    #[cfg(windows)]
+    {
+        let mut c = Command::new("cmd");
+        c.args(["/C", "where", "code"]);
+        hide_window(&mut c);
+        matches!(c.output(), Ok(o) if o.status.success() && !o.stdout.is_empty())
+    }
+    #[cfg(not(windows))]
+    {
+        matches!(Command::new("which").arg("code").output(), Ok(o) if o.status.success() && !o.stdout.is_empty())
+    }
+}
+
+/// 用 VS Code 打开目录（探测 code 命令，未安装时报错）
+#[tauri::command]
+async fn open_in_vscode(path: String) -> Result<(), String> {
+    if !probe_vscode() {
+        return Err("未检测到 VS Code，请先安装并在 PATH 中注册 code 命令".into());
+    }
+    #[cfg(windows)]
+    {
+        let mut c = Command::new("cmd");
+        c.args(["/C", "code", &path]);
+        hide_window(&mut c);
+        c.spawn().map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(windows))]
+    {
+        Command::new("code")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// 发送系统通知。
+/// Windows 直接用 winrt toast：挂 on_activated 回调，用户点击通知时唤起主窗口；
+/// 其他平台走 notification 插件（无点击回调）。
 #[tauri::command]
 async fn send_notification(app: AppHandle, title: String, body: String) -> Result<(), String> {
-    use tauri_plugin_notification::NotificationExt;
-    app.notification()
-        .builder()
-        .title(title)
-        .body(body)
-        .show()
-        .map_err(|e| e.to_string())
+    #[cfg(windows)]
+    {
+        use tauri_winrt_notification::Toast;
+        // 与 tauri-plugin-notification 同策略：仅安装版（exe 不在 target/debug|release）使用应用 AUMID，
+        // dev 构建回退 PowerShell AUMID（否则 toast 拒发）
+        let exe = tauri::utils::platform::current_exe().map_err(|e| e.to_string())?;
+        let dev = exe
+            .parent()
+            .map(|d| {
+                let s = d.display().to_string();
+                s.ends_with("\\target\\debug") || s.ends_with("\\target\\release")
+            })
+            .unwrap_or(true);
+        let aumid = if dev {
+            Toast::POWERSHELL_APP_ID.to_string()
+        } else {
+            app.config().identifier.clone()
+        };
+        let handle = app.clone();
+        Toast::new(&aumid)
+            .title(&title)
+            .text1(&body)
+            .on_activated(move |_| {
+                if let Some(w) = handle.get_webview_window("main") {
+                    let _ = w.unminimize();
+                    let _ = w.show();
+                    let _ = w.set_focus();
+                }
+                Ok(())
+            })
+            .show()
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(windows))]
+    {
+        use tauri_plugin_notification::NotificationExt;
+        app.notification()
+            .builder()
+            .title(title)
+            .body(body)
+            .show()
+            .map_err(|e| e.to_string())
+    }
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -429,6 +505,7 @@ fn main() {
             proc_kill,
             pick_folder,
             open_path,
+            open_in_vscode,
             send_notification,
             http_stream,
             http_stream_cancel
