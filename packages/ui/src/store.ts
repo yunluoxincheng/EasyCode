@@ -46,6 +46,15 @@ export type TurnItem = {
 /** 顶层时间线条目：用户消息、回合容器，以及回合聚合前的兜底平铺条目 */
 export type TranscriptItem = UserItem | TurnItem | TurnEntry;
 
+export interface ModelSwitchPending {
+  sessionId: string;
+  providerId: string;
+  providerLabel: string;
+  model: string;
+  targetWindow: number;
+  currentTokens: number;
+}
+
 /**
  * 应用状态仓库（框架无关，React 通过 useSyncExternalStore 订阅）。
  * AgentEvent 流是唯一的事实来源：事件驱动地增量更新时间线。
@@ -75,6 +84,7 @@ export class AppStore {
   createProjectOpen = false;
   projectSwitcherOpen = false;
   projectSearch = '';
+  pendingModelSwitch: ModelSwitchPending | null = null;
 
   private listeners = new Set<() => void>();
   private seq = 0;
@@ -312,6 +322,36 @@ export class AppStore {
     const meta = await this.client.setSessionProvider(id, providerId, model);
     this.sessions = this.sessions.map((s) => (s.id === id ? meta : s));
     this.notify();
+  }
+
+  openModelSwitchGuard(pending: ModelSwitchPending): void {
+    this.pendingModelSwitch = pending;
+    this.notify(true);
+  }
+
+  closeModelSwitchGuard(): void {
+    this.pendingModelSwitch = null;
+    this.notify(true);
+  }
+
+  /** 在当前会话裁剪早期历史（保留最近 keepRecentTurns 轮和最新待办），并切换至目标模型 */
+  async trimSessionAndSwitch(pending: ModelSwitchPending, keepRecentTurns = 2): Promise<void> {
+    this.pendingModelSwitch = null;
+    await this.client.trimSessionHistory(pending.sessionId, keepRecentTurns);
+    await this.client.setSessionProvider(pending.sessionId, pending.providerId, pending.model);
+    await this.selectSession(pending.sessionId);
+    this.showToast(`已精简历史并切换至 ${pending.model || '默认'}`);
+  }
+
+  /** 从当前会话分叉出新会话，在新会话上精简并切换为目标模型，保留原会话完整历史 */
+  async forkSessionAndSwitch(pending: ModelSwitchPending, keepRecentTurns = 2): Promise<void> {
+    this.pendingModelSwitch = null;
+    const newMeta = await this.client.forkSession(pending.sessionId);
+    await this.client.trimSessionHistory(newMeta.id, keepRecentTurns);
+    await this.client.setSessionProvider(newMeta.id, pending.providerId, pending.model);
+    this.sessions = await this.client.listSessions();
+    await this.selectSession(newMeta.id);
+    this.showToast(`已分叉出新分支并切换至 ${pending.model || '默认'}`);
   }
 
   /** 会话级模型覆盖（'' = 供应商默认） */

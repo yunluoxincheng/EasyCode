@@ -73,3 +73,47 @@ test('AgentServer.forkSession 继承配置、截取指定轮次上下文并重�
   assert.equal(forkedByIdData.messages.length, 2);
   assert.equal(forkedByIdData.messages[1].id, 'm_2');
 });
+
+test('AgentServer.trimSessionHistory 保留最新指定轮次并注入归档说明', async () => {
+  const host = new MemoryHost({
+    '/workspace/file.txt': 'hello',
+  });
+  const server = new AgentServer(host);
+  await server.updateSettings({
+    providers: {
+      mock: {
+        kind: 'mock',
+        baseURL: '',
+        name: 'Mock',
+        enabled: true,
+        models: [{ name: 'mock-model', enabled: true }],
+      },
+    },
+    defaultProvider: 'mock',
+  });
+  const session = await server.createSession({
+    workspaceRoot: '/workspace',
+    providerId: 'mock',
+    title: '长会话排错',
+  });
+
+  const sessionData = await server.getSession(session.id);
+  sessionData.messages = [
+    { role: 'user', content: '轮次 1：发现 bug', id: 'u_1' },
+    { role: 'assistant', blocks: [{ type: 'text', text: '定位中...' }], id: 'a_1' },
+    { role: 'user', content: '轮次 2：提供日志', id: 'u_2' },
+    { role: 'assistant', blocks: [{ type: 'text', text: '分析日志...' }], id: 'a_2' },
+    { role: 'user', content: '轮次 3：给出补丁', id: 'u_3' },
+    { role: 'assistant', blocks: [{ type: 'text', text: '补丁已应用。' }], id: 'a_3' },
+  ];
+
+  // 保留最近 1 轮（u_3 + a_3），加上一条系统提示共 3 条
+  const trimmed = await server.trimSessionHistory(session.id, 1);
+  assert.equal(trimmed.messages.length, 3);
+  assert.equal(trimmed.messages[0].role, 'user');
+  if (trimmed.messages[0].role === 'user') {
+    assert.match(trimmed.messages[0].content, /早期历史会话已精简归档/);
+  }
+  assert.equal(trimmed.messages[1].id, 'u_3');
+  assert.equal(trimmed.messages[2].id, 'a_3');
+});

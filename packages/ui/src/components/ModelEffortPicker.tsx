@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useStore } from '../useStore.js';
 import { fmtCtx } from '../format.js';
+import { estimateSessionTokens, DEFAULT_WINDOW } from './ContextChip.js';
 
 const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
 
@@ -49,6 +50,20 @@ export function ModelEffortPicker() {
 
   const pickModel = (m: string): void => {
     setOpen(null);
+    const targetModelCfg = (currentEntry?.models ?? []).find((mod) => mod.name === m);
+    const targetWindow = targetModelCfg?.contextWindow ?? currentEntry?.contextWindow ?? DEFAULT_WINDOW;
+    const { used } = estimateSessionTokens(store, targetWindow);
+    if (used > targetWindow * 0.8) {
+      store.openModelSwitchGuard({
+        sessionId: session.id,
+        providerId: session.providerId,
+        providerLabel: currentProviderLabel,
+        model: m,
+        targetWindow,
+        currentTokens: used,
+      });
+      return;
+    }
     void store
       .setSessionModel(session.id, m)
       .catch((err) => store.showToast(err instanceof Error ? err.message : String(err)));
@@ -56,6 +71,21 @@ export function ModelEffortPicker() {
 
   const pickProvider = (providerId: string, model: string): void => {
     setOpen(null);
+    const targetEntry = settings?.providers[providerId];
+    const targetModelCfg = (targetEntry?.models ?? []).find((mod) => mod.name === model);
+    const targetWindow = targetModelCfg?.contextWindow ?? targetEntry?.contextWindow ?? DEFAULT_WINDOW;
+    const { used } = estimateSessionTokens(store, targetWindow);
+    if (used > targetWindow * 0.8) {
+      store.openModelSwitchGuard({
+        sessionId: session.id,
+        providerId,
+        providerLabel: store.providerLabelOf(providerId),
+        model,
+        targetWindow,
+        currentTokens: used,
+      });
+      return;
+    }
     void store
       .setSessionProvider(session.id, providerId, model)
       .catch((err) => store.showToast(err instanceof Error ? err.message : String(err)));

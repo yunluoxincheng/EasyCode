@@ -2,6 +2,18 @@
 
 本文件记录 EasyCode 每个版本的变更。发布时，GitHub Release 说明自动取自对应版本的段落。
 
+## [0.1.16] - 2026-09-22
+
+### 新增
+- 会话一键导出（Session Export）：在标题栏（`TitleBar`）新增极客终端风格 `⤓` 导出会话下拉菜单；支持导出为完整结构化 Markdown 文档（`.md`，包含元数据、GitHub 风格任务清单、折叠思考过程、行级 Diff 与命令执行输出）及单文件离线自包含 HTML 报告（`.html`，内嵌极客暗黑终端调色板、highlight.js 代码高亮样式、原生 `<details>` 交互卡片与红绿 Diff 视窗，零外部网络依赖，双击即开即审）（TODOS #26）
+- 模型热切换容量安全预警（Model Switch Guard）：在 `ModelEffortPicker` 切换模型或服务商时，自动比对当前会话 Token 用量与目标模型上下文上限（`contextWindow`）；若已用 Token 超过 80% 推荐安全阈值，自动拦截并弹出 `<ModelSwitchGuardModal>` 预警看板，提供直观的容量超额占比对比条与风险提示，杜绝小窗口模型直接请求遭遇 HTTP 400 崩溃（TODOS #30）
+- 三大上下文继承与裁剪策略：模型切换超限预警弹窗提供三大策略——「⑂ 分叉为新分支并精简历史（推荐）」保持原会话全量状态不受损，新分支继承工作区与最新待办；「✄ 在当前会话裁剪早期历史」调用 Engine 裁剪历史并注入归档标记，保留核心任务清单与最近 2 轮关键交互；「⚠ 忽略风险直接切换」满足极短指令提问需求（TODOS #30）
+- 会话历史裁剪接口（`trimSessionHistory`）：Engine、Client 与各端 IPC 全面打通会话历史裁剪接口，智能保留最新待办清单快照并持久化更新（TODOS #30）
+
+### 优化
+- 跨厂商 Wire Format 兼容清洗：Core 层各 Provider 适配器大幅增强历史消息序列化兼容性——Anthropic 适配器自动过滤缺少有效服务端签名的 thinking 块，消除跨厂商模型切换至 Claude 时的 400 签名报错；OpenAI 适配器严格校验并过滤孤儿 `role: 'tool'` 消息，并对异常中断造成的断尾 `tool_calls` 自动补齐占位取消响应，保障协议合法性（TODOS #30）
+- 全局 Token 估算器解耦：将 `ContextChip` 的 Token 估算提取为全局复用的纯函数 `estimateSessionTokens`，多处共享 WeakMap 多级缓存与分词结果，避免重复计算开销（TODOS #30）
+
 ## [0.1.15] - 2026-09-22
 
 ### 新增

@@ -4,12 +4,35 @@ import { sseData, readHttpError } from './sse.js';
 
 /* ---------------- 内部格式 → OpenAI wire 格式 ---------------- */
 
-function toWireMessages(messages: ChatMessage[]) {
+export function toWireMessages(messages: ChatMessage[]) {
   const wire: Record<string, unknown>[] = [];
-  for (const msg of messages) {
+  // 追踪当前尚未收到 tool 回复的预期 tool_call_id，防孤儿 tool 与防断尾 tool_calls 导致的 400
+  let expectedToolCallIds = new Set<string>();
+
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
     if (msg.role === 'user') {
+      // 若前序 assistant 仍有未闭合的 tool_calls，先注入占位响应闭合，符合协议规范
+      for (const missingId of expectedToolCallIds) {
+        wire.push({
+          role: 'tool',
+          tool_call_id: missingId,
+          content: '（操作已中断或取消）',
+        });
+      }
+      expectedToolCallIds.clear();
+
       wire.push({ role: 'user', content: msg.content });
     } else if (msg.role === 'assistant') {
+      for (const missingId of expectedToolCallIds) {
+        wire.push({
+          role: 'tool',
+          tool_call_id: missingId,
+          content: '（操作已中断或取消）',
+        });
+      }
+      expectedToolCallIds.clear();
+
       const text = msg.blocks
         .filter((b): b is Extract<typeof b, { type: 'text' }> => b.type === 'text')
         .map((b) => b.text)
@@ -19,6 +42,7 @@ function toWireMessages(messages: ChatMessage[]) {
       if (toolCalls.length > 0) {
         entry.tool_calls = toolCalls.map((c) => {
           const call = c as ToolCallBlock;
+          expectedToolCallIds.add(call.id);
           return {
             id: call.id,
             type: 'function',
@@ -28,13 +52,27 @@ function toWireMessages(messages: ChatMessage[]) {
       }
       wire.push(entry);
     } else {
-      wire.push({
-        role: 'tool',
-        tool_call_id: msg.toolCallId,
-        content: msg.content,
-      });
+      // role === 'tool_result'：仅当此 id 属于前序 assistant 期望回复时才发送，杜绝孤儿 tool_result
+      if (expectedToolCallIds.has(msg.toolCallId)) {
+        wire.push({
+          role: 'tool',
+          tool_call_id: msg.toolCallId,
+          content: msg.content,
+        });
+        expectedToolCallIds.delete(msg.toolCallId);
+      }
     }
   }
+
+  // 若尾部 assistant 消息有未履行的 tool_calls，补充占位闭合
+  for (const missingId of expectedToolCallIds) {
+    wire.push({
+      role: 'tool',
+      tool_call_id: missingId,
+      content: '（操作已中断或取消）',
+    });
+  }
+
   return wire;
 }
 

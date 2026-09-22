@@ -21,6 +21,8 @@ export interface AgentClient {
     id: string,
     options?: { upToMessageId?: string; beforeUserIndex?: number },
   ): Promise<SessionMeta>;
+  /** 精简会话历史：保留最近若干轮关键交互与最新待办清单，裁剪早期冗长历史 */
+  trimSessionHistory(id: string, keepRecentTurns?: number): Promise<SessionData>;
   deleteSession(id: string): Promise<void>;
   renameSession(id: string, title: string): Promise<SessionMeta>;
   getSession(id: string): Promise<SessionData>;

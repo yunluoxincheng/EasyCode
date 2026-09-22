@@ -32,29 +32,24 @@
 
 ### 26. 会话一键导出：支持导出为完整 Markdown 文档与离线 HTML 报告
 
-**状态**：已记录，排期第二阶段
+**状态**：✅ 已完成（2026-09-22）——导出模块 `exportSession.ts`（Markdown 与单文件自包含 HTML 生成器）+ 极客暗黑主题与 highlight.js 语法高亮内联 + 交互式 `<details>` 折叠与结构化 Diff 视窗 + TitleBar `<ExportButton>` 标题栏下拉菜单与跨端一键下载
 
 **背景**：
 在经过多轮深度的需求分析、代码重构、测试排错后，会话中沉淀了极其详尽的任务清单、思考脉络、代码改动 Diff 与终端执行日志。
 目前用户如果想将这些过程归档到项目 Wiki、沉淀为技术文档、或者同步给团队成员，只能逐段手动复制，耗时繁琐且丢失了格式层级。
 
-**期望行为**：
-1. **导出操作入口**：在会话标题栏（`TitleBar`）或会话右键菜单中增加「导出会话」入口；
-2. **支持两种标准化导出格式**：
-   - **Markdown (`.md`)**：
-     - 结构化导出用户指令、助手回复、思考摘要、任务清单进度（Todo List）；
-     - 将工具执行与 Diff 转化为标准 GitHub 风格的代码块与差异块，适合直接提交到 Git 仓库或 Notion/Obsidian；
-   - **自包含离线 HTML (`.html`)**：
-     - 导出单文件自包含 HTML，内嵌 EasyCode 极客暗黑终端主题调色板与 highlight.js 语法高亮样式；
-     - 保留折叠卡片（思考过程与工具输出默认收起、点击可展开）、行号与增删 Diff，无需启动客户端，任何现代浏览器双击即开即审；
-3. **导出文件交互**：
-   - 默认文件名以会话标题及时间戳命名（如 `EasyCode-重构侧栏组件-20260921.md`）；
-   - 调用宿主保存文件对话框（或直接保存至工作区根目录/下载目录并弹出 Toast 通知）。
-
-**涉及改动**：
-- `packages/ui/src/utils/exportSession.ts`：会话数据转 Markdown 与 HTML 的格式化转换器；
-- `packages/ui/src/components/TitleBar.tsx`：增加导出按钮与格式选择菜单；
-- 宿主端文件保存接口打通。
+**已实现**：
+1. **结构化 Markdown 导出**：
+   - 自动生成导出元数据头部（导出时间、会话标题、工作区路径、模型/服务、Token 消耗统计）；
+   - 包含完整的 GitHub 风格任务清单（Todos）；
+   - 结构化渲染思考过程（`<details>` 折叠）、文件修改 Diff 代码块、终端命令执行卡片与最终回复。
+2. **自包含离线 HTML 报告**：
+   - 单文件离线自包含，零外部 CDN 或网络依赖，任何浏览器双击即开即审；
+   - 完整内嵌 EasyCode 极客暗黑终端调色板（`--bg`, `--green`, `--cyan`, `--amber`, `--red` 等）与排版规则；
+   - 内联 highlight.js 代码高亮样式，原生 `<details><summary>` 交互式折叠，红绿行号 Diff 视窗。
+3. **UI 入口与跨端下载**：
+   - 标题栏 `TitleBar` 增加极客风 `⤓` 导出会话下拉按钮；
+   - 跨端通用 `downloadFile` 驱动 Blob 文件保存，自动以规范命名（`EasyCode-${title}-${timestamp}.${ext}`）并弹出 Toast 通知。
 
 ---
 
@@ -142,7 +137,7 @@
 
 ### 30. 模型热切换安全边界守护与上下文继承策略
 
-**状态**：已记录，排期第二阶段
+**状态**：✅ 已完成（2026-09-22）——上下文 80% 安全阈值检测与统一 Token 估算器 `estimateSessionTokens` + `<ModelSwitchGuardModal>` 容量安全预警与三大继承策略（⑂ 分叉为新分支、✄ 当前会话裁剪历史、⚠ 忽略直接切换）+ Engine `trimSessionHistory` 历史裁剪与持久化 + 跨厂商 Wire Format 兼容清洗（Anthropic 过滤未签名 thinking 块、OpenAI 剔除孤儿 tool_result 与自动补齐断尾 tool_calls）
 
 **背景**：
 当前在会话中切换模型时，底层会话消息数组 `messages` 完整保留并透传给新模型。但存在以下风险：
@@ -150,18 +145,18 @@
 2. **厂商私有格式兼容**：不同模型对 thinking 块签名、tool_call_id 格式等要求不一致，直接透传易引发校验报错；
 3. **缺乏用户感知**：用户切换模型时对上下文是否继承、继承后的风险缺乏透明度和选择权。
 
-**期望行为**：
-1. **上下文容量校验与溢出预警**：
-   - 在用户切换模型或 Provider 时，比对当前会话已用 Token 与目标模型的 `contextWindow`；
-   - 若已用 Token 超过目标容量的 80%，弹窗友好提醒：「当前会话上下文（约 XX tk）超过目标模型限制（XX tk），直接发送可能导致请求失败」；
-2. **灵活的切换继承策略**：
-   - 提供「继承上下文并自动裁剪早期历史」与「分叉为全新会话（仅保留系统提示词与当前任务清单）」选项供用户选择；
+**已实现**：
+1. **上下文容量校验与 80% 阈值预警**：
+   - 提取全局复用的 Token 估算器 `estimateSessionTokens`（复用 WeakMap 多级缓存）；
+   - 在 `ModelEffortPicker` 切换模型或供应商时，动态比对当前会话用量与目标模型窗口大小；
+   - 超过 80% 时自动拦截切换并弹出极客暗黑风预警弹窗 `<ModelSwitchGuardModal>`；
+2. **三大灵活处理策略**：
+   - **「⑂ 分叉为新分支并精简历史（推荐）」**：保留原会话与原配置不受损，自动分叉出新分支会话并继承最新任务清单，精简早期历史并应用新模型；
+   - **「✄ 在当前会话裁剪早期历史」**：调用 Engine 端的 `trimSessionHistory` 接口，归档早期冗长内容，保留最新 2 轮完整交互和任务清单；
+   - **「⚠ 忽略风险，直接切换」**：保留全量历史直接切换；
 3. **跨厂商 Wire Format 兼容清洗**：
-   - 在向各 Provider 序列化 `toWireMessages` 时，自动清洗或重构不兼容的字段（如外部厂商非标的 tool_call_id、无法复验的 thinking 块签名等），保障跨厂商切换的鲁棒性。
-
-**涉及改动**：
-- `packages/engine/src/server.ts` 与 `packages/core/src/providers/`：消息格式清洗；
-- `packages/ui/src/components/ModelEffortPicker.tsx` 或弹窗：切换容量预警与分支选项。
+   - **Anthropic 适配器**：清洗过滤未带服务端有效签名的 thinking 块，杜绝跨模型切换后 Anthropic 抛出 400 校验错误；
+   - **OpenAI 兼容适配器**：严格校验 `role: 'tool'` 消息的前序 `tool_call_id` 匹配性，过滤孤儿 tool；若遇到未闭合的断尾 `tool_calls`，自动补齐中断占位响应，保障消息序列合规。
 
 ---
 

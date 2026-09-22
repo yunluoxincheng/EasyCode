@@ -63,6 +63,7 @@ const handlers: Record<string, Handler> = {
   'list-sessions': () => server.listSessions(),
   'create-session': (args) => server.createSession(args),
   'fork-session': (args) => server.forkSession(args.id, args.options),
+  'trim-session-history': (args) => server.trimSessionHistory(args.id, args.keepRecentTurns),
   'delete-session': (args) => server.deleteSession(args.id),
   'rename-session': (args) => server.renameSession(args.id, args.title),
   'get-session': (args) => server.getSession(args.id),

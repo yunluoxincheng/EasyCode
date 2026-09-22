@@ -36,6 +36,9 @@ export class IpcAgentClient implements AgentClient {
   forkSession(id: string, options?: { upToMessageId?: string; beforeUserIndex?: number }) {
     return this.invoke<SessionMeta>('fork-session', { id, options });
   }
+  trimSessionHistory(id: string, keepRecentTurns?: number) {
+    return this.invoke<SessionData>('trim-session-history', { id, keepRecentTurns });
+  }
   deleteSession(id: string) {
     return this.invoke<void>('delete-session', { id });
   }
@@ -173,6 +176,7 @@ export function createDemoClient(): AgentClient {
     listSessions: () => wrap(() => server.listSessions()),
     createSession: (options) => wrap(() => server.createSession(options)),
     forkSession: (id, options) => wrap(() => server.forkSession(id, options)),
+    trimSessionHistory: (id, keepRecentTurns) => wrap(() => server.trimSessionHistory(id, keepRecentTurns)),
     deleteSession: (id) => wrap(() => server.deleteSession(id)),
     renameSession: (id, title) => wrap(() => server.renameSession(id, title)),
     getSession: (id) => wrap(() => server.getSession(id)),

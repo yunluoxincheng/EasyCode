@@ -185,6 +185,57 @@ export class AgentServer {
     return meta;
   }
 
+  /**
+   * 精简会话历史：保留最近若干轮关键交互（默认保留最后 2 轮完整用户回合）与最新待办清单，裁剪早期冗长历史，
+   * 并在首部注入一条结构化说明，腾出足够的 Token 空间。
+   */
+  async trimSessionHistory(id: string, keepRecentTurns = 2): Promise<SessionData> {
+    await this.ensureSettings();
+    const rt = this.requireSession(id);
+    if (rt.running) {
+      throw new Error('会话正在运行中，请先等待完成或点击停止');
+    }
+
+    const messages = rt.data.messages;
+    if (messages.length === 0) return rt.data;
+
+    // 收集所有 user 消息的索引
+    const userIndices: number[] = [];
+    for (let i = 0; i < messages.length; i++) {
+      if (messages[i].role === 'user') {
+        userIndices.push(i);
+      }
+    }
+
+    // 若总轮数小于等于期望保留的轮数，不需要裁剪
+    if (userIndices.length <= keepRecentTurns) {
+      return rt.data;
+    }
+
+    // 截取最近 keepRecentTurns 轮的消息
+    const cutUserIdx = userIndices[userIndices.length - keepRecentTurns];
+    const preservedMessages = messages.slice(cutUserIdx);
+
+    // 提取全局最新的 todos 并持久化至 session
+    const latestTodos = extractLatestTodos(messages);
+    if (latestTodos) {
+      rt.data.todos = structuredClone(latestTodos);
+    }
+
+    // 构造一条提示型上下文说明消息
+    const summaryMsg: ChatMessage = {
+      role: 'user',
+      content: '【系统提示】早期历史会话已精简归档。已完整保留核心工作区、当前任务清单及最近交互，腾出上下文空间。请继续基于当前状态推进任务。',
+      id: `m_${Date.now().toString(36)}_trim`,
+      createdAt: new Date().toISOString(),
+    };
+
+    rt.data.messages = [summaryMsg, ...preservedMessages];
+    rt.data.meta.updatedAt = new Date().toISOString();
+    await this.persistSession(rt);
+    return rt.data;
+  }
+
   async listSessions(): Promise<SessionMeta[]> {
     const metas = [...this.sessions.values()].map((rt) => rt.data.meta);
     if (metas.length > 0) return metas.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));

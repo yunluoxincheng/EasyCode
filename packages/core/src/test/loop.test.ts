@@ -14,6 +14,8 @@ import {
   TurnResult,
   createBuiltinTools,
   runAgentLoop,
+  toOpenAIWireMessages,
+  toAnthropicWireMessages,
 } from '../index.js';
 
 /** 收集事件 + 消息的测试脚手架 */
@@ -224,4 +226,62 @@ test('MockProvider 演示链路：list_dir → 总结', async () => {
   assert.ok(env.events.some((e) => e.type === 'tool_result'));
   const last = env.messages.at(-1);
   assert.ok(last && last.role === 'assistant');
+});
+
+test('toOpenAIWireMessages: 过滤孤儿 tool_result 并自动补齐断尾未履行 tool_calls', () => {
+  const msgs: ChatMessage[] = [
+    { role: 'user', content: '测试孤儿与断尾' },
+    // 孤儿 tool_result：前置无 tool_calls，应被过滤
+    { role: 'tool_result', toolCallId: 'orphan_1', toolName: 'read_file', content: '孤儿数据' },
+    // assistant 发起了 2 个 tool_call
+    {
+      role: 'assistant',
+      blocks: [
+        { type: 'tool_call', id: 'call_1', name: 'read_file', input: { path: 'a.txt' } },
+        { type: 'tool_call', id: 'call_2', name: 'read_file', input: { path: 'b.txt' } },
+      ],
+    },
+    // 只回复了 call_1
+    { role: 'tool_result', toolCallId: 'call_1', toolName: 'read_file', content: 'a content' },
+    // 紧接着又有新的 user 消息，call_2 未履行（断尾）
+    { role: 'user', content: '下次提问' },
+  ];
+
+  const wire = toOpenAIWireMessages(msgs);
+  // 预期：
+  // 1: user
+  // 2: assistant (包含 call_1, call_2)
+  // 3: tool (call_1)
+  // 4: tool (call_2 自动补齐占位取消结果)
+  // 5: user ('下次提问')
+  assert.equal(wire.length, 5);
+  assert.equal(wire[0].role, 'user');
+  assert.equal(wire[1].role, 'assistant');
+  assert.equal(wire[2].role, 'tool');
+  assert.equal((wire[2] as { tool_call_id: string }).tool_call_id, 'call_1');
+  assert.equal(wire[3].role, 'tool');
+  assert.equal((wire[3] as { tool_call_id: string }).tool_call_id, 'call_2');
+  assert.match(String((wire[3] as { content: string }).content), /中断或取消/);
+  assert.equal(wire[4].role, 'user');
+});
+
+test('toAnthropicWireMessages: 过滤未签名的 thinking 块并合并相邻 tool_result', () => {
+  const msgs: ChatMessage[] = [
+    { role: 'user', content: 'hello' },
+    {
+      role: 'assistant',
+      blocks: [
+        { type: 'thinking', text: '无签名的思考过程' },
+        { type: 'text', text: '这是回答正文' },
+      ],
+    },
+  ];
+
+  const wire = toAnthropicWireMessages(msgs);
+  assert.equal(wire.length, 2);
+  const assistantContent = (wire[1] as { content: Array<{ type: string; text?: string }> }).content;
+  // 无签名的 thinking 块已被过滤，保留 text
+  assert.equal(assistantContent.length, 1);
+  assert.equal(assistantContent[0].type, 'text');
+  assert.equal(assistantContent[0].text, '这是回答正文');
 });

@@ -98,7 +98,78 @@ function countUserItem(it: UserItem): number {
   return tok;
 }
 
-const DEFAULT_WINDOW = 1_000_000;
+export const DEFAULT_WINDOW = 1_000_000;
+
+/** 估算当前会话的总 Token 占用与窗口比例（全量复用多级 WeakMap 缓存） */
+export function estimateSessionTokens(
+  store: ReturnType<typeof useStore>,
+  overrideWindow?: number,
+): { used: number; windowTok: number; pct: number; rows: Array<{ label: string; tokens: number }> } {
+  const session = store.activeSession;
+  if (!session) {
+    return { used: 0, windowTok: overrideWindow ?? DEFAULT_WINDOW, pct: 0, rows: [] };
+  }
+
+  const provider = store.settings?.providers[session.providerId];
+  const effectiveModel =
+    session.model || (provider?.models ?? []).find((m) => m.enabled !== false)?.name || '';
+  const modelCfg = (provider?.models ?? []).find((m) => m.name === effectiveModel);
+  const windowTok =
+    overrideWindow ?? modelCfg?.contextWindow ?? provider?.contextWindow ?? DEFAULT_WINDOW;
+
+  const rows: Array<{ label: string; tokens: number }> = [];
+  let msgTokens = 0;
+  for (const it of store.items) {
+    if (it.kind === 'user') {
+      msgTokens += countUserItem(it);
+    } else if (it.kind === 'turn') {
+      const isLive = store.running && it.durationMs === undefined;
+      msgTokens += countTurn(it, isLive);
+    }
+  }
+  rows.push({ label: '消息', tokens: msgTokens });
+
+  const wsCfg = store.settings?.webSearch;
+  const searchOn =
+    (modelCfg?.capabilities ?? ['system']).includes('websearch') && wsCfg?.enabled === true;
+  const useNativeSearch =
+    searchOn && supportsNativeWebSearch(effectiveModel, provider?.kind ?? 'openai-compatible');
+  const builtinSearch =
+    searchOn && !useNativeSearch && validWebSearchBackend(wsCfg)
+      ? {
+          webSearch: {
+            backend: wsCfg!.backend,
+            searxngUrl: wsCfg!.searxngUrl,
+            tavilyApiKey: wsCfg!.tavilyApiKey,
+            maxResults: wsCfg!.maxResults,
+          },
+        }
+      : undefined;
+
+  const staticCacheKey = `${effectiveModel}:${provider?.kind}:${session.workspaceRoot}:${searchOn}:${useNativeSearch}:${wsCfg?.backend}`;
+  if (!staticTokensCache || staticTokensCache.key !== staticCacheKey) {
+    const toolsTok = count(JSON.stringify(createBuiltinTools(builtinSearch).listSpecs()));
+    const stubHost = {
+      paths: { sep: navigator.platform.includes('Win') ? '\\' : '/' },
+    } as unknown as Host;
+    const promptTok = count(buildSystemPrompt(stubHost, session.workspaceRoot, { webSearch: searchOn }));
+    staticTokensCache = {
+      key: staticCacheKey,
+      toolsTokens: toolsTok,
+      promptTokens: promptTok,
+    };
+  }
+  rows.push({ label: '系统工具', tokens: staticTokensCache.toolsTokens });
+  rows.push({ label: '系统提示词', tokens: staticTokensCache.promptTokens });
+
+  const other = store.items.length * 4;
+  rows.push({ label: '其他', tokens: other });
+
+  const used = rows.reduce((a, r) => a + r.tokens, 0);
+  const pct = Math.min(100, (used / windowTok) * 100);
+  return { used, windowTok, pct, rows };
+}
+
 /** 紧凑态进度环（TODOS #20）：半径与周长，SVG 逆时针从顶部起描 */
 const RING_R = 5.5;
 const RING_C = 2 * Math.PI * RING_R;
@@ -121,66 +192,7 @@ export function ContextChip({ compact = false }: { compact?: boolean }) {
   const session = store.activeSession;
   if (!session) return null;
 
-  const provider = store.settings?.providers[session.providerId];
-  // 优先取该模型在设置里配置的上下文窗口，再退回供应商级/默认 1M
-  const effectiveModel =
-    session.model || (provider?.models ?? []).find((m) => m.enabled !== false)?.name || '';
-  const modelCfg = (provider?.models ?? []).find((m) => m.name === effectiveModel);
-  const windowTok = modelCfg?.contextWindow ?? provider?.contextWindow ?? DEFAULT_WINDOW;
-
-  // 分类精确计数（全面使用 WeakMap 多级缓存，消除长会话重复 BPE 分词）
-  const rows: Array<{ label: string; tokens: number }> = [];
-  let msgTokens = 0;
-  for (const it of store.items) {
-    if (it.kind === 'user') {
-      msgTokens += countUserItem(it);
-    } else if (it.kind === 'turn') {
-      const isLive = store.running && it.durationMs === undefined;
-      msgTokens += countTurn(it, isLive);
-    }
-  }
-  rows.push({ label: '消息', tokens: msgTokens });
-
-  // 系统工具计数：按会话模型实际会注册的工具（联网搜索按分流结果计入）
-  const wsCfg = store.settings?.webSearch;
-  const searchOn =
-    (modelCfg?.capabilities ?? ['system']).includes('websearch') && wsCfg?.enabled === true;
-  const useNativeSearch =
-    searchOn && supportsNativeWebSearch(effectiveModel, provider?.kind ?? 'openai-compatible');
-  const builtinSearch =
-    searchOn && !useNativeSearch && validWebSearchBackend(wsCfg)
-      ? {
-          webSearch: {
-            backend: wsCfg!.backend,
-            searxngUrl: wsCfg!.searxngUrl,
-            tavilyApiKey: wsCfg!.tavilyApiKey,
-            maxResults: wsCfg!.maxResults,
-          },
-        }
-      : undefined;
-
-  // 静态系统提示词与工具规格缓存：避免每次组件重绘都重复序列化与分词数万 Token
-  const staticCacheKey = `${effectiveModel}:${provider?.kind}:${session.workspaceRoot}:${searchOn}:${useNativeSearch}:${wsCfg?.backend}`;
-  if (!staticTokensCache || staticTokensCache.key !== staticCacheKey) {
-    const toolsTok = count(JSON.stringify(createBuiltinTools(builtinSearch).listSpecs()));
-    const stubHost = {
-      paths: { sep: navigator.platform.includes('Win') ? '\\' : '/' },
-    } as unknown as Host;
-    const promptTok = count(buildSystemPrompt(stubHost, session.workspaceRoot, { webSearch: searchOn }));
-    staticTokensCache = {
-      key: staticCacheKey,
-      toolsTokens: toolsTok,
-      promptTokens: promptTok,
-    };
-  }
-  rows.push({ label: '系统工具', tokens: staticTokensCache.toolsTokens });
-  rows.push({ label: '系统提示词', tokens: staticTokensCache.promptTokens });
-
-  const other = store.items.length * 4; // 每条消息的角色/框架开销
-  rows.push({ label: '其他', tokens: other });
-
-  const used = rows.reduce((a, r) => a + r.tokens, 0);
-  const pct = Math.min(100, (used / windowTok) * 100);
+  const { used, windowTok, pct, rows } = estimateSessionTokens(store);
 
   // 平均缓存命中率 = 累计缓存 / 累计输入
   const su = store.sessionUsage;

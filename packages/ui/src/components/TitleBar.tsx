@@ -1,6 +1,7 @@
 import React from 'react';
 import { useStore } from '../useStore.js';
 import { HelpButton } from './HelpMenu.js';
+import { ExportButton } from './ExportButton.js';
 
 type Env = 'tauri' | 'electron' | 'web';
 
@@ -52,6 +53,7 @@ export function TitleBar(): React.ReactElement {
       <div className="titlebar-right" data-tauri-drag-region>
         {store.running && <span className="titlebar-live">● AGENT RUNNING</span>}
       </div>
+      <ExportButton />
       <HelpButton />
       {hasControls && (
         <div className="titlebar-controls">

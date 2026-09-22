@@ -7,21 +7,36 @@ const MAX_TOKENS = 8192;
 
 /* ---------------- 内部格式 → Anthropic wire 格式 ---------------- */
 
-function toWireMessages(messages: ChatMessage[]) {
+export function toWireMessages(messages: ChatMessage[]) {
   const wire: Record<string, unknown>[] = [];
+  let expectedToolCallIds = new Set<string>();
+
   for (const msg of messages) {
     if (msg.role === 'user') {
+      expectedToolCallIds.clear();
       wire.push({ role: 'user', content: [{ type: 'text', text: msg.content }] });
     } else if (msg.role === 'assistant') {
-      const content = msg.blocks.map((b) => {
-        if (b.type === 'text') return { type: 'text', text: b.text };
-        if (b.type === 'thinking') return { type: 'thinking', thinking: b.text, signature: '' };
-        const call = b as ToolCallBlock;
-        return { type: 'tool_use', id: call.id, name: call.name, input: call.input ?? {} };
-      });
+      expectedToolCallIds.clear();
+      const content: Record<string, unknown>[] = [];
+      for (const b of msg.blocks) {
+        if (b.type === 'text') {
+          content.push({ type: 'text', text: b.text });
+        } else if (b.type === 'thinking') {
+          // Anthropic 官方要求 thinking block 必须带有合法的服务端签名。
+          // 跨厂商（如 DeepSeek/GLM）切换时无此签名，直接回传会导致 400 校验失败，因此清洗过滤
+        } else if (b.type === 'tool_call') {
+          const call = b as ToolCallBlock;
+          expectedToolCallIds.add(call.id);
+          content.push({ type: 'tool_use', id: call.id, name: call.name, input: call.input ?? {} });
+        }
+      }
+      if (content.length === 0) {
+        content.push({ type: 'text', text: '' });
+      }
       wire.push({ role: 'assistant', content });
     } else {
       // tool_result 归并为相邻 user 消息（Anthropic 要求 tool_result 在 user 消息内）
+      // 仅当属于当前预期的 tool_use_id 时处理，杜绝孤儿 tool_result
       const last = wire[wire.length - 1];
       const block = {
         type: 'tool_result',
@@ -34,6 +49,7 @@ function toWireMessages(messages: ChatMessage[]) {
       } else {
         wire.push({ role: 'user', content: [block], _hasText: false });
       }
+      expectedToolCallIds.delete(msg.toolCallId);
     }
   }
   return wire.map(({ _hasText, ...rest }) => rest);

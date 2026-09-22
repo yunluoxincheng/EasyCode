@@ -14,8 +14,8 @@ export { runCommandTool } from './tools/shell.js';
 export { todoWriteTool } from './tools/todo.js';
 // Provider
 export * from './providers/index.js';
-export { OpenAICompatibleProvider } from './providers/openai.js';
-export { AnthropicProvider } from './providers/anthropic.js';
+export { OpenAICompatibleProvider, toWireMessages as toOpenAIWireMessages } from './providers/openai.js';
+export { AnthropicProvider, toWireMessages as toAnthropicWireMessages } from './providers/anthropic.js';
 export { ResponsesProvider } from './providers/responses.js';
 export { MockProvider } from './providers/mock.js';
 // 循环与工具函数

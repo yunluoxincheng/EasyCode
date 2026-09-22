@@ -267,6 +267,7 @@ export async function createTauriClient(): Promise<AgentClient> {
     listSessions: () => server.listSessions(),
     createSession: (options) => server.createSession(options),
     forkSession: (id, options) => server.forkSession(id, options),
+    trimSessionHistory: (id, keepRecentTurns) => server.trimSessionHistory(id, keepRecentTurns),
     deleteSession: (id) => server.deleteSession(id),
     renameSession: (id, title) => server.renameSession(id, title),
     getSession: (id) => server.getSession(id),
