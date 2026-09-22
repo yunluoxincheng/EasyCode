@@ -6,7 +6,16 @@ import {
   type SessionMeta,
 } from '@easycode/core';
 import { AgentServer, type AgentClient, type ProviderEntry, type Settings } from '@easycode/engine';
-import type { ModelTestResult, ProviderModelInfo, ShellInfo, ProjectRuleInfo, CustomPromptInfo } from '@easycode/engine';
+import type {
+  ModelTestResult,
+  ProviderModelInfo,
+  ShellInfo,
+  ProjectRuleInfo,
+  CustomPromptInfo,
+  GitStatusSummary,
+  GitDiffResult,
+  GitDiffOptions,
+} from '@easycode/engine';
 
 export type { AgentClient };
 
@@ -122,6 +131,18 @@ export class IpcAgentClient implements AgentClient {
   listCustomPrompts(id: string) {
     return this.invoke<CustomPromptInfo[]>('list-custom-prompts', { id });
   }
+  getGitStatus(id: string) {
+    return this.invoke<GitStatusSummary>('get-git-status', { id });
+  }
+  getGitDiff(id: string, options?: GitDiffOptions) {
+    return this.invoke<GitDiffResult>('get-git-diff', { id, options });
+  }
+  stageGitFiles(id: string, paths?: string[]) {
+    return this.invoke<{ ok: boolean; error?: string }>('stage-git-files', { id, paths });
+  }
+  discardGitChanges(id: string, paths: string[]) {
+    return this.invoke<{ ok: boolean; error?: string }>('discard-git-changes', { id, paths });
+  }
   onEvent(listener: (payload: { sessionId: string; event: AgentEvent }) => void) {
     this.bridge.onEvent(listener);
     return () => this.bridge.offEvent(listener);
@@ -225,6 +246,10 @@ export function createDemoClient(): AgentClient {
     getProjectRules: (id) => wrap(() => server.getSessionProjectRules(id)),
     initProjectRules: (id) => wrap(() => server.initSessionProjectRules(id)),
     listCustomPrompts: (id) => wrap(() => server.listSessionCustomPrompts(id)),
+    getGitStatus: (id) => wrap(() => server.getGitStatus(id)),
+    getGitDiff: (id, options) => wrap(() => server.getGitDiff(id, options)),
+    stageGitFiles: (id, paths) => wrap(() => server.stageGitFiles(id, paths)),
+    discardGitChanges: (id, paths) => wrap(() => server.discardGitChanges(id, paths)),
     pickWorkspace: async () => '/demo-workspace',
     openPath: async (_path) => { /* 演示模式：无实际文件系统 */ },
     openInVscode: async (_path) => { /* 演示模式：无实际文件系统 */ },

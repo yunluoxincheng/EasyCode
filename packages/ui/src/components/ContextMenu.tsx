@@ -252,6 +252,18 @@ export function ContextMenu() {
         </button>
       )}
 
+      {store.activeSession?.workspaceRoot && (
+        <button
+          className="context-menu-item"
+          onClick={() => {
+            setPos(null);
+            store.openGitModal();
+          }}
+        >
+          <span className="ctx-icon">⑂</span> 审查工作区 Git 改动
+        </button>
+      )}
+
       {store.running && (
         <button
           className="context-menu-item danger"

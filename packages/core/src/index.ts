@@ -12,6 +12,16 @@ export { readFileTool, writeFileTool, editFileTool, listDirTool } from './tools/
 export { searchFilesTool, listFilesRecursively } from './tools/search.js';
 export { runCommandTool } from './tools/shell.js';
 export { todoWriteTool } from './tools/todo.js';
+export {
+  gitStatusTool,
+  gitDiffTool,
+  getGitStatus,
+  getGitDiff,
+  stageGitFiles,
+  discardGitChanges,
+  splitUnifiedDiff,
+} from './tools/git.js';
+export type { GitStatusSummary, GitFileChange, GitDiffResult, GitDiffOptions } from './tools/git.js';
 // Provider
 export * from './providers/index.js';
 export { OpenAICompatibleProvider, toWireMessages as toOpenAIWireMessages } from './providers/openai.js';

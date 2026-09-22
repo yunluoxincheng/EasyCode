@@ -6,10 +6,30 @@ import { searchFilesTool } from './search.js';
 import { runCommandTool } from './shell.js';
 import { todoWriteTool } from './todo.js';
 import { createWebSearchTool, type WebSearchBackendConfig } from './websearch.js';
+import {
+  gitStatusTool,
+  gitDiffTool,
+  getGitStatus,
+  getGitDiff,
+  stageGitFiles,
+  discardGitChanges,
+  type GitStatusSummary,
+  type GitFileChange,
+  type GitDiffResult,
+} from './git.js';
 
 export { todoWriteTool } from './todo.js';
 export { createWebSearchTool, runWebSearch } from './websearch.js';
 export type { WebSearchBackendConfig, SearchHit } from './websearch.js';
+export {
+  gitStatusTool,
+  gitDiffTool,
+  getGitStatus,
+  getGitDiff,
+  stageGitFiles,
+  discardGitChanges,
+};
+export type { GitStatusSummary, GitFileChange, GitDiffResult };
 
 /** 工具暴露给模型的规格 */
 export interface ToolSpec {
@@ -79,7 +99,9 @@ export function createBuiltinTools(options?: {
     .register(listDirTool)
     .register(searchFilesTool)
     .register(runCommandTool)
-    .register(todoWriteTool);
+    .register(todoWriteTool)
+    .register(gitStatusTool)
+    .register(gitDiffTool);
   if (options?.webSearch) registry.register(createWebSearchTool(options.webSearch));
   return registry;
 }

@@ -11,6 +11,9 @@
 - 项目级上下文与行为规范系统（Rules System: `.easycoderules` / `AGENTS.md`）：支持自动层级探测工作区工程纪律与架构约定（优先级：`.easycoderules` > `AGENTS.md` > `CLAUDE.md` > `.cursorrules` > `.easycode/rules.md`），自动注入系统提示词的 `## 项目规范` 独立高优先级章节；由于系统提示词独立于消息历史传输，规则天然具备抗上下文压缩特性，长程对话与多轮任务推进中永不遗忘、永不漂移（TODOS #33）
 - RulesChip 规则状态感知胶囊与一键初始化模板：在 Composer 顶部工具栏增设极客风规则感知胶囊 `<RulesChip>`，工作区检测到规则时以绿色亮态呈现 `[ 📋 规则: {文件名} ]`，点击浮出卡片查看规范摘要、字符数统计并支持一键打开所在目录；未配置规则时展示 `[ ＋ 规则 ]`，支持一键在工作区生成涵盖架构约定、编码纪律与验证流程的标准 `.easycoderules` 模板骨架（TODOS #33）
 - 全局开发偏好设置（Global Rules）：设置页「常规」面板新增「全局开发偏好与行为规范」多行文本配置，支持用户配置跨项目的通用偏好（如中文注释、纯函数优先、编辑前读文件等），与项目专属规范叠加生效（TODOS #33）
+- 工作区 Git 状态感知与改动检视面板（Git Status & Diff Inspector）：解决 Agent 跨文件读写后改动审查离散的痛点；标题栏与 Composer 工具栏实时呈现 Git 状态胶囊 `[ ⑂ {branch}* · {count} 改动 (+{ins} -{del}) ]`，窗口聚焦与工具执行完毕后自动增量刷新（TODOS #34）
+- 全尺寸 Git 审查面板与全键盘闭环：点击 Git 胶囊或在工作区右键「📂 审查工作区 Git 改动」一键呼出极客风全尺寸弹窗 `<GitInspectorModal>`；左栏分 Staged、Unstaged、Untracked 分组展示改动文件、状态徽标与行数统计；右栏呈现结构化红绿双侧行号 Diff 视窗与一键复制 Patch；底部提供暂存全部（`git add .`）、放弃当前修改（带安全确认）、一键填入 Composer `/commit` 闭环生成提交信息（TODOS #34）
+- Core 扩展只读免审批 Git 工具：注册 `git_status` 与 `git_diff` 免审批工具，模型需要获知工作区整体变动时可自主调用，免除 `run_command` 的审批弹窗与噪音（TODOS #34）
 
 ## [0.1.19] - 2026-09-22
 

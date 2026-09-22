@@ -156,6 +156,10 @@ const handlers: Record<string, Handler> = {
   'get-project-rules': (args) => server.getSessionProjectRules(args.id as string),
   'init-project-rules': (args) => server.initSessionProjectRules(args.id as string),
   'list-custom-prompts': (args) => server.listSessionCustomPrompts(args.id as string),
+  'get-git-status': (args) => server.getGitStatus(args.id as string),
+  'get-git-diff': (args) => server.getGitDiff(args.id as string, args.options),
+  'stage-git-files': (args) => server.stageGitFiles(args.id as string, args.paths as string[] | undefined),
+  'discard-git-changes': (args) => server.discardGitChanges(args.id as string, args.paths as string[]),
   'pick-workspace': async () => {
     if (!mainWindow) return null;
     const result = await dialog.showOpenDialog(mainWindow, {

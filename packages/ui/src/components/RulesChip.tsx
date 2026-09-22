@@ -8,7 +8,7 @@ interface RulesChipProps {
 
 export const RulesChip: React.FC<RulesChipProps> = ({ compact }) => {
   const store = useStore();
-  const session = store.session;
+  const session = store.activeSession;
   const [ruleInfo, setRuleInfo] = useState<ProjectRuleInfo | null>(null);
   const [loading, setLoading] = useState(false);
   const [popOpen, setPopOpen] = useState(false);

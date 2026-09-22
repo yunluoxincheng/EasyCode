@@ -1,6 +1,12 @@
 import type { AgentEvent, SessionData, SessionMeta, ApprovalMode } from '@easycode/core';
 import type { ModelTestResult, ProviderModelInfo, Settings, ShellInfo } from './settings.js';
-import type { ProjectRuleInfo, CustomPromptInfo } from './server.js';
+import type {
+  ProjectRuleInfo,
+  CustomPromptInfo,
+  GitStatusSummary,
+  GitDiffResult,
+  GitDiffOptions,
+} from './server.js';
 
 /**
  * UI 与引擎之间的传输抽象：
@@ -66,6 +72,14 @@ export interface AgentClient {
   initProjectRules(id: string): Promise<ProjectRuleInfo>;
   /** 列出当前会话工作区自定义 Prompt 指令（TODOS #32） */
   listCustomPrompts?(id: string): Promise<CustomPromptInfo[]>;
+  /** 获取当前会话工作区 Git 状态摘要（TODOS #34） */
+  getGitStatus(id: string): Promise<GitStatusSummary>;
+  /** 获取当前会话工作区 Git 差异（TODOS #34） */
+  getGitDiff(id: string, options?: GitDiffOptions): Promise<GitDiffResult>;
+  /** 暂存文件 (git add)（TODOS #34） */
+  stageGitFiles(id: string, paths?: string[]): Promise<{ ok: boolean; error?: string }>;
+  /** 放弃修改 (git checkout / git clean)（TODOS #34） */
+  discardGitChanges(id: string, paths: string[]): Promise<{ ok: boolean; error?: string }>;
   pickWorkspace(): Promise<string | null>;
   onEvent(listener: (payload: { sessionId: string; event: AgentEvent }) => void): () => void;
 }

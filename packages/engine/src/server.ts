@@ -17,8 +17,17 @@ import {
   listFilesRecursively,
   compactHistoryMessages,
   pruneHistoricalToolResults,
+  getGitStatus,
+  getGitDiff,
+  stageGitFiles,
+  discardGitChanges,
+  splitUnifiedDiff,
   type ApprovalMode,
   type TodoItem,
+  type GitStatusSummary,
+  type GitFileChange,
+  type GitDiffResult,
+  type GitDiffOptions,
 } from '@easycode/core';
 import { Settings, DEFAULT_SETTINGS, PROVIDER_PRESETS } from './settings.js';
 import type { ModelTestResult, ProviderEntry, ProviderModel, ProviderModelInfo } from './settings.js';
@@ -48,6 +57,9 @@ export interface CustomPromptInfo {
   description: string;
   template: string;
 }
+
+export type { GitStatusSummary, GitFileChange, GitDiffResult, GitDiffOptions };
+export { splitUnifiedDiff };
 
 interface SessionRuntime {
   data: SessionData;
@@ -1016,6 +1028,58 @@ export class AgentServer {
     const root = session?.data.meta.workspaceRoot;
     if (!root) return [];
     return this.listCustomPrompts(root);
+  }
+
+  /* -------------------- 工作区 Git 状态与检视 (TODOS #34) -------------------- */
+
+  /** 获取会话工作区的 Git 状态摘要 */
+  async getGitStatus(sessionId: string): Promise<GitStatusSummary> {
+    const session = this.sessions.get(sessionId);
+    const root = session?.data.meta.workspaceRoot;
+    if (!root) {
+      return {
+        isGit: false,
+        branch: '',
+        clean: true,
+        ahead: 0,
+        behind: 0,
+        stagedCount: 0,
+        unstagedCount: 0,
+        untrackedCount: 0,
+        totalChanges: 0,
+        insertions: 0,
+        deletions: 0,
+        files: [],
+      };
+    }
+    return getGitStatus(this.host, root);
+  }
+
+  /** 获取会话工作区的 Git 差异 */
+  async getGitDiff(
+    sessionId: string,
+    options?: GitDiffOptions,
+  ): Promise<GitDiffResult> {
+    const session = this.sessions.get(sessionId);
+    const root = session?.data.meta.workspaceRoot;
+    if (!root) return { diff: '' };
+    return getGitDiff(this.host, root, options);
+  }
+
+  /** 暂存文件 (git add) */
+  async stageGitFiles(sessionId: string, paths?: string[]): Promise<{ ok: boolean; error?: string }> {
+    const session = this.sessions.get(sessionId);
+    const root = session?.data.meta.workspaceRoot;
+    if (!root) return { ok: false, error: '未绑定工作区' };
+    return stageGitFiles(this.host, root, paths);
+  }
+
+  /** 放弃修改 (git checkout / git clean) */
+  async discardGitChanges(sessionId: string, paths: string[]): Promise<{ ok: boolean; error?: string }> {
+    const session = this.sessions.get(sessionId);
+    const root = session?.data.meta.workspaceRoot;
+    if (!root) return { ok: false, error: '未绑定工作区' };
+    return discardGitChanges(this.host, root, paths);
   }
 }
 

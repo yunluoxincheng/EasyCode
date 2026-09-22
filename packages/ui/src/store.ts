@@ -101,6 +101,8 @@ export class AppStore {
   projectSwitcherOpen = false;
   projectSearch = '';
   pendingModelSwitch: ModelSwitchPending | null = null;
+  /** Git 改动审查全尺寸弹窗状态（TODOS #34） */
+  gitModalOpen = false;
 
   private listeners = new Set<() => void>();
   private seq = 0;
@@ -176,6 +178,11 @@ export class AppStore {
 
   get activeSession(): SessionMeta | undefined {
     return this.sessions.find((s) => s.id === this.activeId);
+  }
+
+  /** activeSession 的别名快捷访问 */
+  get session(): SessionMeta | undefined {
+    return this.activeSession;
   }
 
   /** 自动滚底开关（未配置视为开启） */
@@ -506,6 +513,16 @@ export class AppStore {
 
   toggleSidebar(): void {
     this.sidebarCollapsed = !this.sidebarCollapsed;
+    this.notify();
+  }
+
+  openGitModal(): void {
+    this.gitModalOpen = true;
+    this.notify();
+  }
+
+  closeGitModal(): void {
+    this.gitModalOpen = false;
     this.notify();
   }
 

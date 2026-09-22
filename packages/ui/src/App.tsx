@@ -8,6 +8,7 @@ import { ModelSwitchGuardModal } from './components/ModelSwitchGuardModal.js';
 import { SettingsPage } from './components/SettingsPage.js';
 import { TitleBar, ResizeEdges } from './components/TitleBar.js';
 import { ContextMenu } from './components/ContextMenu.js';
+import { GitInspectorModal } from './components/GitInspectorModal.js';
 import { updater } from './updater.js';
 
 export function App() {
@@ -47,6 +48,7 @@ export function App() {
       )}
       {store.createProjectOpen && <CreateProjectDialog />}
       {store.pendingModelSwitch && <ModelSwitchGuardModal />}
+      {store.gitModalOpen && <GitInspectorModal onClose={() => store.closeGitModal()} />}
       <ResizeEdges />
       <ContextMenu />
       {store.toast && (

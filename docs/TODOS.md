@@ -95,7 +95,7 @@
 
 ### 34. 工作区 Git 状态感知与改动检视面板（Git Status & Diff Inspector）
 
-**状态**：📋 待排期（需求与方案已敲定）
+**状态**：✅ 已完成（2026-09-22）——Core 底层 Git 状态/差异解析与只读免审批工具（`git_status` / `git_diff`）+ TitleBar & Composer `<GitCapsule>` 实时分支与增删行数胶囊 + 全尺寸 `<GitInspectorModal>` 两栏审查弹窗（分栏文件列表、红绿双侧行号 Diff、一键复制 Patch）+ 底部操作条（暂存全部 `git add .`、放弃修改、一键填入 `/commit` 闭环）+ 右键菜单审查入口
 
 **背景**：
 Coding Agent 在执行较复杂任务时，经常跨越多个文件进行批量编辑（`edit_file`）、新建（`write_file`）或命令执行。目前用户在审查全局改动时存在明显痛点：
