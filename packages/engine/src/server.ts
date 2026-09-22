@@ -24,6 +24,7 @@ import { Settings, DEFAULT_SETTINGS, PROVIDER_PRESETS } from './settings.js';
 import type { ModelTestResult, ProviderEntry, ProviderModel, ProviderModelInfo } from './settings.js';
 import { loadModelDirectory, resolveModelMeta } from './model-catalog.js';
 import { buildSystemPrompt } from './prompts.js';
+import { WorkspaceLockManager } from './workspace-lock.js';
 
 export interface CreateSessionOptions {
   /** 可选：不填则创建纯对话会话，之后可随时绑定 */
@@ -53,6 +54,7 @@ export interface SessionEventPayload {
 export class AgentServer {
   private sessions = new Map<string, SessionRuntime>();
   private readonly events = new Emitter<SessionEventPayload>();
+  private readonly workspaceLocks = new WorkspaceLockManager();
   private settings: Settings = structuredClone(DEFAULT_SETTINGS);
   private settingsLoaded = false;
 
@@ -406,6 +408,9 @@ export class AgentServer {
         maxSteps: this.settings.maxSteps ?? 200,
         contextWindow: autoCompact ? contextWindow : undefined,
         autoCompactThreshold: compactThreshold,
+        workspaceLock: rt.data.meta.workspaceRoot
+          ? this.workspaceLocks.getLock(rt.data.meta.workspaceRoot)
+          : undefined,
       });
       if (result.reason === 'error' && result.errorMessage) {
         this.events.emit({ sessionId: id, event: { type: 'error', message: result.errorMessage } });

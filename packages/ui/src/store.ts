@@ -46,6 +46,22 @@ export type TurnItem = {
 /** 顶层时间线条目：用户消息、回合容器，以及回合聚合前的兜底平铺条目 */
 export type TranscriptItem = UserItem | TurnItem | TurnEntry;
 
+/** 会话运行态状态：idle=空闲, running=正在执行, waiting=等待审批, error=出错 */
+export type SessionRunStatus = 'idle' | 'running' | 'waiting' | 'error';
+
+/** 会话视图状态池化项（TODOS #29）：隔离存储每个会话的时间线、运行态与任务清单 */
+export interface SessionViewState {
+  items: TranscriptItem[];
+  currentTurn: TurnItem | null;
+  currentAssistant: AssistantItem | null;
+  turnItemSet: WeakSet<object>;
+  activeTodos: TodoItem[];
+  sessionUsage: { input: number; output: number; steps: number; cached: number };
+  lastUsage: Usage | null;
+  running: boolean;
+  status: SessionRunStatus;
+}
+
 export interface ModelSwitchPending {
   sessionId: string;
   providerId: string;
@@ -88,6 +104,9 @@ export class AppStore {
 
   private listeners = new Set<() => void>();
   private seq = 0;
+  private selectSeq = 0;
+  /** 会话视图状态池（TODOS #29）：按 sessionId 隔离维护时间线、运行状态与任务清单 */
+  private sessionStates = new Map<string, SessionViewState>();
   /** 快照版本号：每次 notify 递增，供 useSyncExternalStore 感知变化 */
   version = 0;
   /** 结构版本号：仅在会话切换、消息/卡片增删、回合折叠展开等结构性变更时递增，用于解耦高频流式与重度 DOM 测量 */
@@ -108,10 +127,9 @@ export class AppStore {
 
   constructor(readonly client: AgentClient) {
     // 事件订阅放构造函数：store 是页面级单例，只订阅一次。
-    // 此前放在 init() 且不退订，StrictMode 双挂载会注册两份监听，每个事件处理两遍
-    // （表现为工具卡片成对出现、文本增量重复追加），仅 dev 构建可见。
+    // 多会话并发支持：全量事件均分流派发至对应的 SessionViewState，后台会话静默累积进度
     this.client.onEvent(({ sessionId, event }) => {
-      if (sessionId === this.activeId) this.handleEvent(event);
+      this.handleSessionEvent(sessionId, event);
     });
   }
 
@@ -187,6 +205,19 @@ export class AppStore {
       }
     }
     return null;
+  }
+
+  /** 获取指定会话当前的实时运行状态（用于侧栏状态指示灯） */
+  getSessionStatus(id: string): SessionRunStatus {
+    return this.sessionStates.get(id)?.status ?? 'idle';
+  }
+
+  /** 是否有任意后台会话正在执行任务 */
+  get hasBackgroundRunning(): boolean {
+    for (const [id, state] of this.sessionStates.entries()) {
+      if (id !== this.activeId && state.running) return true;
+    }
+    return false;
   }
 
   get activeProject(): ProjectEntry | null {
@@ -294,22 +325,94 @@ export class AppStore {
     this.notify();
   }
 
-  async selectSession(id: string): Promise<void> {
-    if (this.running) return;
-    this.activeId = id;
-    this.view = 'chat';
-    this.lastUsage = null;
-    this.currentTurn = null;
-    const data = await this.client.getSession(id);
-    this.items = this.itemsFromSession(data);
-    this.activeTodos = data.todos ?? this.extractTodosFromSession(data);
-    // 同步该会话实际的审批模式到输入区（新会话用设置默认值）
-    try {
-      this.mode = await this.client.getApprovalMode(id);
-    } catch {
-      /* 会话可能刚被删除 */
+  /** 获取或创建指定会话的池化状态 */
+  getOrCreateSessionState(id: string): SessionViewState {
+    let state = this.sessionStates.get(id);
+    if (!state) {
+      state = {
+        items: [],
+        currentTurn: null,
+        currentAssistant: null,
+        turnItemSet: new WeakSet(),
+        activeTodos: [],
+        sessionUsage: { input: 0, output: 0, steps: 0, cached: 0 },
+        lastUsage: null,
+        running: false,
+        status: 'idle',
+      };
+      this.sessionStates.set(id, state);
     }
-    this.notify(true);
+    return state;
+  }
+
+  /** 同步激活会话的展示字段 */
+  private syncActiveState(state: SessionViewState): void {
+    this.items = state.items;
+    this.currentTurn = state.currentTurn;
+    this.activeTodos = state.activeTodos;
+    this.sessionUsage = state.sessionUsage;
+    this.lastUsage = state.lastUsage;
+    this.running = state.running;
+  }
+
+  async selectSession(id: string): Promise<void> {
+    const seq = ++this.selectSeq;
+    this.flushPendingNotify();
+
+    // 1. 若目标会话已在状态池中，立即切换呈现（0ms 零白屏、切回运行态即时可见）
+    let state = this.sessionStates.get(id);
+    if (state) {
+      this.activeId = id;
+      this.syncActiveState(state);
+      this.view = 'chat';
+      this.notify(true);
+    }
+
+    try {
+      const data = await this.client.getSession(id);
+      if (seq !== this.selectSeq) return; // 已有新的切换请求，防乱序覆盖
+
+      // 若之前没有池化状态，从客户端载入历史初始化
+      if (!state) {
+        state = {
+          items: this.itemsFromSession(data),
+          currentTurn: null,
+          currentAssistant: null,
+          turnItemSet: new WeakSet(),
+          activeTodos: data.todos ?? this.extractTodosFromSession(data),
+          sessionUsage: {
+            input: data.usage?.input ?? 0,
+            output: data.usage?.output ?? 0,
+            steps: data.usage?.steps ?? 0,
+            cached: data.usage?.cached ?? 0,
+          },
+          lastUsage: null,
+          running: false,
+          status: 'idle',
+        };
+        this.sessionStates.set(id, state);
+      } else if (!state.running && state.items.length === 0 && data.messages.length > 0) {
+        state.items = this.itemsFromSession(data);
+        state.activeTodos = data.todos ?? this.extractTodosFromSession(data);
+      }
+
+      this.activeId = id;
+      this.syncActiveState(state);
+
+      // 同步该会话实际的审批模式到输入区（新会话用设置默认值）
+      try {
+        const mode = await this.client.getApprovalMode(id);
+        if (seq !== this.selectSeq) return;
+        this.mode = mode;
+      } catch {
+        /* 会话可能刚被删除 */
+      }
+      this.view = 'chat';
+      this.notify(true);
+    } catch (err) {
+      if (seq !== this.selectSeq) return;
+      this.showToast(err instanceof Error ? err.message : String(err), 'err');
+    }
   }
 
   /** 显示名（用户设置的名称优先于 id，如 CPA） */
@@ -529,12 +632,17 @@ export class AppStore {
   }
 
   async deleteSession(id: string): Promise<void> {
-    if (this.running && id === this.activeId) return;
+    const state = this.sessionStates.get(id);
+    if (state?.running) return;
     await this.client.deleteSession(id);
+    this.sessionStates.delete(id);
     this.sessions = this.sessions.filter((s) => s.id !== id);
     if (this.activeId === id) {
       this.activeId = null;
       this.items = [];
+      this.currentTurn = null;
+      this.activeTodos = [];
+      this.running = false;
       if (this.sessions.length > 0) await this.selectSession(this.sessions[0].id);
     }
     this.notify(true);
@@ -542,7 +650,9 @@ export class AppStore {
 
   /** 从指定节点分叉（Fork）出新会话并自动切换进入 */
   async forkSession(anchor?: { kind: 'beforeUser' | 'afterTurn'; itemId: string }): Promise<void> {
-    if (!this.activeId || this.running) return;
+    if (!this.activeId) return;
+    const curState = this.sessionStates.get(this.activeId);
+    if (curState?.running) return;
     let beforeUserIndex: number | undefined;
     let upToMessageId: string | undefined;
 
@@ -596,9 +706,13 @@ export class AppStore {
   }
 
   async send(text: string): Promise<void> {
-    if (!this.activeId || this.running || !text.trim()) return;
+    const id = this.activeId;
+    if (!id || this.running || !text.trim()) return;
+    const state = this.getOrCreateSessionState(id);
+    state.running = true;
+    state.status = 'running';
     this.running = true;
-    this.items.push({ kind: 'user', id: this.nextId(), text: text.trim(), ts: Date.now() });
+    state.items.push({ kind: 'user', id: this.nextId(), text: text.trim(), ts: Date.now() });
     const turn: TurnItem = {
       kind: 'turn',
       id: this.nextId(),
@@ -606,34 +720,39 @@ export class AppStore {
       collapsed: false,
       items: [],
     };
-    this.items.push(turn);
-    this.currentTurn = turn;
+    state.items.push(turn);
+    state.currentTurn = turn;
+    this.syncActiveState(state);
     if (this.autoScrollOn) {
       this.scrollTick++;
       this.atBottom = true;
     }
     this.notify(true);
     try {
-      await this.client.sendMessage(this.activeId, text.trim());
+      await this.client.sendMessage(id, text.trim());
     } catch (err) {
       const errorItem: ErrorItem = {
         kind: 'error',
         id: this.nextId(),
         message: err instanceof Error ? err.message : String(err),
       };
-      if (this.currentTurn) this.currentTurn.items.push(errorItem);
-      else this.items.push(errorItem);
-      this.running = false;
+      if (state.currentTurn) state.currentTurn.items.push(errorItem);
+      else state.items.push(errorItem);
+      state.running = false;
+      state.status = 'error';
+      if (this.activeId === id) this.syncActiveState(state);
       this.notify(true);
     }
   }
 
   /** 编辑最近一条用户消息并重新生成：UI 截断该消息之后的内容，新建回合容器承接流式事件 */
   async editAndResend(userItemId: string, text: string): Promise<void> {
-    if (!this.activeId || this.running || !text.trim()) return;
-    const idx = this.items.findIndex((i) => i.id === userItemId);
+    const id = this.activeId;
+    if (!id || this.running || !text.trim()) return;
+    const state = this.getOrCreateSessionState(id);
+    const idx = state.items.findIndex((i) => i.id === userItemId);
     if (idx === -1) return;
-    this.items = this.items
+    state.items = state.items
       .slice(0, idx + 1)
       .map((i) => (i.id === userItemId && i.kind === 'user' ? { ...i, text: text.trim() } : i));
     const turn: TurnItem = {
@@ -643,22 +762,26 @@ export class AppStore {
       collapsed: false,
       items: [],
     };
-    this.items.push(turn);
-    this.currentTurn = turn;
-    this.running = true;
+    state.items.push(turn);
+    state.currentTurn = turn;
+    state.running = true;
+    state.status = 'running';
+    this.syncActiveState(state);
     if (this.autoScrollOn) this.scrollTick++;
     this.notify(true);
     try {
-      await this.client.editLastUserMessage(this.activeId, text);
+      await this.client.editLastUserMessage(id, text);
     } catch (err) {
       const errorItem: ErrorItem = {
         kind: 'error',
         id: this.nextId(),
         message: err instanceof Error ? err.message : String(err),
       };
-      if (this.currentTurn) this.currentTurn.items.push(errorItem);
-      else this.items.push(errorItem);
-      this.running = false;
+      if (state.currentTurn) state.currentTurn.items.push(errorItem);
+      else state.items.push(errorItem);
+      state.running = false;
+      state.status = 'error';
+      if (this.activeId === id) this.syncActiveState(state);
       this.notify(true);
     }
   }
@@ -670,7 +793,20 @@ export class AppStore {
 
   async stop(): Promise<void> {
     if (!this.activeId) return;
-    await this.client.abort(this.activeId);
+    await this.stopSession(this.activeId);
+  }
+
+  async stopSession(id: string): Promise<void> {
+    const state = this.sessionStates.get(id);
+    if (state) {
+      state.running = false;
+      state.status = 'idle';
+      if (id === this.activeId) {
+        this.syncActiveState(state);
+      }
+    }
+    await this.client.abort(id);
+    this.notify(true);
   }
 
   /** 展开/折叠一个回合 */
@@ -725,10 +861,10 @@ export class AppStore {
   }
 
   /** Agent 回合结束后发桌面通知（窗口在后台且设置开启时才发，出错时文案区分） */
-  private sendDesktopNotification(hadError: boolean): void {
+  private sendDesktopNotification(hadError: boolean, sessionId?: string): void {
     if (document.hasFocus()) return;
     if (this.settings?.desktopNotify === false) return;
-    const session = this.activeSession;
+    const session = this.sessions.find((s) => s.id === (sessionId ?? this.activeId));
     const title = session?.title ?? (hadError ? '任务出错' : '任务完成');
     void this.client
       .notify(hadError ? 'EasyCode — 任务出错' : 'EasyCode — Agent 完成', title)
@@ -752,50 +888,59 @@ export class AppStore {
 
   currentTurn: TurnItem | null = null;
 
-  /** 事件产生的条目进入当前回合 */
-  private pushToTurn(item: TurnEntry): void {
-    if (this.currentTurn) {
-      this.currentTurn.items.push(item);
-      this.turnItemSet.add(item);
-    } else {
-      this.items.push(item);
+  handleEvent(event: AgentEvent): void {
+    if (this.activeId) {
+      this.handleSessionEvent(this.activeId, event);
     }
   }
 
-  private findInTurn<T extends TurnEntry>(pred: (i: TurnEntry) => i is T): T | undefined {
-    return (this.currentTurn?.items ?? []).find(pred);
-  }
+  private handleSessionEvent(sessionId: string, event: AgentEvent): void {
+    const state = this.getOrCreateSessionState(sessionId);
+    const isActive = sessionId === this.activeId;
 
-  handleEvent(event: AgentEvent): void {
     switch (event.type) {
       case 'assistant_start':
-        this.flushPendingNotify();
-        // 开启新的助手消息（懒创建：第一个 delta 到达时再显示，避免空泡）
-        this.currentAssistant = { kind: 'assistant', id: this.nextId(), blocks: [] };
-        this.notify(true);
+        if (isActive) this.flushPendingNotify();
+        state.running = true;
+        state.status = 'running';
+        this.flushAssistantInState(state);
+        state.currentAssistant = { kind: 'assistant', id: this.nextId(), blocks: [] };
+        if (isActive) {
+          this.syncActiveState(state);
+          this.notify(true);
+        } else {
+          this.notify(false);
+        }
         break;
+
       case 'text_delta': {
-        const item = this.ensureAssistant();
-        this.appendToBlock(item, 'text', event.delta);
-        this.scheduleNotify();
+        const item = this.ensureAssistantInState(state);
+        this.appendToBlockInState(state, item, 'text', event.delta);
+        if (isActive) {
+          this.scheduleNotify();
+        }
         break;
       }
+
       case 'reasoning_delta': {
-        const item = this.ensureAssistant();
-        this.appendToBlock(item, 'thinking', event.delta);
-        this.scheduleNotify();
+        const item = this.ensureAssistantInState(state);
+        this.appendToBlockInState(state, item, 'thinking', event.delta);
+        if (isActive) {
+          this.scheduleNotify();
+        }
         break;
       }
+
       case 'tool_call_start': {
-        this.flushPendingNotify();
-        this.flushAssistant();
+        if (isActive) this.flushPendingNotify();
+        this.flushAssistantInState(state);
         if (event.call.name === 'todo_write') {
           const input = event.call.input as { todos?: TodoItem[] } | undefined;
           if (Array.isArray(input?.todos)) {
-            this.activeTodos = input.todos;
+            state.activeTodos = input.todos;
           }
         }
-        this.pushToTurn({
+        this.pushToTurnInState(state, {
           kind: 'tool',
           id: this.nextId(),
           callId: event.call.id,
@@ -804,35 +949,46 @@ export class AppStore {
           status: 'running',
           startedAt: Date.now(),
         });
-        this.notify(true);
+        if (isActive) {
+          this.syncActiveState(state);
+          this.notify(true);
+        }
         break;
       }
+
       case 'tool_result': {
-        this.flushPendingNotify();
-        // 同一回合可能出现相同 callId 的并行调用：优先匹配仍在运行的那张卡片
-        const tool =
-          this.findInTurn(
-            (i): i is ToolItem => i.kind === 'tool' && i.callId === event.callId && i.status === 'running',
-          ) ??
-          this.findInTurn((i): i is ToolItem => i.kind === 'tool' && i.callId === event.callId);
-        if (tool) {
-          tool.status = event.isError ? 'error' : event.content.includes('用户拒绝') ? 'denied' : 'ok';
-          tool.result = event.content;
-          tool.durationMs = event.durationMs;
-          if (tool.name === 'todo_write' && !event.isError) {
-            const input = tool.input as { todos?: TodoItem[] } | undefined;
-            if (Array.isArray(input?.todos)) {
-              this.activeTodos = input.todos;
+        if (isActive) this.flushPendingNotify();
+        const turn = state.currentTurn;
+        if (turn) {
+          const tool =
+            turn.items.find(
+              (i): i is ToolItem => i.kind === 'tool' && i.callId === event.callId && i.status === 'running',
+            ) ??
+            turn.items.find((i): i is ToolItem => i.kind === 'tool' && i.callId === event.callId);
+          if (tool) {
+            tool.status = event.isError ? 'error' : event.content.includes('用户拒绝') ? 'denied' : 'ok';
+            tool.result = event.content;
+            tool.durationMs = event.durationMs;
+            if (tool.name === 'todo_write' && !event.isError) {
+              const input = tool.input as { todos?: TodoItem[] } | undefined;
+              if (Array.isArray(input?.todos)) {
+                state.activeTodos = input.todos;
+              }
             }
           }
         }
-        this.notify(true);
+        if (isActive) {
+          this.syncActiveState(state);
+          this.notify(true);
+        }
         break;
       }
-      case 'approval_request':
-        this.flushPendingNotify();
-        this.flushAssistant();
-        this.pushToTurn({
+
+      case 'approval_request': {
+        if (isActive) this.flushPendingNotify();
+        this.flushAssistantInState(state);
+        state.status = 'waiting';
+        this.pushToTurnInState(state, {
           kind: 'approval',
           id: this.nextId(),
           requestId: event.requestId,
@@ -840,72 +996,111 @@ export class AppStore {
           input: event.input,
           status: 'pending',
         });
-        this.notify(true);
-        break;
-      case 'approval_resolved': {
-        this.flushPendingNotify();
-        const approval = this.findInTurn(
-          (i): i is ApprovalItem =>
-            i.kind === 'approval' && i.requestId === event.requestId,
-        );
-        if (approval) approval.status = event.approved ? 'approved' : 'denied';
-        this.notify(true);
+        if (isActive) {
+          this.syncActiveState(state);
+          this.notify(true);
+        } else {
+          const sessionTitle = this.sessions.find((s) => s.id === sessionId)?.title || '后台会话';
+          this.showToast(`[${sessionTitle}] 等待审批: ${event.toolName}`);
+          this.notify(false);
+        }
         break;
       }
+
+      case 'approval_resolved': {
+        if (isActive) this.flushPendingNotify();
+        const turn = state.currentTurn;
+        if (turn) {
+          const approval = turn.items.find(
+            (i): i is ApprovalItem => i.kind === 'approval' && i.requestId === event.requestId,
+          );
+          if (approval) approval.status = event.approved ? 'approved' : 'denied';
+        }
+        if (state.running) {
+          state.status = 'running';
+        }
+        if (isActive) {
+          this.syncActiveState(state);
+          this.notify(true);
+        } else {
+          this.notify(false);
+        }
+        break;
+      }
+
       case 'step_end':
-        this.lastUsage = event.usage ?? null;
+        state.lastUsage = event.usage ?? null;
         if (event.sessionUsage) {
-          this.sessionUsage = {
+          state.sessionUsage = {
             input: event.sessionUsage.input,
             output: event.sessionUsage.output,
             steps: event.sessionUsage.steps,
             cached: event.sessionUsage.cached ?? 0,
           };
         }
-        this.notify(false);
+        if (isActive) {
+          this.syncActiveState(state);
+          this.notify(false);
+        }
         break;
+
       case 'context_compacted':
-        this.flushPendingNotify();
-        this.showToast(`[系统] ${event.summary}`);
-        if (this.activeId) {
-          void this.selectSession(this.activeId);
+        if (isActive) {
+          this.flushPendingNotify();
+          this.showToast(`[系统] ${event.summary}`);
+          void this.selectSession(sessionId);
         }
         break;
+
       case 'error':
-        this.flushPendingNotify();
-        this.flushAssistant();
-        this.pushToTurn({ kind: 'error', id: this.nextId(), message: event.message });
-        this.notify(true);
-        break;
-      case 'done':
-        this.flushPendingNotify();
-        this.flushAssistant();
-        if (this.currentTurn) {
-          this.currentTurn.durationMs = Date.now() - this.currentTurn.startedAt;
-          this.currentTurn.collapsed = true;
-          // 回合内出现过错误条目则通知文案区分（loop 保证 error 后必发 done，不会双发）
-          const hadError = this.currentTurn.items.some((i) => i.kind === 'error');
-          this.currentTurn = null;
-          this.running = false;
-          this.sendDesktopNotification(hadError);
+        if (isActive) this.flushPendingNotify();
+        this.flushAssistantInState(state);
+        this.pushToTurnInState(state, { kind: 'error', id: this.nextId(), message: event.message });
+        state.status = 'error';
+        if (isActive) {
+          this.syncActiveState(state);
+          this.notify(true);
         } else {
-          this.running = false;
+          this.notify(false);
         }
-        this.notify(true);
+        break;
+
+      case 'done':
+        if (isActive) this.flushPendingNotify();
+        this.flushAssistantInState(state);
+        if (state.currentTurn) {
+          state.currentTurn.durationMs = Date.now() - state.currentTurn.startedAt;
+          state.currentTurn.collapsed = true;
+          const hadError = state.currentTurn.items.some((i) => i.kind === 'error');
+          state.currentTurn = null;
+          state.running = false;
+          state.status = hadError ? 'error' : 'idle';
+          this.sendDesktopNotification(hadError, sessionId);
+        } else {
+          state.running = false;
+          state.status = 'idle';
+        }
+        if (isActive) {
+          this.syncActiveState(state);
+          this.notify(true);
+        } else {
+          const sessionTitle = this.sessions.find((s) => s.id === sessionId)?.title || '后台会话';
+          this.showToast(`[${sessionTitle}] 任务执行完成`);
+          this.notify(false);
+        }
         break;
     }
   }
 
-  private currentAssistant: AssistantItem | null = null;
-
-  private ensureAssistant(): AssistantItem {
-    if (!this.currentAssistant) {
-      this.currentAssistant = { kind: 'assistant', id: this.nextId(), blocks: [] };
+  private ensureAssistantInState(state: SessionViewState): AssistantItem {
+    if (!state.currentAssistant) {
+      state.currentAssistant = { kind: 'assistant', id: this.nextId(), blocks: [] };
     }
-    return this.currentAssistant;
+    return state.currentAssistant;
   }
 
-  private appendToBlock(
+  private appendToBlockInState(
+    state: SessionViewState,
     item: AssistantItem,
     type: 'text' | 'thinking',
     delta: string,
@@ -913,21 +1108,28 @@ export class AppStore {
     const last = item.blocks.at(-1);
     if (last && last.type === type) last.text += delta;
     else item.blocks.push({ type, text: delta });
-    // 首个内容到达时入列（WeakSet O(1) 判定，避免 N 次数组线性扫描）
-    if (this.currentTurn && !this.turnItemSet.has(item)) {
-      this.currentTurn.items.push(item);
-      this.turnItemSet.add(item);
+    if (state.currentTurn && !state.turnItemSet.has(item)) {
+      state.currentTurn.items.push(item);
+      state.turnItemSet.add(item);
     }
   }
 
-  /** 当前流式助手消息落盘成普通条目 */
-  private flushAssistant(): void {
-    if (this.currentAssistant && this.currentAssistant.blocks.length > 0) {
-      if (this.currentTurn && !this.turnItemSet.has(this.currentAssistant)) {
-        this.currentTurn.items.push(this.currentAssistant);
-        this.turnItemSet.add(this.currentAssistant);
+  private flushAssistantInState(state: SessionViewState): void {
+    if (state.currentAssistant && state.currentAssistant.blocks.length > 0) {
+      if (state.currentTurn && !state.turnItemSet.has(state.currentAssistant)) {
+        state.currentTurn.items.push(state.currentAssistant);
+        state.turnItemSet.add(state.currentAssistant);
       }
     }
-    this.currentAssistant = null;
+    state.currentAssistant = null;
+  }
+
+  private pushToTurnInState(state: SessionViewState, item: TurnEntry): void {
+    if (state.currentTurn) {
+      state.currentTurn.items.push(item);
+      state.turnItemSet.add(item);
+    } else {
+      state.items.push(item);
+    }
   }
 }

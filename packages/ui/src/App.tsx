@@ -7,6 +7,7 @@ import { CreateProjectDialog } from './components/CreateProjectDialog.js';
 import { ModelSwitchGuardModal } from './components/ModelSwitchGuardModal.js';
 import { SettingsPage } from './components/SettingsPage.js';
 import { TitleBar, ResizeEdges } from './components/TitleBar.js';
+import { ContextMenu } from './components/ContextMenu.js';
 import { updater } from './updater.js';
 
 export function App() {
@@ -14,16 +15,14 @@ export function App() {
 
   useEffect(() => {
     store.init();
-    store.loadSettings();
+    store.loadSettings().then((s) => {
+      if ('__TAURI_INTERNALS__' in window) {
+        import('@tauri-apps/api/core')
+          .then(({ invoke }) => invoke('set_close_to_tray', { enabled: s.closeToTray !== false }))
+          .catch(() => {});
+      }
+    });
     void updater.init();
-    // 禁用 WebView 原生右键菜单；输入类控件内保留（右键粘贴可用）——TODOS #16
-    const onContextMenu = (e: MouseEvent): void => {
-      const t = e.target as HTMLElement;
-      if (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable) return;
-      e.preventDefault();
-    };
-    document.addEventListener('contextmenu', onContextMenu);
-    return () => document.removeEventListener('contextmenu', onContextMenu);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -49,6 +48,7 @@ export function App() {
       {store.createProjectOpen && <CreateProjectDialog />}
       {store.pendingModelSwitch && <ModelSwitchGuardModal />}
       <ResizeEdges />
+      <ContextMenu />
       {store.toast && (
         <div className={`toast ${store.toastKind === 'err' ? 'err' : ''}`}>{store.toast}</div>
       )}

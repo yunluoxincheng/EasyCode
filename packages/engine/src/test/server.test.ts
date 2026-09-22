@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { AgentServer } from '../server.js';
+import { AgentServer, Mutex, WorkspaceLockManager } from '../index.js';
 import { MemoryHost } from '@easycode/core';
 
 test('AgentServer.forkSession 继承配置、截取指定轮次上下文并重置统计', async () => {
@@ -167,4 +167,72 @@ test('AgentServer: contextCompaction 设置默认值与工具长输出折叠', a
   const toolMsg = trimmed.messages.find((m) => m.role === 'tool_result');
   assert.ok(toolMsg && toolMsg.role === 'tool_result');
   assert.match(toolMsg.content, /历史工具输出已折叠归档/);
+});
+
+test('Mutex & WorkspaceLockManager: FIFO 队列互斥与路径标准化', async () => {
+  const mutex = new Mutex();
+  const log: string[] = [];
+
+  const task = async (name: string, delayMs: number) => {
+    return mutex.withLock(async () => {
+      log.push(`start ${name}`);
+      await new Promise((r) => setTimeout(r, delayMs));
+      log.push(`end ${name}`);
+    });
+  };
+
+  await Promise.all([task('A', 20), task('B', 10), task('C', 5)]);
+  assert.deepEqual(log, ['start A', 'end A', 'start B', 'end B', 'start C', 'end C']);
+
+  const wm = new WorkspaceLockManager();
+  const lock1 = wm.getLock('E:\\MyProject\\src\\');
+  const lock2 = wm.getLock('e:/myproject/src');
+  assert.equal(lock1, lock2, '不同格式的相同路径应当共享同一 Mutex 实例');
+});
+
+test('AgentServer: 多会话并发执行互不阻塞', async () => {
+  const host = new MemoryHost({
+    '/ws1/file.txt': 'f1',
+    '/ws2/file.txt': 'f2',
+  });
+  const server = new AgentServer(host);
+  await server.updateSettings({
+    providers: {
+      mock: {
+        kind: 'mock',
+        baseURL: '',
+        name: 'Mock',
+        enabled: true,
+        models: [{ name: 'mock-model', enabled: true }],
+      },
+    },
+    defaultProvider: 'mock',
+  });
+
+  const [s1, s2] = await Promise.all([
+    server.createSession({ workspaceRoot: '/ws1', providerId: 'mock', title: '会话 1' }),
+    server.createSession({ workspaceRoot: '/ws2', providerId: 'mock', title: '会话 2' }),
+  ]);
+
+  const receivedEvents: Array<{ sessionId: string; type: string }> = [];
+  server.onEvent(({ sessionId, event }) => {
+    receivedEvents.push({ sessionId, type: event.type });
+  });
+
+  // 并发发送消息
+  await Promise.all([
+    server.sendMessage(s1.id, '会话 1 问题'),
+    server.sendMessage(s2.id, '会话 2 问题'),
+  ]);
+
+  // 验证两会话均执行完成且互不影响
+  const d1 = await server.getSession(s1.id);
+  const d2 = await server.getSession(s2.id);
+
+  assert.ok(d1.messages.length >= 2, '会话 1 包含用户与助手消息');
+  assert.ok(d2.messages.length >= 2, '会话 2 包含用户与助手消息');
+
+  const s1Done = receivedEvents.some((e) => e.sessionId === s1.id && e.type === 'done');
+  const s2Done = receivedEvents.some((e) => e.sessionId === s2.id && e.type === 'done');
+  assert.ok(s1Done && s2Done, '两会话均成功收到 done 事件');
 });

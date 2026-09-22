@@ -3,7 +3,7 @@
  * 装配 AgentServer + NodeHost，桥接渲染进程（IPC 白名单分发）。
  * 业务逻辑全部在 @easycode/engine / @easycode/core。
  */
-import { app, BrowserWindow, dialog, ipcMain, Notification, shell } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu, Notification, shell, Tray } from 'electron';
 import cp from 'node:child_process';
 import path from 'node:path';
 import process from 'node:process';
@@ -14,6 +14,47 @@ import { NodeHost } from '@easycode/host-node';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 let mainWindow: BrowserWindow | null = null;
+let tray: Tray | null = null;
+let isQuitting = false;
+let closeToTray = true;
+
+function showMainWindow(): void {
+  if (!mainWindow) {
+    createWindow();
+    return;
+  }
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+function initTray(): void {
+  if (tray) return;
+  const iconPath = path.join(__dirname, '../../../app-icon.png');
+  try {
+    tray = new Tray(iconPath);
+    tray.setToolTip('EasyCode');
+    const contextMenu = Menu.buildFromTemplate([
+      {
+        label: '显示主窗口',
+        click: () => showMainWindow(),
+      },
+      { type: 'separator' },
+      {
+        label: '退出 EasyCode',
+        click: () => {
+          isQuitting = true;
+          app.quit();
+        },
+      },
+    ]);
+    tray.setContextMenu(contextMenu);
+    tray.on('click', () => showMainWindow());
+    tray.on('double-click', () => showMainWindow());
+  } catch {
+    /* 托盘初始化失败不影响主窗口 */
+  }
+}
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -40,6 +81,14 @@ function createWindow(): void {
   } else {
     mainWindow.loadFile(path.join(__dirname, '../../ui/dist/index.html'));
   }
+
+  mainWindow.on('close', (e) => {
+    if (!isQuitting && closeToTray) {
+      e.preventDefault();
+      mainWindow?.hide();
+    }
+  });
+
   mainWindow.on('closed', () => {
     mainWindow = null;
   });
@@ -93,7 +142,13 @@ const handlers: Record<string, Handler> = {
   'set-session-effort': (args) => server.setSessionEffort(args.id, args.effort),
   'set-session-workspace': (args) => server.setSessionWorkspace(args.id, args.workspace),
   'get-settings': () => server.getSettings(),
-  'update-settings': (args) => server.updateSettings(args.patch),
+  'update-settings': async (args) => {
+    const s = await server.updateSettings(args.patch);
+    if (s.closeToTray !== undefined) {
+      closeToTray = s.closeToTray !== false;
+    }
+    return s;
+  },
   'list-provider-models': (args) => server.listProviderModels(args.id),
   'test-provider-model': (args) => server.testProviderModel(args.id, args.model),
   'test-web-search': () => server.testWebSearch(),
@@ -147,10 +202,28 @@ ipcMain.handle('easycode', async (event, method: string, args: unknown) => {
   return await Promise.resolve(handler(args, event));
 });
 
-app.whenReady().then(createWindow);
-app.on('window-all-closed', () => {
-  app.quit();
+app.whenReady().then(async () => {
+  try {
+    const s = await server.getSettings();
+    closeToTray = s.closeToTray !== false;
+  } catch {
+    /* 使用默认值 */
+  }
+  createWindow();
+  initTray();
 });
+
+app.on('before-quit', () => {
+  isQuitting = true;
+});
+
+app.on('window-all-closed', () => {
+  if (!closeToTray || isQuitting) {
+    app.quit();
+  }
+});
+
 app.on('activate', () => {
   if (BrowserWindow.getAllWindows().length === 0) createWindow();
+  else showMainWindow();
 });

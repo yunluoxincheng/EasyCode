@@ -26,6 +26,8 @@ export interface ToolContext {
   readFiles?: Set<string>;
   /** 命令行终端 Shell：auto=自动选择，也可指定 git-bash / pwsh / powershell / cmd */
   shell?: string;
+  /** 工作区并发互斥锁（TODOS #29）：同工作区多会话并发时，敏感工具（写文件/终端命令）排队执行 */
+  workspaceLock?: { withLock<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> };
 }
 
 export interface Tool {
@@ -151,7 +153,11 @@ export async function executeTool(
     };
   }
   try {
-    const content = await tool.execute(validated.value, ctx);
+    const run = () => tool.execute(validated.value, ctx);
+    const content =
+      registry.isSensitive(name) && ctx.workspaceLock
+        ? await ctx.workspaceLock.withLock(run, ctx.signal)
+        : await run();
     return { content, approved: true, isError: false, durationMs: Date.now() - started };
   } catch (err) {
     return {

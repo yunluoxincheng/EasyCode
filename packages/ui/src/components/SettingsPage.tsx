@@ -840,6 +840,33 @@ export function SettingsPage() {
                 </div>
               </div>
               <div className="field">
+                <span>关闭窗口时最小化到系统托盘</span>
+                <div className="auto-scroll-row">
+                  <button
+                    className={`switch ${draft.closeToTray !== false ? 'on' : ''}`}
+                    title={
+                      draft.closeToTray !== false
+                        ? '已开启（点击关闭，窗口将在关闭时直接退出应用）'
+                        : '已关闭（点击开启，关闭窗口隐藏到托盘后台常驻）'
+                    }
+                    onClick={() => {
+                      const next = draft.closeToTray === false;
+                      patch({ closeToTray: next });
+                      if ('__TAURI_INTERNALS__' in window) {
+                        import('@tauri-apps/api/core')
+                          .then(({ invoke }) => invoke('set_close_to_tray', { enabled: next }))
+                          .catch(() => {});
+                      }
+                    }}
+                  >
+                    <span className="knob" />
+                  </button>
+                  <span className="auto-scroll-text">
+                    {draft.closeToTray !== false ? '开启（常驻托盘）' : '关闭（直接退出）'}
+                  </span>
+                </div>
+              </div>
+              <div className="field">
                 <span>复古 CRT 扫描线</span>
                 <div className="auto-scroll-row">
                   <button

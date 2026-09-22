@@ -201,6 +201,31 @@ html.crt-off body::after {
   user-select: none;
   flex: 1;
 }
+.session-status-dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  flex: none;
+  margin-right: 6px;
+}
+.session-status-dot.running {
+  background: var(--green);
+  box-shadow: 0 0 6px var(--green);
+  animation: pulse 1.2s infinite;
+}
+.session-status-dot.waiting {
+  background: var(--amber);
+  box-shadow: 0 0 6px var(--amber);
+  animation: breathe 1.8s infinite ease-in-out;
+}
+.session-status-dot.error {
+  background: var(--red);
+  box-shadow: 0 0 6px var(--red);
+}
+
+@keyframes breathe {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: .3; transform: scale(.75); }
+}
 .session-actions {
   position: absolute; right: 4px; top: 50%;
   transform: translateY(-50%);
@@ -218,6 +243,11 @@ html.crt-off body::after {
 .session-action-btn:hover { background: var(--panel); color: var(--dim); }
 .session-action-btn.session-rename:hover { color: var(--green); }
 .session-action-btn.session-delete:hover { color: var(--red); }
+.session-action-btn:disabled {
+  opacity: .2;
+  cursor: not-allowed;
+  pointer-events: none;
+}
 
 .session-rename-input {
   background: var(--bg);
@@ -2562,9 +2592,74 @@ select:focus-visible,
   .help-menu,
   .usage-pop,
   .ctx-pop,
+  .context-menu,
   .composer-input textarea,
   .toast {
     animation: none !important;
     transition: none !important;
   }
+}
+
+/* ---------------- 极客终端风自绘右键菜单 (TODOS #16) ---------------- */
+
+.context-menu {
+  position: fixed;
+  width: 220px;
+  background: var(--panel);
+  border: 1px solid var(--border2);
+  border-radius: var(--radius);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, .75);
+  padding: 6px;
+  z-index: 150;
+  display: flex;
+  flex-direction: column;
+  animation: popIn .12s cubic-bezier(0.16, 1, 0.3, 1);
+  user-select: none;
+}
+.context-menu-title {
+  font-size: 10px;
+  letter-spacing: 1.5px;
+  color: var(--faint);
+  padding: 4px 8px 6px;
+}
+.context-menu-title::before {
+  content: '// ';
+}
+.context-menu-item {
+  background: none;
+  border: none;
+  color: var(--dim);
+  font-family: var(--font);
+  font-size: 12px;
+  text-align: left;
+  padding: 6px 8px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  transition: all .12s ease;
+}
+.context-menu-item:hover {
+  background: var(--panel2);
+  color: var(--green);
+}
+.context-menu-item.danger:hover {
+  background: rgba(235, 87, 87, .15);
+  color: var(--red);
+}
+.context-menu-item .ctx-icon {
+  font-size: 12px;
+  color: var(--faint);
+  width: 14px;
+  text-align: center;
+  flex: none;
+}
+.context-menu-item:hover .ctx-icon {
+  color: inherit;
+}
+.context-menu-sep {
+  height: 1px;
+  border-bottom: 1px dashed var(--border);
+  margin: 4px 2px;
 }

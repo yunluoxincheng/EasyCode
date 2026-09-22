@@ -24,14 +24,14 @@ type ProjectGroupItem = {
 function SessionItemRow({
   session,
   active,
-  running,
+  status,
   onSelect,
   onDelete,
   onRename,
 }: {
   session: SessionMetaLite;
   active: boolean;
-  running: boolean;
+  status: 'idle' | 'running' | 'waiting' | 'error';
   onSelect: () => void;
   onDelete: () => void;
   onRename: (newTitle: string) => Promise<void>;
@@ -91,6 +91,18 @@ function SessionItemRow({
         />
       ) : (
         <>
+          {status !== 'idle' && (
+            <span
+              className={`session-status-dot ${status}`}
+              title={
+                status === 'running'
+                  ? '正在执行任务'
+                  : status === 'waiting'
+                    ? '等待用户审批'
+                    : '执行遇到错误'
+              }
+            />
+          )}
           <span
             className="session-title"
             title={`${session.title} (双击重命名)`}
@@ -111,9 +123,10 @@ function SessionItemRow({
             </button>
             <button
               className="session-action-btn session-delete"
-              title="删除会话"
+              disabled={status === 'running'}
+              title={status === 'running' ? '运行中无法删除' : '删除会话'}
               onClick={() => {
-                if (!running) onDelete();
+                if (status !== 'running') onDelete();
               }}
             >
               ✕
@@ -426,7 +439,7 @@ export function Sidebar() {
                           key={session.id}
                           session={session}
                           active={session.id === store.activeId}
-                          running={store.running}
+                          status={store.getSessionStatus(session.id)}
                           onSelect={() => void store.selectSession(session.id)}
                           onDelete={() => void store.deleteSession(session.id)}
                           onRename={(title) => store.renameSession(session.id, title)}
@@ -456,7 +469,7 @@ export function Sidebar() {
                   key={session.id}
                   session={session}
                   active={session.id === store.activeId}
-                  running={store.running}
+                  status={store.getSessionStatus(session.id)}
                   onSelect={() => void store.selectSession(session.id)}
                   onDelete={() => void store.deleteSession(session.id)}
                   onRename={(title) => store.renameSession(session.id, title)}

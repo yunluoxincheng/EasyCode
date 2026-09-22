@@ -27,6 +27,8 @@ export interface LoopOptions {
   contextWindow?: number;
   /** 上下文自动压缩触发阈值（默认 0.85 即 85%） */
   autoCompactThreshold?: number;
+  /** 工作区并发互斥锁（TODOS #29） */
+  workspaceLock?: { withLock<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> };
 }
 
 export interface LoopResult {
@@ -65,6 +67,7 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
     shell,
     contextWindow,
     autoCompactThreshold = 0.85,
+    workspaceLock,
   } = options;
 
   try {
@@ -106,6 +109,7 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
           approval,
           readFiles,
           shell,
+          workspaceLock,
         });
         emit({
           type: 'tool_result',

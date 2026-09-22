@@ -113,6 +113,8 @@ export interface Settings {
   collapsedProjects?: string[];
   /** 上下文超限保护与智能自动压缩配置（TODOS #31） */
   contextCompaction?: ContextCompactionConfig;
+  /** 关闭窗口时最小化到系统托盘常驻后台（TODOS #5）；默认开 */
+  closeToTray?: boolean;
 }
 
 export interface ContextCompactionConfig {
@@ -173,6 +175,7 @@ export const DEFAULT_SETTINGS: Settings = {
   maxSteps: 200,
   collapsedProjects: [],
   contextCompaction: { autoCompact: true, threshold: 0.85, keepRecentTurns: 2 },
+  closeToTray: true,
   webSearch: { enabled: false, backend: 'searxng', maxResults: 5 },
   shell: 'auto',
 };

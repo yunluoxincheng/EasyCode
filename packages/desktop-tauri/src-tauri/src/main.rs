@@ -725,6 +725,16 @@ fn http_stream_cancel(id: String, aborts: State<'_, HttpAbortMap>) -> Result<(),
     Ok(())
 }
 
+#[derive(Default)]
+struct CloseToTrayState(Mutex<bool>);
+
+#[tauri::command]
+fn set_close_to_tray(enabled: bool, state: State<'_, CloseToTrayState>) -> Result<(), String> {
+    let mut lock = state.0.lock().map_err(|e| e.to_string())?;
+    *lock = enabled;
+    Ok(())
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -734,6 +744,65 @@ fn main() {
         .plugin(tauri_plugin_notification::init())
         .manage(PidMap::default())
         .manage(HttpAbortMap::default())
+        .manage(CloseToTrayState(Mutex::new(true))) // 默认开启关闭最小化到托盘
+        .setup(|app| {
+            use tauri::menu::{Menu, MenuItem};
+            use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+
+            let show_i = MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>)?;
+            let quit_i = MenuItem::with_id(app, "quit", "退出 EasyCode", true, None::<&str>)?;
+            let tray_menu = Menu::with_items(app, &[&show_i, &quit_i])?;
+
+            if let Some(icon) = app.default_window_icon() {
+                let _ = TrayIconBuilder::with_id("main-tray")
+                    .icon(icon.clone())
+                    .tooltip("EasyCode")
+                    .menu(&tray_menu)
+                    .show_menu_on_left_click(false)
+                    .on_menu_event(|app, event| match event.id().as_ref() {
+                        "show" => {
+                            if let Some(w) = app.get_webview_window("main") {
+                                let _ = w.unminimize();
+                                let _ = w.show();
+                                let _ = w.set_focus();
+                            }
+                        }
+                        "quit" => {
+                            app.exit(0);
+                        }
+                        _ => {}
+                    })
+                    .on_tray_icon_event(|tray, event| {
+                        if let TrayIconEvent::Click {
+                            button: MouseButton::Left,
+                            button_state: MouseButtonState::Up,
+                            ..
+                        } = event
+                        {
+                            if let Some(w) = tray.app_handle().get_webview_window("main") {
+                                let _ = w.unminimize();
+                                let _ = w.show();
+                                let _ = w.set_focus();
+                            }
+                        }
+                    })
+                    .build(app);
+            }
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let enabled = window
+                    .app_handle()
+                    .try_state::<CloseToTrayState>()
+                    .and_then(|s| s.0.lock().ok().map(|l| *l))
+                    .unwrap_or(true);
+                if enabled {
+                    let _ = window.hide();
+                    api.prevent_close();
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             host_info,
             fs_read,
@@ -750,7 +819,8 @@ fn main() {
             proc_detect_shells,
             send_notification,
             http_stream,
-            http_stream_cancel
+            http_stream_cancel,
+            set_close_to_tray
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

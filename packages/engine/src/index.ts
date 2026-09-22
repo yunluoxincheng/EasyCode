@@ -17,3 +17,4 @@ export type {
 export { lookupCatalog, resolveModelMeta } from './model-catalog.js';
 export type { CatalogMeta } from './model-catalog.js';
 export { buildSystemPrompt } from './prompts.js';
+export { WorkspaceLockManager, Mutex } from './workspace-lock.js';
