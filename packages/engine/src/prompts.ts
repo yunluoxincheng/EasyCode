@@ -1,10 +1,18 @@
 import type { Host } from '@easycode/core';
 
-/** 系统提示词：告诉模型环境、工作区与工具纪律 */
+export interface SystemPromptOptions {
+  webSearch?: boolean;
+  rules?: {
+    projectRules?: { path: string; content: string } | null;
+    globalRules?: string;
+  };
+}
+
+/** 系统提示词：告诉模型环境、工作区与工具纪律，并注入项目规范与全局偏好 */
 export function buildSystemPrompt(
   host: Host,
   workspace: string,
-  options?: { webSearch?: boolean },
+  options?: SystemPromptOptions,
 ): string {
   const sep = host.paths.sep;
   const platformHint = sep === '\\' ? 'Windows' : '类 Unix';
@@ -20,6 +28,9 @@ export function buildSystemPrompt(
         '联网搜索可用：遇到时效性问题、你不确定的事实或需要出处引用时，主动调用 web_search 查证后再回答。',
       );
     }
+    if (options?.rules?.globalRules?.trim()) {
+      lines.push('', '# 全局开发偏好', options.rules.globalRules.trim());
+    }
     lines.push('你可以正常与用户对话、回答问题、出方案。');
     return lines.join('\n');
   }
@@ -30,6 +41,24 @@ export function buildSystemPrompt(
     `- 操作系统风格: ${platformHint}`,
     `- 当前工作区: ${workspace}`,
     `- 所有文件路径都相对工作区；你只能访问工作区内的文件。`,
+  ];
+
+  // 项目专属规范（高优先级）
+  if (options?.rules?.projectRules?.content?.trim()) {
+    lines.push(
+      '',
+      `# 项目规范 (${options.rules.projectRules.path})`,
+      '以下是当前项目明确指定的行为准则与架构约束，必须严格遵守：',
+      options.rules.projectRules.content.trim(),
+    );
+  }
+
+  // 全局用户偏好
+  if (options?.rules?.globalRules?.trim()) {
+    lines.push('', '# 全局开发偏好', options.rules.globalRules.trim());
+  }
+
+  lines.push(
     '',
     '# 工作纪律',
     '1. 先读取、搜索了解现状，再动手修改；修改已有文件优先用 edit_file 做精确替换，仅在新文件或整体重写时用 write_file。',
@@ -38,7 +67,7 @@ export function buildSystemPrompt(
     '4. 回复使用与用户一致的语言（默认中文），保持简洁；对代码修改给出简短的改动说明。',
     '5. 任务完成后，主动总结改动点与验证方式；不确定时提出问题而不是猜测。',
     '6. 处理多步骤、较复杂或跨文件的开发任务时，积极使用 todo_write 规划任务清单并在执行中持续更新状态（待办 pending / 进行中 in_progress / 已完成 completed），让进度清晰可见；简单单一问答无需使用。',
-  ];
+  );
   if (options?.webSearch) {
     lines.push(
       '7. 涉及时效性信息（新闻/版本/价格/日期）或你不确定的事实时，可用 web_search 联网查证。',

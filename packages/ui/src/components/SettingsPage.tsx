@@ -970,6 +970,20 @@ export function SettingsPage() {
                   />
                 </label>
               )}
+
+              <label className="field">
+                <span>全局开发偏好与行为规范 (Global Rules)</span>
+                <textarea
+                  className="global-rules-textarea"
+                  rows={4}
+                  placeholder="在此输入跨项目的通用偏好（例如：代码注释与回复一律使用中文；优先使用纯函数；修改已有代码优先用 edit_file 精确替换…）"
+                  value={draft.globalRules ?? ''}
+                  onChange={(e) => patch({ globalRules: e.target.value })}
+                />
+              </label>
+              <p className="hint">
+                全局开发偏好将自动注入系统提示词，与项目专属规范（.easycoderules 等）叠加生效，对所有会话生效且天生抗上下文压缩。
+              </p>
               <p className="hint">
                 上下文超限自动压缩：当会话单次循环的输入 Token 达到模型窗口的指定比例（默认 85%）时，自动折叠前序工具长输出并归档早期历史，保障长任务平滑推进。
               </p>

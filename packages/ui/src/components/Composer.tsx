@@ -1,10 +1,13 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useStore } from '../useStore.js';
 import type { UserItem } from '../store.js';
 import { ProjectSwitcher } from './ProjectSwitcher.js';
 import { ModelEffortPicker } from './ModelEffortPicker.js';
 import { UsageChip } from './UsageChip.js';
 import { ContextChip } from './ContextChip.js';
+import { RulesChip } from './RulesChip.js';
+import { BUILTIN_SLASH_COMMANDS, type SlashCommand } from '../commands/index.js';
+import { downloadFile, getExportFilename, sessionToMarkdown } from '../utils/exportSession.js';
 
 /** 自适应撑高的高度上限（TODOS #20）：约 8 行，超出后出纵向滚动条 */
 const TA_MAX_HEIGHT = 181;
@@ -21,6 +24,7 @@ export function Composer() {
   const barRef = useRef<HTMLDivElement>(null);
   const inputWrapRef = useRef<HTMLDivElement>(null);
   const mentionListRef = useRef<HTMLDivElement>(null);
+  const slashListRef = useRef<HTMLDivElement>(null);
 
   /** @文件 mention 悬浮检索状态 */
   const [mention, setMention] = useState<{
@@ -39,6 +43,21 @@ export function Composer() {
     loading: false,
   });
 
+  /** / 快捷指令悬浮状态（TODOS #32） */
+  const [slash, setSlash] = useState<{
+    open: boolean;
+    query: string;
+    startIndex: number;
+    selectedIndex: number;
+    customCommands: SlashCommand[];
+  }>({
+    open: false,
+    query: '',
+    startIndex: -1,
+    selectedIndex: 0,
+    customCommands: [],
+  });
+
   /** ↑/↓ 浏览历史的状态：会话切换或发送后重置 */
   const historyRef = useRef<{ list: string[]; index: number; draft: string } | null>(null);
 
@@ -52,7 +71,39 @@ export function Composer() {
       files: [],
       loading: false,
     });
+    setSlash((s) => ({
+      ...s,
+      open: false,
+      query: '',
+      startIndex: -1,
+      selectedIndex: 0,
+    }));
   }, [store.activeId]);
+
+  // 加载工作区自定义指令（.easycode/prompts/*.md）
+  useEffect(() => {
+    if (!session?.id || !session.workspaceRoot || !store.client.listCustomPrompts) {
+      setSlash((s) => ({ ...s, customCommands: [] }));
+      return;
+    }
+    store.client
+      .listCustomPrompts(session.id)
+      .then((customs) => {
+        const mapped: SlashCommand[] = (customs || []).map((c) => ({
+          id: c.id,
+          name: c.name,
+          description: c.description,
+          kind: 'prompt',
+          category: 'custom',
+          badge: '[自定义]',
+          template: c.template,
+        }));
+        setSlash((s) => ({ ...s, customCommands: mapped }));
+      })
+      .catch(() => {
+        setSlash((s) => ({ ...s, customCommands: [] }));
+      });
+  }, [session?.id, session?.workspaceRoot]);
 
   /** 自适应撑高（TODOS #20）：按内容即时量高，CSS min/max-height 兜底 2~8 行；发送清空后自动收缩 */
   const resize = () => {
@@ -147,7 +198,74 @@ export function Composer() {
     };
   }, []);
 
-  const submit = () => {
+  const submit = async () => {
+    const raw = text.trim();
+
+    // 检查是否以已知的 /command 开头（支持 Tab 补全后按 Enter 或直接手敲 /command 发送）
+    if (raw.startsWith('/')) {
+      const token = raw.split(/\s+/)[0].toLowerCase();
+      const matched = allCommands.find(
+        (c) => c.name.toLowerCase() === token || c.id.toLowerCase() === token.slice(1),
+      );
+      if (matched) {
+        if (matched.kind === 'action') {
+          setText('');
+          historyRef.current = null;
+          setSlash((s) => ({ ...s, open: false }));
+          if (matched.id === 'clear') {
+            store.showToast('已清空当前输入内容');
+            return;
+          }
+          if (matched.id === 'compact') {
+            if (!session?.id) return;
+            try {
+              await store.client.trimSessionHistory(session.id);
+              store.showToast('已完成上下文压缩与阶段记忆归档');
+            } catch (err) {
+              store.showToast(err instanceof Error ? err.message : '压缩失败', 'err');
+            }
+            return;
+          }
+          if (matched.id === 'fork') {
+            if (!session?.id) return;
+            try {
+              const forked = await store.client.forkSession(session.id);
+              await store.loadSessions();
+              await store.selectSession(forked.id);
+              store.showToast(`已成功分叉出新会话分支: ${forked.title}`);
+            } catch (err) {
+              store.showToast(err instanceof Error ? err.message : '分叉失败', 'err');
+            }
+            return;
+          }
+          if (matched.id === 'export') {
+            if (!session?.id) return;
+            try {
+              const fullData = await store.client.getSession(session.id);
+              const md = sessionToMarkdown(fullData);
+              const filename = getExportFilename(fullData.meta.title || '会话导出', 'md');
+              downloadFile(filename, md, 'text/markdown;charset=utf-8');
+              store.showToast(`已导出会话 Markdown: ${filename}`);
+            } catch (err) {
+              store.showToast(err instanceof Error ? err.message : '导出失败', 'err');
+            }
+            return;
+          }
+        } else if (matched.kind === 'prompt') {
+          // 模板类：提取追加的参数，拼装高密度 Prompt 后发送
+          const extra = raw.slice(token.length).trim();
+          const finalMsg = extra
+            ? `${matched.template}\n\n补充说明与参数：${extra}`
+            : (matched.template ?? raw);
+          setText('');
+          historyRef.current = null;
+          setSlash((s) => ({ ...s, open: false }));
+          store.send(finalMsg);
+          return;
+        }
+      }
+    }
+
     const t = text;
     setText('');
     historyRef.current = null;
@@ -159,7 +277,159 @@ export function Composer() {
       files: [],
       loading: false,
     });
+    setSlash((s) => ({
+      ...s,
+      open: false,
+      query: '',
+      startIndex: -1,
+      selectedIndex: 0,
+    }));
     store.send(t);
+  };
+
+  // 合并自定义指令与内置指令（TODOS #32）
+  const allCommands = useMemo(() => {
+    return [...slash.customCommands, ...BUILTIN_SLASH_COMMANDS];
+  }, [slash.customCommands]);
+
+  // 过滤后的指令列表
+  const filteredCommands = useMemo(() => {
+    const q = slash.query.trim().toLowerCase();
+    if (!q) return allCommands;
+    return allCommands.filter(
+      (c) =>
+        c.name.toLowerCase().includes(q) ||
+        c.id.toLowerCase().includes(q) ||
+        c.description.toLowerCase().includes(q),
+    );
+  }, [allCommands, slash.query]);
+
+  const checkSlash = (val: string, caretPos: number) => {
+    const before = val.slice(0, caretPos);
+    const lastSlash = before.lastIndexOf('/');
+    if (lastSlash === -1) {
+      if (slash.open) setSlash((s) => ({ ...s, open: false }));
+      return;
+    }
+    // 检查 / 前字符：必须是首字符、空格或换行
+    if (lastSlash > 0 && !/[\s\r\n]/.test(val[lastSlash - 1])) {
+      if (slash.open) setSlash((s) => ({ ...s, open: false }));
+      return;
+    }
+    const query = before.slice(lastSlash + 1);
+    // query 不能包含空白或换行
+    if (/[\s\r\n]/.test(query)) {
+      if (slash.open) setSlash((s) => ({ ...s, open: false }));
+      return;
+    }
+    // 互斥：关闭 mention
+    if (mention.open) setMention((m) => ({ ...m, open: false }));
+    setSlash((s) => ({
+      ...s,
+      open: true,
+      query,
+      startIndex: lastSlash,
+      selectedIndex: 0,
+    }));
+  };
+
+  /** 按 Tab 补全：将指令名添加到输入框中，不直接执行动作或发送，留给用户掌控 */
+  const insertCommandName = (cmd: SlashCommand) => {
+    const ta = taRef.current;
+    const start = slash.startIndex;
+    const caret = ta?.selectionStart ?? (start + slash.query.length + 1);
+    const replacement = `${cmd.name} `;
+    const newText = text.slice(0, start) + replacement + text.slice(caret);
+    setText(newText);
+    setSlash((s) => ({
+      ...s,
+      open: false,
+      query: '',
+      startIndex: -1,
+      selectedIndex: 0,
+    }));
+    requestAnimationFrame(() => {
+      if (ta) {
+        ta.focus();
+        const nextPos = start + replacement.length;
+        ta.selectionStart = ta.selectionEnd = nextPos;
+      }
+    });
+  };
+
+  /** 按 Enter 确认：执行动作类指令，或展开提示词模板 */
+  const executeCommand = async (cmd: SlashCommand) => {
+    const ta = taRef.current;
+    const start = slash.startIndex;
+    const caret = ta?.selectionStart ?? (start + slash.query.length + 1);
+
+    setSlash((s) => ({
+      ...s,
+      open: false,
+      query: '',
+      startIndex: -1,
+      selectedIndex: 0,
+    }));
+
+    if (cmd.kind === 'action') {
+      // 动作类指令：从当前输入中剔除 "/query"
+      const newText = text.slice(0, start) + text.slice(caret);
+      setText(newText.trimStart());
+
+      if (cmd.id === 'clear') {
+        setText('');
+        historyRef.current = null;
+        store.showToast('已清空当前输入内容');
+        return;
+      }
+      if (cmd.id === 'compact') {
+        if (!session?.id) return;
+        try {
+          await store.client.trimSessionHistory(session.id);
+          store.showToast('已完成上下文压缩与阶段记忆归档');
+        } catch (err) {
+          store.showToast(err instanceof Error ? err.message : '压缩失败', 'err');
+        }
+        return;
+      }
+      if (cmd.id === 'fork') {
+        if (!session?.id) return;
+        try {
+          const forked = await store.client.forkSession(session.id);
+          await store.loadSessions();
+          await store.selectSession(forked.id);
+          store.showToast(`已成功分叉出新会话分支: ${forked.title}`);
+        } catch (err) {
+          store.showToast(err instanceof Error ? err.message : '分叉失败', 'err');
+        }
+        return;
+      }
+      if (cmd.id === 'export') {
+        if (!session?.id) return;
+        try {
+          const fullData = await store.client.getSession(session.id);
+          const md = sessionToMarkdown(fullData);
+          const filename = getExportFilename(fullData.meta.title || '会话导出', 'md');
+          downloadFile(filename, md, 'text/markdown;charset=utf-8');
+          store.showToast(`已导出会话 Markdown: ${filename}`);
+        } catch (err) {
+          store.showToast(err instanceof Error ? err.message : '导出失败', 'err');
+        }
+        return;
+      }
+    } else {
+      // Prompt 模板类：替换输入框中的 /query 并后置空格，聚焦光标在末尾
+      const templateText = (cmd.template ?? '') + ' ';
+      const newText = text.slice(0, start) + templateText + text.slice(caret);
+      setText(newText);
+      requestAnimationFrame(() => {
+        if (ta) {
+          ta.focus();
+          const nextPos = start + templateText.length;
+          ta.selectionStart = ta.selectionEnd = nextPos;
+        }
+      });
+    }
   };
 
   const checkMention = (val: string, caretPos: number) => {
@@ -180,6 +450,8 @@ export function Composer() {
       if (mention.open) setMention((m) => ({ ...m, open: false }));
       return;
     }
+    // 互斥：关闭 slash
+    if (slash.open) setSlash((s) => ({ ...s, open: false }));
     setMention((m) => ({
       ...m,
       open: true,
@@ -234,22 +506,105 @@ export function Composer() {
   useEffect(() => {
     if (!mention.open || mention.files.length === 0) return;
     const listEl = mentionListRef.current;
-    const itemEl = listEl?.querySelector('.mention-item.selected') as HTMLElement | null;
-    if (listEl && itemEl) {
-      const listTop = listEl.scrollTop;
-      const listBottom = listTop + listEl.clientHeight;
-      const itemTop = itemEl.offsetTop;
-      const itemBottom = itemTop + itemEl.offsetHeight;
-      if (itemTop < listTop) {
-        listEl.scrollTop = itemTop;
-      } else if (itemBottom > listBottom) {
-        listEl.scrollTop = itemBottom - listEl.clientHeight;
+    if (!listEl) return;
+    const items = listEl.querySelectorAll<HTMLElement>('.mention-item');
+    const itemEl = items[mention.selectedIndex];
+    if (itemEl) {
+      if (typeof itemEl.scrollIntoView === 'function') {
+        itemEl.scrollIntoView({ block: 'nearest' });
+      } else {
+        const listTop = listEl.scrollTop;
+        const listBottom = listTop + listEl.clientHeight;
+        const itemTop = itemEl.offsetTop;
+        const itemBottom = itemTop + itemEl.offsetHeight;
+        if (itemTop < listTop) {
+          listEl.scrollTop = itemTop;
+        } else if (itemBottom > listBottom) {
+          listEl.scrollTop = itemBottom - listEl.clientHeight;
+        }
       }
     }
   }, [mention.selectedIndex, mention.open]);
 
+  // 键盘移动指令选中项时保持滚动条在视口内 (TODOS #32)
+  useEffect(() => {
+    if (!slash.open || filteredCommands.length === 0) return;
+    const listEl = slashListRef.current;
+    if (!listEl) return;
+    const items = listEl.querySelectorAll<HTMLElement>('.command-item');
+    const itemEl = items[slash.selectedIndex];
+    if (itemEl) {
+      if (typeof itemEl.scrollIntoView === 'function') {
+        itemEl.scrollIntoView({ block: 'nearest' });
+      } else {
+        const listTop = listEl.scrollTop;
+        const listBottom = listTop + listEl.clientHeight;
+        const itemTop = itemEl.offsetTop;
+        const itemBottom = itemTop + itemEl.offsetHeight;
+        if (itemTop < listTop) {
+          listEl.scrollTop = itemTop;
+        } else if (itemBottom > listBottom) {
+          listEl.scrollTop = itemBottom - listEl.clientHeight;
+        }
+      }
+    }
+  }, [slash.selectedIndex, slash.open, filteredCommands.length]);
+
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    // 优先响应 @文件 补全浮层的键盘导航
+    // 优先响应 / 快捷指令浮层的键盘导航 (TODOS #32)
+    if (slash.open) {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        setSlash((s) => ({ ...s, open: false }));
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        e.stopPropagation();
+        if (filteredCommands.length > 0) {
+          setSlash((s) => ({
+            ...s,
+            selectedIndex:
+              (s.selectedIndex - 1 + filteredCommands.length) % filteredCommands.length,
+          }));
+        }
+        return;
+      }
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        e.stopPropagation();
+        if (filteredCommands.length > 0) {
+          setSlash((s) => ({
+            ...s,
+            selectedIndex: (s.selectedIndex + 1) % filteredCommands.length,
+          }));
+        }
+        return;
+      }
+      // Tab 仅补全指令名称至输入框，不直接执行动作
+      if (e.key === 'Tab' && !e.shiftKey && !e.nativeEvent.isComposing) {
+        const cmd = filteredCommands[slash.selectedIndex];
+        if (cmd) {
+          e.preventDefault();
+          e.stopPropagation();
+          insertCommandName(cmd);
+          return;
+        }
+      }
+      // Enter 确认触发：执行动作或展开模板
+      if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+        const cmd = filteredCommands[slash.selectedIndex];
+        if (cmd) {
+          e.preventDefault();
+          e.stopPropagation();
+          executeCommand(cmd);
+          return;
+        }
+      }
+    }
+
+    // 响应 @文件 补全浮层的键盘导航
     if (mention.open) {
       if (e.key === 'Escape') {
         e.preventDefault();
@@ -386,6 +741,7 @@ export function Composer() {
         </div>
         {session && <ProjectSwitcher />}
         {session && <ModelEffortPicker />}
+        {session && <RulesChip compact={compact} />}
         {session && <UsageChip compact={compact} />}
         {session && <ContextChip compact={compact} />}
         <span className="spacer" />
@@ -399,7 +755,7 @@ export function Composer() {
         onDrop={onDrop}
       >
         {mention.open && (
-          <div className="mention-pop" ref={mentionListRef}>
+          <div className="mention-pop">
             <div className="mention-head">
               <span className="mention-tag">[ @ 文件引用 ]</span>
               <span className="mention-hint">
@@ -419,7 +775,7 @@ export function Composer() {
             ) : mention.files.length === 0 && !mention.loading ? (
               <div className="mention-empty">未检索到与 "{mention.query}" 匹配的文件</div>
             ) : (
-              <div className="mention-list">
+              <div className="mention-list" ref={mentionListRef}>
                 {mention.files.map((file, idx) => {
                   const isSelected = idx === mention.selectedIndex;
                   const lastSlash = file.lastIndexOf('/');
@@ -445,6 +801,43 @@ export function Composer() {
             )}
           </div>
         )}
+        {slash.open && (
+          <div className="command-pop">
+            <div className="command-head">
+              <span className="command-tag">[ / 快捷指令 ]</span>
+              <span className="command-hint">
+                {filteredCommands.length === 0
+                  ? '无匹配指令'
+                  : `↑↓ 移动 · Tab 补全 · Enter 执行 (${filteredCommands.length})`}
+              </span>
+            </div>
+            {filteredCommands.length === 0 ? (
+              <div className="command-empty">未匹配到与 "/{slash.query}" 对应的快捷指令</div>
+            ) : (
+              <div className="command-list" ref={slashListRef}>
+                {filteredCommands.map((cmd, idx) => {
+                  const isSelected = idx === slash.selectedIndex;
+                  return (
+                    <div
+                      key={cmd.id}
+                      className={`command-item ${isSelected ? 'selected' : ''}`}
+                      onMouseEnter={() => setSlash((s) => ({ ...s, selectedIndex: idx }))}
+                      onMouseDown={(e) => {
+                        e.preventDefault();
+                        executeCommand(cmd);
+                      }}
+                    >
+                      <span className="command-cursor">{isSelected ? '❯' : ' '}</span>
+                      <span className="command-name">{cmd.name}</span>
+                      <span className="command-desc">{cmd.description}</span>
+                      <span className={`command-badge ${cmd.category}`}>{cmd.badge}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
         <textarea
           ref={taRef}
           value={text}
@@ -453,24 +846,29 @@ export function Composer() {
             const caret = e.target.selectionStart ?? nextVal.length;
             setText(nextVal);
             checkMention(nextVal, caret);
+            checkSlash(nextVal, caret);
           }}
           onClick={(e) => {
             const ta = e.currentTarget;
-            checkMention(ta.value, ta.selectionStart ?? ta.value.length);
+            const caret = ta.selectionStart ?? ta.value.length;
+            checkMention(ta.value, caret);
+            checkSlash(ta.value, caret);
           }}
           onKeyUp={(e) => {
             // 忽略已由 onKeyDown 劫持的方向键和回车
             if (['ArrowUp', 'ArrowDown', 'Enter', 'Tab', 'Escape'].includes(e.key)) return;
             const ta = e.currentTarget;
-            checkMention(ta.value, ta.selectionStart ?? ta.value.length);
+            const caret = ta.selectionStart ?? ta.value.length;
+            checkMention(ta.value, caret);
+            checkSlash(ta.value, caret);
           }}
           onKeyDown={onKeyDown}
           placeholder={
             !session
               ? '先在左侧新建一个会话…'
               : session.workspaceRoot
-                ? `输入 @ 快速引用文件，Enter 发送，Shift+Enter 换行`
-                : '直接对话即可；要操作文件请先点击上方「＋ 绑定项目」'
+                ? `输入 / 快捷指令，@ 引用文件，Enter 发送，Shift+Enter 换行`
+                : '直接对话即可；输入 / 快捷指令；操作文件请先点击上方「＋ 绑定项目」'
           }
           disabled={!session || store.running}
           rows={2}

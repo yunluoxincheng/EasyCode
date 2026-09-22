@@ -1,5 +1,6 @@
 import type { AgentEvent, SessionData, SessionMeta, ApprovalMode } from '@easycode/core';
 import type { ModelTestResult, ProviderModelInfo, Settings, ShellInfo } from './settings.js';
+import type { ProjectRuleInfo, CustomPromptInfo } from './server.js';
 
 /**
  * UI 与引擎之间的传输抽象：
@@ -59,6 +60,12 @@ export interface AgentClient {
   detectShells?(): Promise<ShellInfo[]>;
   /** 列出工作区文件列表（支持 query 模糊过滤，供 @文件 快捷引用） */
   listWorkspaceFiles(id: string, query?: string): Promise<string[]>;
+  /** 获取当前会话工作区项目规范（TODOS #33） */
+  getProjectRules(id: string): Promise<ProjectRuleInfo | null>;
+  /** 初始化当前会话工作区项目规范（TODOS #33） */
+  initProjectRules(id: string): Promise<ProjectRuleInfo>;
+  /** 列出当前会话工作区自定义 Prompt 指令（TODOS #32） */
+  listCustomPrompts?(id: string): Promise<CustomPromptInfo[]>;
   pickWorkspace(): Promise<string | null>;
   onEvent(listener: (payload: { sessionId: string; event: AgentEvent }) => void): () => void;
 }

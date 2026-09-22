@@ -34,6 +34,21 @@ export interface CreateSessionOptions {
   title?: string;
 }
 
+/** 工作区项目规范文件信息（TODOS #33） */
+export interface ProjectRuleInfo {
+  path: string;
+  content: string;
+  exists: boolean;
+}
+
+/** 自定义 Prompt 指令信息（TODOS #32） */
+export interface CustomPromptInfo {
+  id: string;
+  name: string;
+  description: string;
+  template: string;
+}
+
 interface SessionRuntime {
   data: SessionData;
   approval: ApprovalManager;
@@ -365,8 +380,16 @@ export class AgentServer {
           : undefined,
       );
       // 对话中系统消息：模型配置关闭时把系统提示词并入首条用户消息
+      // 提取工作区规则与全局偏好并注入系统提示词（天然抗上下文压缩，TODOS #33）
+      const projectRules = rt.data.meta.workspaceRoot
+        ? await this.getProjectRules(rt.data.meta.workspaceRoot)
+        : null;
       const systemPrompt = buildSystemPrompt(this.host, rt.data.meta.workspaceRoot, {
         webSearch: searchOn,
+        rules: {
+          projectRules,
+          globalRules: this.settings.globalRules,
+        },
       });
       wireMessages =
         caps.includes('system') || !systemPrompt
@@ -823,6 +846,176 @@ export class AgentServer {
 
     scored.sort((a, b) => b.score - a.score || a.path.length - b.path.length);
     return scored.slice(0, limit).map((s) => s.path);
+  }
+
+  /* -------------------- 项目规则系统 (TODOS #33) -------------------- */
+
+  private projectRulesCache = new Map<string, { rule: ProjectRuleInfo | null; expiresAt: number }>();
+
+  /**
+   * 探测并读取工作区项目规范文件
+   * 优先级：.easycoderules > AGENTS.md > CLAUDE.md > .cursorrules > .easycode/rules.md
+   */
+  async getProjectRules(workspaceRoot: string): Promise<ProjectRuleInfo | null> {
+    const root = workspaceRoot?.trim();
+    if (!root) return null;
+
+    const now = Date.now();
+    const cached = this.projectRulesCache.get(root);
+    if (cached && cached.expiresAt > now) {
+      return cached.rule;
+    }
+
+    const candidates = [
+      '.easycoderules',
+      'AGENTS.md',
+      'CLAUDE.md',
+      '.cursorrules',
+      this.host.paths.join('.easycode', 'rules.md'),
+    ];
+
+    for (const rel of candidates) {
+      const fullPath = this.host.paths.join(root, rel);
+      try {
+        const stat = await this.host.fs.stat(fullPath);
+        if (stat && !stat.isDirectory) {
+          const content = await this.host.fs.readFile(fullPath);
+          if (content.trim()) {
+            const rule: ProjectRuleInfo = {
+              path: rel.replace(/\\/g, '/'),
+              content,
+              exists: true,
+            };
+            this.projectRulesCache.set(root, { rule, expiresAt: now + 3000 });
+            return rule;
+          }
+        }
+      } catch {
+        // 忽略单个文件的读取错误，继续向下探测
+      }
+    }
+
+    this.projectRulesCache.set(root, { rule: null, expiresAt: now + 3000 });
+    return null;
+  }
+
+  /**
+   * 初始化项目规则文件（默认生成 .easycoderules 骨架）
+   */
+  async initProjectRules(workspaceRoot: string): Promise<ProjectRuleInfo> {
+    const root = workspaceRoot?.trim();
+    if (!root) throw new Error('当前未绑定工作区，无法初始化项目规则');
+
+    const existing = await this.getProjectRules(root);
+    if (existing) return existing;
+
+    const defaultTemplate = `# 项目行为规范 (.easycoderules)
+
+## 1. 技术栈与架构约定
+- 保持架构清晰，遵循项目现有的目录规范与分层设计。
+- 优先复用现存公共模块与依赖，严禁随意引入冗余第三方库。
+
+## 2. 编码与修改纪律
+- 先读后改：修改代码前必须完整阅读目标文件及周边引用。
+- 精确替换：优先使用 edit_file 进行局部替换，保持原代码风格与注释习惯。
+- 简洁严谨：代码注释与回复一律使用中文，解释清晰、避免废话。
+
+## 3. 验证与测试规范
+- 修改核心逻辑后必须运行测试脚本或类型检查，确保单测与构建全绿。
+`;
+
+    const targetPath = this.host.paths.join(root, '.easycoderules');
+    await this.host.fs.writeFile(targetPath, defaultTemplate);
+    this.projectRulesCache.delete(root);
+    return {
+      path: '.easycoderules',
+      content: defaultTemplate,
+      exists: true,
+    };
+  }
+
+  /** 会话级获取项目规范 */
+  async getSessionProjectRules(sessionId: string): Promise<ProjectRuleInfo | null> {
+    const session = this.sessions.get(sessionId);
+    const root = session?.data.meta.workspaceRoot;
+    if (!root) return null;
+    return this.getProjectRules(root);
+  }
+
+  /** 会话级初始化项目规范 */
+  async initSessionProjectRules(sessionId: string): Promise<ProjectRuleInfo> {
+    const session = this.sessions.get(sessionId);
+    const root = session?.data.meta.workspaceRoot;
+    if (!root) throw new Error('当前会话未绑定工作区，无法初始化项目规范');
+    return this.initProjectRules(root);
+  }
+
+  /* -------------------- 自定义 Prompt 扩展 (TODOS #32) -------------------- */
+
+  private customPromptsCache = new Map<string, { prompts: CustomPromptInfo[]; expiresAt: number }>();
+
+  /**
+   * 读取工作区 .easycode/prompts/*.md 下的自定义指令模板
+   */
+  async listCustomPrompts(workspaceRoot: string): Promise<CustomPromptInfo[]> {
+    const root = workspaceRoot?.trim();
+    if (!root) return [];
+
+    const now = Date.now();
+    const cached = this.customPromptsCache.get(root);
+    if (cached && cached.expiresAt > now) {
+      return cached.prompts;
+    }
+
+    const promptsDir = this.host.paths.join(root, '.easycode', 'prompts');
+    try {
+      const stat = await this.host.fs.stat(promptsDir);
+      if (!stat || !stat.isDirectory) {
+        this.customPromptsCache.set(root, { prompts: [], expiresAt: now + 3000 });
+        return [];
+      }
+      const entries = await this.host.fs.readdir(promptsDir);
+      const mdFiles = entries
+        .filter((e) => !e.isDirectory && e.name.endsWith('.md'))
+        .map((e) => e.name)
+        .sort();
+
+      const list: CustomPromptInfo[] = [];
+      for (const fileName of mdFiles) {
+        const fullPath = this.host.paths.join(promptsDir, fileName);
+        try {
+          const content = await this.host.fs.readFile(fullPath);
+          const id = fileName.slice(0, -3);
+          const lines = content.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+          let desc = '自定义指令';
+          if (lines.length > 0) {
+            const first = lines[0].replace(/^#+\s*/, '').trim();
+            desc = first.slice(0, 32);
+          }
+          list.push({
+            id,
+            name: `/${id}`,
+            description: desc,
+            template: content.trim(),
+          });
+        } catch {
+          // 忽略单个文件读取异常
+        }
+      }
+      this.customPromptsCache.set(root, { prompts: list, expiresAt: now + 3000 });
+      return list;
+    } catch {
+      this.customPromptsCache.set(root, { prompts: [], expiresAt: now + 3000 });
+      return [];
+    }
+  }
+
+  /** 会话级列出自定义指令 */
+  async listSessionCustomPrompts(sessionId: string): Promise<CustomPromptInfo[]> {
+    const session = this.sessions.get(sessionId);
+    const root = session?.data.meta.workspaceRoot;
+    if (!root) return [];
+    return this.listCustomPrompts(root);
   }
 }
 

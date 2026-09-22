@@ -153,6 +153,9 @@ const handlers: Record<string, Handler> = {
   'test-provider-model': (args) => server.testProviderModel(args.id, args.model),
   'test-web-search': () => server.testWebSearch(),
   'list-workspace-files': (args) => server.listWorkspaceFiles(args.id as string, args.query as string | undefined),
+  'get-project-rules': (args) => server.getSessionProjectRules(args.id as string),
+  'init-project-rules': (args) => server.initSessionProjectRules(args.id as string),
+  'list-custom-prompts': (args) => server.listSessionCustomPrompts(args.id as string),
   'pick-workspace': async () => {
     if (!mainWindow) return null;
     const result = await dialog.showOpenDialog(mainWindow, {

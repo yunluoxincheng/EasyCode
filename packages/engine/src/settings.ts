@@ -115,6 +115,8 @@ export interface Settings {
   contextCompaction?: ContextCompactionConfig;
   /** 关闭窗口时最小化到系统托盘常驻后台（TODOS #5）；默认开 */
   closeToTray?: boolean;
+  /** 全局通用开发规范与偏好（TODOS #33） */
+  globalRules?: string;
 }
 
 export interface ContextCompactionConfig {

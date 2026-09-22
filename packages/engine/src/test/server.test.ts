@@ -236,3 +236,80 @@ test('AgentServer: 多会话并发执行互不阻塞', async () => {
   const s2Done = receivedEvents.some((e) => e.sessionId === s2.id && e.type === 'done');
   assert.ok(s1Done && s2Done, '两会话均成功收到 done 事件');
 });
+
+test('AgentServer & buildSystemPrompt: 项目规范自动探测、初始化与提示词注入 (TODOS #33)', async () => {
+  const host = new MemoryHost({
+    '/project1/.easycoderules': '# Project 1 Rules\n- 必须使用 pnpm\n- 严禁使用全局变量',
+    '/project2/AGENTS.md': '# Project 2 Directives\n- 优先函数式编程',
+    '/project3/README.md': '# Project 3 without rules',
+  });
+
+  const server = new AgentServer(host);
+
+  // 1. 探测优先匹配 .easycoderules
+  const r1 = await server.getProjectRules('/project1');
+  assert.ok(r1);
+  assert.equal(r1.path, '.easycoderules');
+  assert.ok(r1.content.includes('必须使用 pnpm'));
+
+  // 2. 探测兼容匹配 AGENTS.md
+  const r2 = await server.getProjectRules('/project2');
+  assert.ok(r2);
+  assert.equal(r2.path, 'AGENTS.md');
+  assert.ok(r2.content.includes('优先函数式编程'));
+
+  // 3. 无规则项目返回 null
+  const r3 = await server.getProjectRules('/project3');
+  assert.equal(r3, null);
+
+  // 4. 一键初始化生成 .easycoderules
+  const initRes = await server.initProjectRules('/project3');
+  assert.ok(initRes);
+  assert.equal(initRes.path, '.easycoderules');
+  assert.ok(initRes.content.includes('项目行为规范'));
+
+  // 再次探测即命中新初始化的规则
+  const r3After = await server.getProjectRules('/project3');
+  assert.ok(r3After);
+  assert.equal(r3After.path, '.easycoderules');
+
+  // 5. 验证 buildSystemPrompt 挂载规范
+  const { buildSystemPrompt } = await import('../prompts.js');
+  const prompt = buildSystemPrompt(host, '/project1', {
+    rules: {
+      projectRules: r1,
+      globalRules: '回复必须简洁',
+    },
+  });
+  assert.ok(prompt.includes('# 项目规范 (.easycoderules)'), '提示词包含项目规范章节');
+  assert.ok(prompt.includes('必须使用 pnpm'), '提示词包含规范内容');
+  assert.ok(prompt.includes('# 全局开发偏好'), '提示词包含全局偏好章节');
+  assert.ok(prompt.includes('回复必须简洁'), '提示词包含全局偏好内容');
+});
+
+test('AgentServer: 工作区自定义指令 .easycode/prompts/*.md 扫描 (TODOS #32)', async () => {
+  const host = new MemoryHost({
+    '/ws/.easycode/prompts/deploy.md': '# 部署到生产环境\n请检查 build 产物并执行部署脚本。',
+    '/ws/.easycode/prompts/audit.md': '代码合规性与依赖安全审计\n检查 package.json 依赖安全漏洞。',
+  });
+
+  const server = new AgentServer(host);
+
+  const prompts = await server.listCustomPrompts('/ws');
+  assert.equal(prompts.length, 2);
+
+  const deploy = prompts.find((p) => p.id === 'deploy');
+  assert.ok(deploy);
+  assert.equal(deploy.name, '/deploy');
+  assert.equal(deploy.description, '部署到生产环境');
+  assert.ok(deploy.template.includes('执行部署脚本'));
+
+  const audit = prompts.find((p) => p.id === 'audit');
+  assert.ok(audit);
+  assert.equal(audit.name, '/audit');
+  assert.equal(audit.description, '代码合规性与依赖安全审计');
+
+  // 无 prompts 目录时返回空数组
+  const empty = await server.listCustomPrompts('/nonexistent');
+  assert.deepEqual(empty, []);
+});

@@ -4,6 +4,138 @@
 
 ## 待办需求
 
+### 32. Composer `/` 斜杠快捷指令系统（Slash Commands & Custom Prompts）
+
+**状态**：✅ 已完成（2026-09-22）——Composer `/` 触发监听与光标探测 + 极客风 `.command-pop` 指令面板 + 动作类执行（`/compact` 压缩上下文、`/fork` 分叉会话、`/export` 导出会话、`/clear` 清空草稿）与模板类补全（`/commit` 规范提交、`/review` 深度审查、`/test` 单元测试、`/fix` 缺陷修复）+ 工作区 `.easycode/prompts/*.md` 自定义指令自动合流 + 纯键盘驱动（↑↓ 导航、Tab/Enter 补全执行、Esc 退出、输入法合成防误触）
+
+**背景**：
+在日常高频开发场景中，用户向 Coding Agent 下发意图往往包含大量模式化操作，例如：
+1. **代码与安全审查**：针对当前变动或指定文件进行质量、边界与安全漏洞审查（`/review`）；
+2. **生成规范提交**：分析工作区当前改动并生成符合 Conventional Commits 规范的 Git 提交信息（`/commit`）；
+3. **编写与验证测试**：为当前变更或指定代码模块编写/补充单元测试并执行验证（`/test`）；
+4. **会话与上下文管理**：主动触发阶段记忆归档与早期输出折叠（`/compact`，复用 #31 核心）、从当前节点分叉新会话对比方案（`/fork`，复用 #27 核心）、一键导出离线报告（`/export`，复用 #26 核心）。
+
+目前用户只能每次手打大段重复的自然语言 Prompt，不仅耗时繁琐，且每次表述不一致容易遗漏关键约束。
+此外，当前 Composer 已经成功实现了成熟的 `@文件` 快捷引用补全体系（#25），具备纯键盘驱动（↑↓ 选条目、Tab/Enter 补全、Esc 退出、输入法合成防误触）与暗黑终端风格弹窗。斜杠指令可深度复用这一套交互模式，形成统一的键盘流操作体验。
+
+**设计方案**：
+1. **输入触发与极客风指令面板 (`.command-pop`)**：
+   - 当用户在 Composer 输入框处于空输入、行首或空格后键入 `/` 字符时自动触发；
+   - 在输入框上方呼出终端极客风格弹窗，面板标题为 `[ / 快捷指令 ]`；
+   - 条目布局：指令标识（绿色高亮，如 `/commit`）、功能说明（浅色辅助文本）、右侧类型徽标（如 `[Git]` / `[Action]` / `[Prompt]`）；
+   - 智能模糊搜索打分：输入 `/com` 自动优先匹配高亮 `/commit`；
+   - 键盘纯驱动交互：`↑` / `↓` 移动光标并自动将条目滚动入可视区，`Tab` / `Enter` 选中确认，`Esc` 随时退出，输入法合成中（`isComposing`）防误触。
+2. **指令类型与执行语义**：
+   - **立即执行类动作（Immediate Action，零 Token 消耗）**：
+     - `/compact`：就地触发当前会话的阶梯式上下文压缩归档；
+     - `/fork`：呼出会话分叉能力，自动从当前节点派生新会话；
+     - `/export`：快捷打开导出会话菜单（Markdown / 离线 HTML）；
+     - `/clear`：快速清空任务清单或重置输入草稿；
+   - **参数化提示词模板（Prompt Template）**：
+     - 指令选中后自动在输入框填入预设的高密度结构化提示词前缀，并允许用户在其后追加个性化参数或使用 `@文件` 结合：
+       - `/commit [补充说明]`：自动调用 `git status` 与 `git diff`，按标准约定输出优雅的提交信息建议；
+       - `/review [@文件]`：引导模型聚焦于架构合理性、边界条件、异常处理与代码规范进行分级审查；
+       - `/test [@文件]`：自动分析被测代码，编写覆盖边界场景的测试套件并自动运行；
+       - `/fix [报错日志]`：结构化排查异常与堆栈信息并给出修复方案；
+3. **可扩展自定义指令（Custom Prompts）**：
+   - 支持项目级自定义指令：自动扫描工作区根目录 `.easycode/prompts/*.md`，文件名即指令名（如 `deploy.md` 对应 `/deploy`），文件正文即 Prompt 模板；
+   - 支持全局设置级自定义指令：设置页新增快捷指令管理面板；
+   - 自定义指令以高优先级合流展示，并标注 `[自定义]` 徽标。
+
+**涉及改动**：
+- `packages/ui/src/components/Composer.tsx`：指令前缀感知、光标定位与 `.command-pop` 面板渲染；
+- `packages/ui/src/commands/`：新建开箱即用内置指令集合与解析器；
+- `packages/engine/src/prompts.ts`：标准化各指令的提示词模板；
+- `packages/ui/src/styles.css`：极客暗黑风 `.command-pop` 样式与键盘选中高亮。
+
+---
+
+### 33. 项目级上下文与行为规范系统（Rules System: `.easycoderules` / `AGENTS.md`）
+
+**状态**：✅ 已完成（2026-09-22）——Engine 规则多层级探测（`.easycoderules` > `AGENTS.md` > `CLAUDE.md` > `.cursorrules` > `.easycode/rules.md`）+ 系统提示词 `## 项目规范` 挂载与天然抗上下文压缩 + Composer `<RulesChip>` 状态感知胶囊与预览/快捷打开/一键初始化模板 + 设置页全局开发偏好（Global Rules）配置
+
+**背景**：
+在真实的工程实践中，每个项目都有独特的架构约束与工程纪律，例如：
+- 技术栈选型：“本项目强制使用 pnpm，严禁使用 npm/yarn；状态管理采用 Zustand，禁止引入 Redux”；
+- 架构分层约定：“UI 组件必须零外部 UI 框架、样式全部内联于 styles.css；Core 严禁依赖任何 Node.js 原生 API”；
+- 质量与提交规范：“修改核心逻辑后必须运行 pnpm test 确保单测全绿；提交前必须更新 CHANGELOG.md”。
+
+目前用户每次开启新会话都必须手动重复输入这些规矩，或者在多轮对话后模型因上下文推移而“遗忘”隐式规则，导致生成破坏规范的代码，极大地增加了人工审查与返工成本。
+
+**设计方案**：
+1. **规范文件自动探测与层级加载**：
+   - **项目级规则（优先）**：会话绑定工作区后，Core/Engine 自动扫描工作区根目录，支持主流约定规范：
+     - 首选专有规则文件：`.easycoderules`
+     - 兼容通用规范文件：`AGENTS.md`、`CLAUDE.md`、`.cursorrules`
+     - 目录型规范：`.easycode/rules.md`
+   - **全局用户偏好（兜底）**：在设置页「常规」新增「全局开发偏好（Global Rules）」配置，适用于跨所有项目的通用偏好（如“代码注释与回复一律使用中文”、“优先使用纯函数与不可变数据”等）；
+   - 内存引入带 mtime 的短时缓存，文件发生变化时即时自动重载。
+2. **系统提示词智能挂载与抗压缩根基保障**：
+   - 在 `prompts.ts` 的 `buildSystemPrompt` 中增设独立的高优先级章节：`## Project Specific Rules`；
+   - 规则注入权重约束明确：`系统安全与工作纪律 > 项目专用规范 (.easycoderules) > 全局用户偏好 > 当前回合指令`；
+   - 深度配合 #31 上下文压缩机制：项目规范和系统提示词属于不可裁剪的“根基上下文”，在会话进行历史归档与多轮交互时永远完整保全，杜绝长会话规则漂移。
+3. **UI 状态感知与一键模板初始化**：
+   - **规则感知胶囊（Rules Chip）**：在 Composer 顶部工具栏展示当前规则生效状态：
+     - 检测到项目规则：`[ 📋 规则: .easycoderules ]`（亮绿激活高亮）；
+     - 未配置项目规则但有全局偏好：`[ 📋 规则: 全局 ]`；
+     - 未检测到任何规则：`[ ＋ 规则 ]`（弱化提示）；
+   - **快捷交互卡片**：
+     - 点击胶囊浮出规则预览卡片，显示规则摘要行数与字数；
+     - 提供「✎ 在编辑器中打开」直接调用 `openPath` 快速编辑；
+     - 若当前项目尚未配置，提供「＋ 初始化项目规则」按钮，一键在工作区生成涵盖技术栈、编码准则、测试流程的标准 `.easycoderules` 骨架文件。
+
+**涉及改动**：
+- `packages/core/src/prompts.ts`：扩展 `buildSystemPrompt` 接收 `projectRules` / `globalRules` 并格式化注入；
+- `packages/engine/src/server.ts`：在会话加载与任务执行前检测并读取工作区规则文件；
+- `packages/engine/src/settings.ts`：Settings 扩展 `globalRules?: string`；
+- `packages/ui/src/components/Composer.tsx` / `RulesChip.tsx`：规则状态徽标与预览浮层；
+- `packages/ui/src/components/SettingsPage.tsx`：全局规则编辑配置项。
+
+---
+
+### 34. 工作区 Git 状态感知与改动检视面板（Git Status & Diff Inspector）
+
+**状态**：📋 待排期（需求与方案已敲定）
+
+**背景**：
+Coding Agent 在执行较复杂任务时，经常跨越多个文件进行批量编辑（`edit_file`）、新建（`write_file`）或命令执行。目前用户在审查全局改动时存在明显痛点：
+1. **信息离散**：改动分散在时间线里各个回合的不同工具卡片中，难以一眼纵览当前工作区总共变动了哪些文件；
+2. **缺乏全貌**：无法直观获知当前工作区是否干净、处于哪个分支、各文件增删行数总览（`-N +M`）、是否有意外修改或未跟踪文件；
+3. **验证成本高**：用户为了看 `git status` 常常需要手动敲命令让模型执行 `run_command("git status")`，不仅白白消耗 Token，还会触发终端审批弹窗。
+
+EasyCode 现已具备非常成熟的红绿行号 `ToolDiff` 视窗（#19）与行级差异算法，完全可以将此能力升维为全局工作区级的 Git 检视中心。
+
+**设计方案**：
+1. **标题栏 / Composer 顶部 Git 状态胶囊**：
+   - 绑定工作区且为 Git 仓库时，实时显示 Git 状态胶囊：
+     `[ ⑂ master* · 3 改动 (+58 -12) ]`（工作区干净时显示 `[ ⑂ master · clean ]`）；
+   - 在关键生命周期（文件工具执行完成、命令执行完成、窗口恢复聚焦）触发增量刷新；
+2. **极客暗黑风 Git 改动检视面板 (`<GitInspectorModal>`)**：
+   - 点击 Git 胶囊或通过右键菜单「📂 审查工作区改动」一键唤出；
+   - **左侧改动文件导航**：
+     - 分组呈现：暂存区改动（Staged）、工作区修改（Unstaged）、新创建未跟踪文件（Untracked）；
+     - 每个文件显示状态徽标（`M` 修改、`A` 新增、`D` 删除、`?` 未跟踪）以及增删行数（`-N +M`）；
+     - 提供文件快速筛选框；
+   - **右侧全尺寸结构化 Diff 视窗**：
+     - 复用 `ToolDiff` 视觉规范：双侧行号、精准红底删除与绿底新增着色、变更统计；
+     - 支持一键复制整个文件的 Diff Patch；
+   - **底部快捷操作栏**：
+     - `[ ⧉ 暂存全部 (git add .) ]`；
+     - `[ ↶ 放弃修改 (git checkout) ]`（带防误触安全确认）；
+     - `[ ⌨ 填入 Composer /commit ]`：一键将当前审查改动作为意图填入输入框，与 #32 斜杠指令无缝闭环！
+3. **Core 扩展只读无审批 Git 工具支持**：
+   - 在 Core 工具注册表新增只读工具 `git_status` 与 `git_diff`（零审批、免 `run_command` 弹窗与噪音）；
+   - 模型需要分析整体代码改动或准备提交信息时可自主调用，输出规范整洁。
+
+**涉及改动**：
+- `packages/core/src/tools/git.ts`：实现只读 Git 状态与差异检测工具；
+- `packages/engine/src/server.ts`：向 Client 暴露 `getGitStatus` 与 `getGitDiff` API；
+- `packages/ui/src/components/GitInspectorModal.tsx`：全局 Git 检视弹窗；
+- `packages/ui/src/components/TitleBar.tsx` / `Composer.tsx`：Git 状态胶囊挂载与点击事件；
+- `packages/ui/src/styles.css`：Git 检视面板与分支指示器样式。
+
+---
+
 ### 25. Composer `@文件` 快捷引用与模糊补全（Context Mention）
 
 **状态**：✅ 已完成（2026-09-22）——Core 导出快速遍历器 `listFilesRecursively` + Engine 短时缓存与文件名/路径多段模糊匹配 + Composer 纯键盘驱动（↑↓ 选项目、Tab/Enter 补全、Esc 退出、输入法合成防误触）+ 终端极客风文件建议面板 + 未绑定友好提示

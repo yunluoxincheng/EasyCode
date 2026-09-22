@@ -6,7 +6,7 @@ import {
   type SessionMeta,
 } from '@easycode/core';
 import { AgentServer, type AgentClient, type ProviderEntry, type Settings } from '@easycode/engine';
-import type { ModelTestResult, ProviderModelInfo, ShellInfo } from '@easycode/engine';
+import type { ModelTestResult, ProviderModelInfo, ShellInfo, ProjectRuleInfo, CustomPromptInfo } from '@easycode/engine';
 
 export type { AgentClient };
 
@@ -113,6 +113,15 @@ export class IpcAgentClient implements AgentClient {
   listWorkspaceFiles(id: string, query?: string) {
     return this.invoke<string[]>('list-workspace-files', { id, query });
   }
+  getProjectRules(id: string) {
+    return this.invoke<ProjectRuleInfo | null>('get-project-rules', { id });
+  }
+  initProjectRules(id: string) {
+    return this.invoke<ProjectRuleInfo>('init-project-rules', { id });
+  }
+  listCustomPrompts(id: string) {
+    return this.invoke<CustomPromptInfo[]>('list-custom-prompts', { id });
+  }
   onEvent(listener: (payload: { sessionId: string; event: AgentEvent }) => void) {
     this.bridge.onEvent(listener);
     return () => this.bridge.offEvent(listener);
@@ -213,6 +222,9 @@ export function createDemoClient(): AgentClient {
     testWebSearch: () =>
       wrap(() => ({ ok: false, latencyMs: 0, error: '演示模式无搜索后端' })),
     listWorkspaceFiles: (id, query) => wrap(() => server.listWorkspaceFiles(id, query)),
+    getProjectRules: (id) => wrap(() => server.getSessionProjectRules(id)),
+    initProjectRules: (id) => wrap(() => server.initSessionProjectRules(id)),
+    listCustomPrompts: (id) => wrap(() => server.listSessionCustomPrompts(id)),
     pickWorkspace: async () => '/demo-workspace',
     openPath: async (_path) => { /* 演示模式：无实际文件系统 */ },
     openInVscode: async (_path) => { /* 演示模式：无实际文件系统 */ },
