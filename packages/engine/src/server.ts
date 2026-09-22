@@ -15,6 +15,8 @@ import {
   createBuiltinTools,
   runWebSearch,
   listFilesRecursively,
+  compactHistoryMessages,
+  pruneHistoricalToolResults,
   type ApprovalMode,
   type TodoItem,
 } from '@easycode/core';
@@ -186,8 +188,9 @@ export class AgentServer {
   }
 
   /**
-   * 精简会话历史：保留最近若干轮关键交互（默认保留最后 2 轮完整用户回合）与最新待办清单，裁剪早期冗长历史，
-   * 并在首部注入一条结构化说明，腾出足够的 Token 空间。
+   * 精简/压缩会话历史（TODOS #30 & #31）：
+   * 保留最近若干轮关键交互（默认保留最后 2 轮完整用户回合）与最新待办清单，
+   * 提炼关键文件、命令与任务进度，折叠旧工具长输出并注入高密度阶段记忆说明，腾出足够的 Token 空间。
    */
   async trimSessionHistory(id: string, keepRecentTurns = 2): Promise<SessionData> {
     await this.ensureSettings();
@@ -196,43 +199,29 @@ export class AgentServer {
       throw new Error('会话正在运行中，请先等待完成或点击停止');
     }
 
-    const messages = rt.data.messages;
-    if (messages.length === 0) return rt.data;
+    if (rt.data.messages.length === 0) return rt.data;
 
-    // 收集所有 user 消息的索引
-    const userIndices: number[] = [];
-    for (let i = 0; i < messages.length; i++) {
-      if (messages[i].role === 'user') {
-        userIndices.push(i);
+    const compRes = compactHistoryMessages(rt.data.messages, {
+      keepRecentTurns,
+      pruneTools: true,
+    });
+
+    if (compRes.compacted) {
+      rt.data.messages = compRes.messages;
+      const latestTodos = extractLatestTodos(rt.data.messages);
+      if (latestTodos) {
+        rt.data.todos = structuredClone(latestTodos);
+      }
+      rt.data.meta.updatedAt = new Date().toISOString();
+      await this.persistSession(rt);
+    } else {
+      // 即使轮数未超过 keepRecentTurns，也对历史旧工具的长输出执行折叠压缩
+      const pruneRes = pruneHistoricalToolResults(rt.data.messages, { keepRecentTurns: 1 });
+      if (pruneRes.modified) {
+        rt.data.meta.updatedAt = new Date().toISOString();
+        await this.persistSession(rt);
       }
     }
-
-    // 若总轮数小于等于期望保留的轮数，不需要裁剪
-    if (userIndices.length <= keepRecentTurns) {
-      return rt.data;
-    }
-
-    // 截取最近 keepRecentTurns 轮的消息
-    const cutUserIdx = userIndices[userIndices.length - keepRecentTurns];
-    const preservedMessages = messages.slice(cutUserIdx);
-
-    // 提取全局最新的 todos 并持久化至 session
-    const latestTodos = extractLatestTodos(messages);
-    if (latestTodos) {
-      rt.data.todos = structuredClone(latestTodos);
-    }
-
-    // 构造一条提示型上下文说明消息
-    const summaryMsg: ChatMessage = {
-      role: 'user',
-      content: '【系统提示】早期历史会话已精简归档。已完整保留核心工作区、当前任务清单及最近交互，腾出上下文空间。请继续基于当前状态推进任务。',
-      id: `m_${Date.now().toString(36)}_trim`,
-      createdAt: new Date().toISOString(),
-    };
-
-    rt.data.messages = [summaryMsg, ...preservedMessages];
-    rt.data.meta.updatedAt = new Date().toISOString();
-    await this.persistSession(rt);
     return rt.data;
   }
 
@@ -345,11 +334,17 @@ export class AgentServer {
     const id = rt.data.meta.id;
     rt.running = true;
     rt.controller = new AbortController();
+    let wireMessages: ChatMessage[] | undefined;
     try {
       const entry = this.settings.providers[rt.data.meta.providerId];
       const firstEnabled = (entry?.models ?? []).find((m) => m.enabled !== false)?.name ?? 'default';
       const model = rt.data.meta.model || firstEnabled;
-      const caps = (entry?.models ?? []).find((m) => m.name === model)?.capabilities ?? ['system'];
+      const modelInfo = (entry?.models ?? []).find((m) => m.name === model);
+      const caps = modelInfo?.capabilities ?? ['system'];
+      const contextWindow = modelInfo?.contextWindow ?? entry?.contextWindow ?? 1_000_000;
+      const compactionCfg = this.settings.contextCompaction;
+      const autoCompact = compactionCfg?.autoCompact !== false;
+      const compactThreshold = compactionCfg?.threshold ?? 0.85;
       // 联网搜索分流：总开关关闭=全部不搜索；有原生工具的走原生，否则走内置 web_search()
       const searchOn = caps.includes('websearch') && this.settings.webSearch?.enabled === true;
       const useNativeSearch = searchOn && supportsNativeWebSearch(model, entry.kind);
@@ -371,7 +366,7 @@ export class AgentServer {
       const systemPrompt = buildSystemPrompt(this.host, rt.data.meta.workspaceRoot, {
         webSearch: searchOn,
       });
-      const wireMessages =
+      wireMessages =
         caps.includes('system') || !systemPrompt
           ? rt.data.messages
           : mergeSystemIntoUser(rt.data.messages, systemPrompt);
@@ -409,11 +404,16 @@ export class AgentServer {
         reasoningEffort: rt.data.meta.reasoningEffort ?? '',
         shell: this.settings.shell ?? 'auto',
         maxSteps: this.settings.maxSteps ?? 200,
+        contextWindow: autoCompact ? contextWindow : undefined,
+        autoCompactThreshold: compactThreshold,
       });
       if (result.reason === 'error' && result.errorMessage) {
         this.events.emit({ sessionId: id, event: { type: 'error', message: result.errorMessage } });
       }
     } finally {
+      if (wireMessages && wireMessages !== rt.data.messages) {
+        rt.data.messages = wireMessages;
+      }
       rt.running = false;
       rt.controller = undefined;
       rt.data.meta.updatedAt = new Date().toISOString();

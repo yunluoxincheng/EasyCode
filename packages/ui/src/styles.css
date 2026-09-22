@@ -1393,6 +1393,8 @@ html.crt-off body::after {
   transform: rotate(-90deg); transform-origin: 50% 50%;
   transition: stroke-dashoffset .3s ease;
 }
+.ctx-ring.warn .ctx-ring-fill { stroke: var(--amber); }
+.ctx-ring.danger .ctx-ring-fill { stroke: var(--red); animation: pulse 1.2s infinite; }
 
 /* 终端风按钮统一方括号装饰 */
 .btn::before { content: '[ '; color: var(--faint); }
@@ -2406,13 +2408,41 @@ select:focus-visible,
 
 .ctx-chip { cursor: pointer; }
 .ctx-chip:hover { border-color: var(--green-dim); color: var(--text); }
+.ctx-chip.ctx-warn { border-color: rgba(217, 165, 58, .5); color: var(--amber); }
+.ctx-chip.ctx-warn:hover { border-color: var(--amber); }
+.ctx-chip.ctx-danger { border-color: rgba(235, 87, 87, .7); color: var(--red); animation: pulse 1.5s infinite; }
+.ctx-chip.ctx-danger:hover { border-color: var(--red); }
 .ctx-pop { width: 300px; animation: popIn .14s ease-out; }
 .ctx-title { font-size: 10px; letter-spacing: 1.5px; color: var(--faint); margin-bottom: 6px; }
 .ctx-title::before { content: '// '; }
 .ctx-big { font-size: 15px; font-weight: 700; color: var(--text); margin-bottom: 8px; }
 .ctx-pct { color: var(--green); font-size: 12px; font-weight: 600; }
+.ctx-pct.warn { color: var(--amber); }
+.ctx-pct.danger { color: var(--red); }
 .ctx-bar { height: 8px; background: #070a08; border: 1px solid var(--border2); border-radius: 4px; overflow: hidden; margin-bottom: 10px; }
 .ctx-bar-fill { height: 100%; background: linear-gradient(90deg, var(--green-dim), var(--green)); transition: width .3s; }
+.ctx-bar-fill.warn { background: linear-gradient(90deg, rgba(217, 165, 58, .6), var(--amber)); }
+.ctx-bar-fill.danger { background: linear-gradient(90deg, rgba(235, 87, 87, .6), var(--red)); }
+
+.ctx-pop-alert {
+  padding: 6px 8px;
+  border-radius: var(--radius);
+  font-size: 11px;
+  line-height: 1.4;
+  margin-bottom: 8px;
+  font-family: var(--font);
+}
+.ctx-pop-alert.warn {
+  background: rgba(217, 165, 58, .12);
+  border: 1px solid rgba(217, 165, 58, .35);
+  color: var(--amber);
+}
+.ctx-pop-alert.danger {
+  background: rgba(235, 87, 87, .15);
+  border: 1px solid rgba(235, 87, 87, .45);
+  color: var(--red);
+}
+
 .ctx-rows { display: flex; flex-direction: column; gap: 6px; }
 .ctx-row { display: flex; align-items: center; gap: 8px; font-size: 12px; font-family: var(--font); }
 .ctx-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
@@ -2423,6 +2453,36 @@ select:focus-visible,
 .ctx-cache { display: flex; justify-content: space-between; padding-top: 8px; border-top: 1px dashed var(--border); font-size: 12px; font-family: var(--font); }
 .ctx-cache-label { color: var(--dim); }
 .ctx-cache-val { color: var(--green); font-weight: 700; }
+
+.ctx-pop-foot {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border);
+}
+.ctx-compact-btn {
+  width: 100%;
+  justify-content: center;
+  font-size: 11.5px;
+  color: var(--green);
+  border: 1px solid var(--green-dim);
+  background: rgba(63, 185, 106, .08);
+  padding: 6px 10px;
+  border-radius: var(--radius);
+  transition: all .15s;
+  cursor: pointer;
+}
+.ctx-compact-btn:hover:not(:disabled) {
+  background: rgba(63, 185, 106, .18);
+  border-color: var(--green);
+  color: #fff;
+}
+.ctx-compact-btn:disabled {
+  opacity: .35;
+  cursor: not-allowed;
+  border-color: var(--border);
+  color: var(--faint);
+  background: transparent;
+}
 
 /* ---------------- 模型徽标 / 行内测试 / 行图标 ---------------- */
 

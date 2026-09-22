@@ -23,6 +23,12 @@ export type AgentEvent =
       /** 本会话累计（输入/输出/步数/缓存命中），由引擎累计 */
       sessionUsage?: { input: number; output: number; steps: number; cached?: number };
     }
+  | {
+      type: 'context_compacted';
+      beforeTokens?: number;
+      afterTokens?: number;
+      summary: string;
+    }
   | { type: 'error'; message: string }
   | { type: 'done'; reason: 'completed' | 'aborted' | 'error' };
 

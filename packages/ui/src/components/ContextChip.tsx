@@ -193,6 +193,9 @@ export function ContextChip({ compact = false }: { compact?: boolean }) {
   if (!session) return null;
 
   const { used, windowTok, pct, rows } = estimateSessionTokens(store);
+  const isWarn = pct >= 80 && pct < 95;
+  const isDanger = pct >= 95;
+  const userTurns = store.items.filter((it) => it.kind === 'user').length;
 
   // 平均缓存命中率 = 累计缓存 / 累计输入
   const su = store.sessionUsage;
@@ -207,16 +210,24 @@ export function ContextChip({ compact = false }: { compact?: boolean }) {
       onMouseLeave={compact ? () => setOpen(false) : undefined}
     >
       <button
-        className="chip ctx-chip"
+        className={`chip ctx-chip ${isDanger ? 'ctx-danger' : isWarn ? 'ctx-warn' : ''}`}
         title={
           compact
-            ? `上下文容量 ${fmtTk(used)} / ${fmtTk(windowTok)} tk（${pct.toFixed(1)}%）· 悬停查看`
+            ? `上下文容量 ${fmtTk(used)} / ${fmtTk(windowTok)} tk（${pct.toFixed(1)}%）${
+                isDanger ? ' · 严重超限风险' : isWarn ? ' · 接近警戒线' : ''
+              } · 悬停查看`
             : '上下文容量'
         }
         onClick={() => setOpen(!open)}
       >
         {compact ? (
-          <svg className="ctx-ring" width="14" height="14" viewBox="0 0 14 14" aria-label="上下文容量">
+          <svg
+            className={`ctx-ring ${isDanger ? 'danger' : isWarn ? 'warn' : ''}`}
+            width="14"
+            height="14"
+            viewBox="0 0 14 14"
+            aria-label="上下文容量"
+          >
             <circle className="ctx-ring-bg" cx="7" cy="7" r={RING_R} />
             <circle
               className="ctx-ring-fill"
@@ -228,7 +239,10 @@ export function ContextChip({ compact = false }: { compact?: boolean }) {
             />
           </svg>
         ) : (
-          <>⧉ {fmtTk(used)}</>
+          <>
+            {isDanger ? '🚨 ' : isWarn ? '⚠ ' : '⧉ '}
+            {fmtTk(used)}
+          </>
         )}
         {!compact && <span className="usage-caret">▾</span>}
       </button>
@@ -237,10 +251,27 @@ export function ContextChip({ compact = false }: { compact?: boolean }) {
           <div className="ctx-title">上下文容量</div>
           <div className="ctx-big">
             {fmtTk(used)} / {fmtTk(windowTok)}{' '}
-            <span className="ctx-pct">({pct.toFixed(1)}%)</span>
+            <span className={`ctx-pct ${isDanger ? 'danger' : isWarn ? 'warn' : ''}`}>
+              ({pct.toFixed(1)}%)
+            </span>
           </div>
+
+          {isDanger && (
+            <div className="ctx-pop-alert danger">
+              🚨 上下文已接近极限（{pct.toFixed(1)}%），请立即压缩以防调用崩溃！
+            </div>
+          )}
+          {!isDanger && isWarn && (
+            <div className="ctx-pop-alert warn">
+              ⚠ 上下文使用率已达 {pct.toFixed(1)}% 推荐安全阈值，建议压缩
+            </div>
+          )}
+
           <div className="ctx-bar">
-            <div className="ctx-bar-fill" style={{ width: `${pct}%` }} />
+            <div
+              className={`ctx-bar-fill ${isDanger ? 'danger' : isWarn ? 'warn' : ''}`}
+              style={{ width: `${Math.min(100, pct)}%` }}
+            />
           </div>
           <div className="ctx-rows">
             {rows.map((r, i) => {
@@ -259,6 +290,23 @@ export function ContextChip({ compact = false }: { compact?: boolean }) {
           <div className="ctx-cache">
             <span className="ctx-cache-label">平均缓存命中率</span>
             <span className="ctx-cache-val">{cacheRate}</span>
+          </div>
+          <div className="ctx-pop-foot">
+            <button
+              className="proj-foot-item ctx-compact-btn"
+              disabled={store.running || userTurns <= 1}
+              title={
+                userTurns <= 1
+                  ? '单轮对话无需压缩'
+                  : '智能归档早期轮次并修剪旧工具长输出，释放 Token 空间'
+              }
+              onClick={() => {
+                setOpen(false);
+                void store.compressContext();
+              }}
+            >
+              ✄ 压缩上下文（归档早期历史）
+            </button>
           </div>
         </div>
       )}

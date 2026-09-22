@@ -891,6 +891,61 @@ export function SettingsPage() {
                   }}
                 />
               </label>
+
+              <div className="field">
+                <span>上下文超限自动压缩</span>
+                <div className="auto-scroll-row">
+                  <button
+                    className={`switch ${draft.contextCompaction?.autoCompact !== false ? 'on' : ''}`}
+                    title={
+                      draft.contextCompaction?.autoCompact !== false
+                        ? '已开启（当输入 Token 达到设定阈值时自动压缩工具长输出与早期历史）'
+                        : '已关闭'
+                    }
+                    onClick={() =>
+                      patch({
+                        contextCompaction: {
+                          autoCompact: draft.contextCompaction?.autoCompact === false,
+                          threshold: draft.contextCompaction?.threshold ?? 0.85,
+                          keepRecentTurns: draft.contextCompaction?.keepRecentTurns ?? 2,
+                        },
+                      })
+                    }
+                  >
+                    <span className="knob" />
+                  </button>
+                  <span className="auto-scroll-text">
+                    {draft.contextCompaction?.autoCompact !== false ? '开启（防 400 超限中断）' : '关闭'}
+                  </span>
+                </div>
+              </div>
+
+              {draft.contextCompaction?.autoCompact !== false && (
+                <label className="field">
+                  <span>自动压缩触发阈值 (%)</span>
+                  <input
+                    type="number"
+                    min={50}
+                    max={95}
+                    step={5}
+                    value={Math.round((draft.contextCompaction?.threshold ?? 0.85) * 100)}
+                    onChange={(e) => {
+                      const val = Number(e.target.value);
+                      const pct = isNaN(val) ? 85 : Math.max(50, Math.min(95, val));
+                      patch({
+                        contextCompaction: {
+                          autoCompact: true,
+                          threshold: pct / 100,
+                          keepRecentTurns: draft.contextCompaction?.keepRecentTurns ?? 2,
+                        },
+                      });
+                    }}
+                  />
+                </label>
+              )}
+              <p className="hint">
+                上下文超限自动压缩：当会话单次循环的输入 Token 达到模型窗口的指定比例（默认 85%）时，自动折叠前序工具长输出并归档早期历史，保障长任务平滑推进。
+              </p>
               <p className="hint">
                 单次任务最大步数：模型与工具交互的最大轮数上限（防死循环与异常空转保险），缺省为 200 步（可调范围 10~500 步）。
               </p>

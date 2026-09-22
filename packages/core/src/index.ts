@@ -21,6 +21,16 @@ export { MockProvider } from './providers/mock.js';
 // 循环与工具函数
 export { runAgentLoop } from './loop.js';
 export type { LoopOptions, LoopResult } from './loop.js';
+export {
+  pruneHistoricalToolResults,
+  compactHistoryMessages,
+  extractLatestTodos,
+} from './compaction.js';
+export type {
+  PruneToolOptions,
+  PruneResult,
+  CompactOptions,
+} from './compaction.js';
 export { diffLines } from './diff.js';
 export type { DiffLine } from './diff.js';
 export { validateToolInput } from './jsonschema.js';

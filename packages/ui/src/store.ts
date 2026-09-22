@@ -343,6 +343,18 @@ export class AppStore {
     this.showToast(`已精简历史并切换至 ${pending.model || '默认'}`);
   }
 
+  /** 主动压缩当前会话上下文（TODOS #31）：修剪旧工具长输出并归档早期历史 */
+  async compressContext(keepRecentTurns = 2): Promise<void> {
+    if (!this.activeId || this.running) return;
+    try {
+      await this.client.trimSessionHistory(this.activeId, keepRecentTurns);
+      await this.selectSession(this.activeId);
+      this.showToast('✓ 上下文已智能压缩，已腾出 Token 空间');
+    } catch (err) {
+      this.showToast(`压缩失败: ${err instanceof Error ? err.message : String(err)}`, 'err');
+    }
+  }
+
   /** 从当前会话分叉出新会话，在新会话上精简并切换为目标模型，保留原会话完整历史 */
   async forkSessionAndSwitch(pending: ModelSwitchPending, keepRecentTurns = 2): Promise<void> {
     this.pendingModelSwitch = null;
@@ -851,6 +863,13 @@ export class AppStore {
           };
         }
         this.notify(false);
+        break;
+      case 'context_compacted':
+        this.flushPendingNotify();
+        this.showToast(`[系统] ${event.summary}`);
+        if (this.activeId) {
+          void this.selectSession(this.activeId);
+        }
         break;
       case 'error':
         this.flushPendingNotify();

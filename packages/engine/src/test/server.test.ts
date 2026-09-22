@@ -117,3 +117,54 @@ test('AgentServer.trimSessionHistory 保留最新指定轮次并注入归档说�
   assert.equal(trimmed.messages[1].id, 'u_3');
   assert.equal(trimmed.messages[2].id, 'a_3');
 });
+
+test('AgentServer: contextCompaction 设置默认值与工具长输出折叠', async () => {
+  const host = new MemoryHost({
+    '/workspace/dummy.txt': 'init',
+  });
+  const server = new AgentServer(host);
+  const settings = await server.getSettings();
+  assert.equal(settings.contextCompaction?.autoCompact, true);
+  assert.equal(settings.contextCompaction?.threshold, 0.85);
+
+  await server.updateSettings({
+    providers: {
+      mock: {
+        kind: 'mock',
+        baseURL: '',
+        name: 'Mock',
+        enabled: true,
+        models: [{ name: 'mock-model', enabled: true }],
+      },
+    },
+    defaultProvider: 'mock',
+  });
+  const session = await server.createSession({
+    workspaceRoot: '/workspace',
+    providerId: 'mock',
+    title: '工具修剪会话',
+  });
+
+  const sessionData = await server.getSession(session.id);
+  sessionData.messages = [
+    { role: 'user', content: '第一轮' },
+    {
+      role: 'assistant',
+      blocks: [{ type: 'tool_call', id: 't_big', name: 'read_file', input: { path: 'a.log' } }],
+    },
+    {
+      role: 'tool_result',
+      toolCallId: 't_big',
+      toolName: 'read_file',
+      content: Array.from({ length: 40 }, (_, i) => `log line ${i}`).join('\n'),
+    },
+    { role: 'user', content: '第二轮：最新问题' },
+    { role: 'assistant', blocks: [{ type: 'text', text: '已收到最新问题' }] },
+  ];
+
+  // 轮次总共 2 轮，keepRecentTurns=2 时不切除轮次，但对第一轮大工具输出执行修剪
+  const trimmed = await server.trimSessionHistory(session.id, 2);
+  const toolMsg = trimmed.messages.find((m) => m.role === 'tool_result');
+  assert.ok(toolMsg && toolMsg.role === 'tool_result');
+  assert.match(toolMsg.content, /历史工具输出已折叠归档/);
+});

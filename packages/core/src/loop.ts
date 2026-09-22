@@ -5,6 +5,7 @@ import type { Provider, StreamRequest } from './providers/index.js';
 import { extractToolCalls } from './providers/index.js';
 import { ApprovalManager } from './approval.js';
 import { executeTool, ToolRegistry } from './tools/index.js';
+import { compactHistoryMessages, pruneHistoricalToolResults } from './compaction.js';
 
 export interface LoopOptions {
   provider: Provider;
@@ -22,6 +23,10 @@ export interface LoopOptions {
   reasoningEffort?: string;
   /** 命令行终端 Shell：auto=自动选择，也可指定 git-bash / pwsh / powershell / cmd */
   shell?: string;
+  /** 模型上下文容量上限（Token），用于在多步循环中超限自动压缩 */
+  contextWindow?: number;
+  /** 上下文自动压缩触发阈值（默认 0.85 即 85%） */
+  autoCompactThreshold?: number;
 }
 
 export interface LoopResult {
@@ -58,6 +63,8 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
     maxSteps = 200,
     reasoningEffort,
     shell,
+    contextWindow,
+    autoCompactThreshold = 0.85,
   } = options;
 
   try {
@@ -116,6 +123,33 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
           isError: execution.isError,
         };
         messages.push(stamp(resultMessage));
+      }
+
+      // 上下文超限保护（TODOS #31）：若本轮输入的 Token 超过设定阈值，触发智能阶梯压缩
+      if (
+        contextWindow &&
+        turn.usage?.inputTokens &&
+        turn.usage.inputTokens > contextWindow * autoCompactThreshold
+      ) {
+        const beforeTokens = turn.usage.inputTokens;
+        const compactRes = compactHistoryMessages(messages, { keepRecentTurns: 2, pruneTools: true });
+        if (compactRes.compacted) {
+          messages.splice(0, messages.length, ...compactRes.messages);
+          emit({
+            type: 'context_compacted',
+            beforeTokens,
+            summary: `上下文用量已达 ${Math.round((beforeTokens / contextWindow) * 100)}%，已自动归档前序 ${compactRes.discardedTurns} 轮历史并压缩工具长输出。`,
+          });
+        } else {
+          const pruneRes = pruneHistoricalToolResults(messages, { keepRecentTurns: 1 });
+          if (pruneRes.modified) {
+            emit({
+              type: 'context_compacted',
+              beforeTokens,
+              summary: `上下文用量已达 ${Math.round((beforeTokens / contextWindow) * 100)}%，已压缩历史工具长输出（节省约 ${Math.round(pruneRes.savedChars / 4)} tokens）。`,
+            });
+          }
+        }
       }
     }
     return finish(

@@ -111,6 +111,17 @@ export interface Settings {
   maxSteps?: number;
   /** 侧栏折叠的项目 ID 或文件夹路径集合 */
   collapsedProjects?: string[];
+  /** 上下文超限保护与智能自动压缩配置（TODOS #31） */
+  contextCompaction?: ContextCompactionConfig;
+}
+
+export interface ContextCompactionConfig {
+  /** 达阈值时是否在循环中自动压缩上下文（默认 true） */
+  autoCompact?: boolean;
+  /** 触发自动压缩的上下文容量占比阈值（0.5~0.95，默认 0.85 即 85%） */
+  threshold?: number;
+  /** 自动压缩时保留的最近完整交互轮数（默认 2） */
+  keepRecentTurns?: number;
 }
 
 /** 内置 Provider 预设：均为 OpenAI 兼容端点（或 Anthropic），API Key 留空由用户填写 */
@@ -161,6 +172,7 @@ export const DEFAULT_SETTINGS: Settings = {
   crtScanline: true,
   maxSteps: 200,
   collapsedProjects: [],
+  contextCompaction: { autoCompact: true, threshold: 0.85, keepRecentTurns: 2 },
   webSearch: { enabled: false, backend: 'searxng', maxResults: 5 },
   shell: 'auto',
 };
