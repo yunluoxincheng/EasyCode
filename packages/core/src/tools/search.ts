@@ -43,6 +43,45 @@ async function walk(
   return true;
 }
 
+/**
+ * 递归收集工作区中的相对路径列表（统一正斜杠 / 风格）
+ * 专为 @文件 引用设计：跳过构建目录，不做冗余的 stat 检查，毫秒级返回
+ */
+export async function listFilesRecursively(
+  host: Host,
+  root: string,
+  opts?: { limit?: number; signal?: AbortSignal },
+): Promise<string[]> {
+  const limit = opts?.limit ?? 1000;
+  const results: string[] = [];
+
+  async function step(dir: string, relPrefix: string): Promise<boolean> {
+    if (opts?.signal?.aborted || results.length >= limit) return false;
+    let dirents;
+    try {
+      dirents = await host.fs.readdir(dir);
+    } catch {
+      return true;
+    }
+    for (const entry of dirents) {
+      if (results.length >= limit) return false;
+      const relPath = relPrefix ? `${relPrefix}/${entry.name}` : entry.name;
+      if (entry.isDirectory) {
+        if (SKIP_DIRS.has(entry.name)) continue;
+        const full = host.paths.join(dir, entry.name);
+        const cont = await step(full, relPath);
+        if (!cont) return false;
+      } else {
+        results.push(relPath);
+      }
+    }
+    return true;
+  }
+
+  await step(root, '');
+  return results;
+}
+
 export const searchFilesTool: Tool = {
   spec: {
     name: 'search_files',

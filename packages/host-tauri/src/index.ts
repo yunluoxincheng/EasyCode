@@ -266,6 +266,7 @@ export async function createTauriClient(): Promise<AgentClient> {
   return {
     listSessions: () => server.listSessions(),
     createSession: (options) => server.createSession(options),
+    forkSession: (id, options) => server.forkSession(id, options),
     deleteSession: (id) => server.deleteSession(id),
     renameSession: (id, title) => server.renameSession(id, title),
     getSession: (id) => server.getSession(id),
@@ -292,6 +293,7 @@ export async function createTauriClient(): Promise<AgentClient> {
     listProviderModels: (id) => server.listProviderModels(id),
     testProviderModel: (id, model) => server.testProviderModel(id, model),
     testWebSearch: () => server.testWebSearch(),
+    listWorkspaceFiles: (id, query) => server.listWorkspaceFiles(id, query),
     pickWorkspace: () => invoke<string | null>('pick_folder'),
     openPath: (path: string) => invoke<void>('open_path', { path }),
     openInVscode: (path: string) => invoke<void>('open_in_vscode', { path }),

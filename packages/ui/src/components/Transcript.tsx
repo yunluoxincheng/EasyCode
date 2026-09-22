@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { memo, useEffect, useRef, useState } from 'react';
 import { useStore } from '../useStore.js';
 import { renderMarkdown } from '../markdown.js';
 import { renderAnsi } from '../ansi.js';
@@ -14,10 +14,10 @@ import type {
   ViewBlock,
 } from '../store.js';
 
-/** Markdown 渲染（含代码块样式钩子） */
-function Md({ text }: { text: string }) {
+/** Markdown 渲染（含代码块样式钩子 + React.memo 浅比对优化） */
+const Md = memo(function Md({ text }: { text: string }) {
   return <div className="md" dangerouslySetInnerHTML={{ __html: renderMarkdown(text) }} />;
-}
+});
 
 /** 思考过程折叠卡片：统一终端极客风、支持吸顶、一键复制与字符统计 */
 function Thinking({ text, live }: { text: string; live?: boolean }) {
@@ -516,6 +516,15 @@ function UserView({ item, canEdit }: { item: UserItem; canEdit: boolean }) {
             ✎
           </button>
         )}
+        {!store.running && (
+          <button
+            className="msg-icon"
+            title="从此处分叉出新会话（克隆此提问前已有的上下文）"
+            onClick={() => void store.forkSession({ kind: 'beforeUser', itemId: item.id })}
+          >
+            ⑂
+          </button>
+        )}
       </div>
     </div>
   );
@@ -722,6 +731,18 @@ function TurnView({ turn }: { turn: TurnItem }) {
           </span>
         </button>
         <span className="spacer" />
+        {!live && (
+          <button
+            className="turn-fork-btn"
+            title="从此处分叉出新会话（保留本回合及之前的全部历史）"
+            onClick={(e) => {
+              e.stopPropagation();
+              void store.forkSession({ kind: 'afterTurn', itemId: turn.id });
+            }}
+          >
+            ⑂ 分叉
+          </button>
+        )}
         {finalText && <CopyButton text={finalText} />}
       </div>
       {expanded && (
@@ -827,6 +848,12 @@ export function Transcript() {
     return () => el.removeEventListener('click', onClick);
   }, []);
 
+  const jumpTo = (anchorId: string): void => {
+    scrollRef.current
+      ?.querySelector(`[data-anchor="${anchorId}"]`)
+      ?.scrollIntoView({ behavior: 'auto', block: 'start' });
+  };
+
   /** 收集对话 exchanges：一条用户消息 + 其后的模型回合 = 一个刻度 */
   const measure = (): void => {
     const el = scrollRef.current;
@@ -853,43 +880,66 @@ export function Transcript() {
     setExchanges(list);
   };
 
+  // 依赖结构版本号：流式追加纯文本时绝不重新 measure，消除 exchanges 频繁重建与监听器抖动
   useEffect(() => {
     measure();
-  }, [store.version, store.activeId]);
+  }, [store.structureVersion, store.activeId]);
 
-  /** 滚动时高亮当前视口所在的 exchange，并刷新轨道可用高度 */
+  /** 滚动时高亮当前视口所在的 exchange，并刷新轨道可用高度（彻底消除滚动中的 Layout Thrashing） */
   useEffect(() => {
     const el = scrollRef.current;
     const rail = railRef.current;
     if (!el || !rail) return;
-    const update = (): void => {
+
+    // 缓存各锚点的静态 Y 坐标偏移（仅在 DOM 尺寸或 exchanges 变化时测量一次）
+    let cachedOffsets: number[] = [];
+    const refreshOffsets = (): void => {
       setRailH(rail.clientHeight);
+      const elTop = el.getBoundingClientRect().top;
       const nodes = [...el.querySelectorAll<HTMLElement>('[data-anchor]')];
-      if (nodes.length === 0) return;
+      cachedOffsets = nodes.map((n) => n.getBoundingClientRect().top - elTop + el.scrollTop);
+      checkHighlight();
+    };
+
+    const checkHighlight = (): void => {
+      if (cachedOffsets.length === 0) return;
       const probe = el.scrollTop + el.clientHeight * 0.35;
       let idx = 0;
-      nodes.forEach((n, i) => {
-        const top = n.getBoundingClientRect().top - el.getBoundingClientRect().top + el.scrollTop;
-        if (top <= probe) idx = i;
-      });
+      for (let i = 0; i < cachedOffsets.length; i++) {
+        if (cachedOffsets[i] <= probe) idx = i;
+        else break;
+      }
       setHighlight(idx);
     };
-    update();
-    el.addEventListener('scroll', update);
-    const ro = new ResizeObserver(update);
+
+    let scrollRafId: number | null = null;
+    const onScroll = (): void => {
+      if (scrollRafId !== null) return;
+      scrollRafId = requestAnimationFrame(() => {
+        scrollRafId = null;
+        checkHighlight();
+      });
+    };
+
+    refreshOffsets();
+    el.addEventListener('scroll', onScroll, { passive: true });
+    const ro = new ResizeObserver(refreshOffsets);
     ro.observe(rail);
     ro.observe(el);
+
     return () => {
-      el.removeEventListener('scroll', update);
+      if (scrollRafId !== null) cancelAnimationFrame(scrollRafId);
+      el.removeEventListener('scroll', onScroll);
       ro.disconnect();
     };
   }, [exchanges, store.activeId]);
 
-  const jumpTo = (anchorId: string): void => {
-    scrollRef.current
-      ?.querySelector(`[data-anchor="${anchorId}"]`)
-      ?.scrollIntoView({ behavior: 'auto', block: 'start' });
-  };
+  const waveRafRef = useRef<number | null>(null);
+  useEffect(() => {
+    return () => {
+      if (waveRafRef.current !== null) cancelAnimationFrame(waveRafRef.current);
+    };
+  }, []);
 
   // 刻度条垂直居中；放不下时随滚动滑移，让当前刻度保持在中间
   const spacing = 14;
@@ -910,18 +960,23 @@ export function Transcript() {
         className="rail"
         ref={railRef}
         onMouseMove={(e) => {
-          // 波浪效果：靠近指针的刻度放大变亮，随距离衰减
-          const rail = railRef.current;
-          if (!rail) return;
-          const my = e.clientY - rail.getBoundingClientRect().top;
-          rail.querySelectorAll<HTMLElement>('.rail-tick').forEach((t) => {
-            const center = parseFloat(t.style.top || '0') + 1.5;
-            const w = Math.max(0, 1 - Math.abs(center - my) / 70);
-            const width = 10 + w * 8;
-            t.style.width = `${width}px`;
-            t.style.height = `${3 + w * 3}px`;
-            t.style.left = `${6 - width / 2}px`;
-            t.style.opacity = String(0.55 + w * 0.45);
+          // 波浪效果：靠近指针的刻度放大变亮，随距离衰减（RAF 节流防止指针密集触发卡顿）
+          if (waveRafRef.current !== null) return;
+          const clientY = e.clientY;
+          waveRafRef.current = requestAnimationFrame(() => {
+            waveRafRef.current = null;
+            const rail = railRef.current;
+            if (!rail) return;
+            const my = clientY - rail.getBoundingClientRect().top;
+            rail.querySelectorAll<HTMLElement>('.rail-tick').forEach((t) => {
+              const center = parseFloat(t.style.top || '0') + 1.5;
+              const w = Math.max(0, 1 - Math.abs(center - my) / 70);
+              const width = 10 + w * 8;
+              t.style.width = `${width}px`;
+              t.style.height = `${3 + w * 3}px`;
+              t.style.left = `${6 - width / 2}px`;
+              t.style.opacity = String(0.55 + w * 0.45);
+            });
           });
         }}
         onMouseLeave={() => {

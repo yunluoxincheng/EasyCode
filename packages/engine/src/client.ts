@@ -16,6 +16,11 @@ export interface AgentClient {
     model?: string;
     title?: string;
   }): Promise<SessionMeta>;
+  /** 从指定节点分叉出新会话（继承配置、无损克隆截取历史） */
+  forkSession(
+    id: string,
+    options?: { upToMessageId?: string; beforeUserIndex?: number },
+  ): Promise<SessionMeta>;
   deleteSession(id: string): Promise<void>;
   renameSession(id: string, title: string): Promise<SessionMeta>;
   getSession(id: string): Promise<SessionData>;
@@ -50,6 +55,8 @@ export interface AgentClient {
   notify(title: string, body: string): Promise<void>;
   /** 探测系统可用的命令行终端 Shell 列表（由宿主探测） */
   detectShells?(): Promise<ShellInfo[]>;
+  /** 列出工作区文件列表（支持 query 模糊过滤，供 @文件 快捷引用） */
+  listWorkspaceFiles(id: string, query?: string): Promise<string[]>;
   pickWorkspace(): Promise<string | null>;
   onEvent(listener: (payload: { sessionId: string; event: AgentEvent }) => void): () => void;
 }

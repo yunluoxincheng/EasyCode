@@ -2,6 +2,22 @@
 
 本文件记录 EasyCode 每个版本的变更。发布时，GitHub Release 说明自动取自对应版本的段落。
 
+## [0.1.15] - 2026-09-22
+
+### 新增
+- 会话分支/分叉（Fork Session）：在历史回合头部（`TurnView`）与用户提问操作条（`UserView`）增设「`⑂ 分叉`」入口；完整继承原会话工作区绑定与模型/思考档位配置，无损深拷贝截取范围内的历史消息与任务清单，新会话自动命名追加「（分支）」并无缝切换至侧栏高亮；解决编辑重发破坏性截断历史的痛点，满足多技术方案并行对比的开发需求（TODOS #27）
+- Composer `@文件` 快捷引用与模糊补全（Context Mention）：在输入框输入 `@` 或光标紧随 `@query` 时，即时唤出终端极客风文件建议面板；支持纯键盘导航（`↑`/`↓` 移动、`Tab`/`Enter` 一键补全相对路径并后置空格、`Esc` 退出、输入法合成防误触）；未绑定工作区时显示友好提示（TODOS #25）
+- 工作区文件极速遍历与智能评分：Core 导出轻量文件遍历器 `listFilesRecursively`（自动过滤构建与虚拟环境目录）；Engine 引入 3 秒短时缓存与智能加权匹配（文件名开头 > 文件名包含 > 路径包含），支持毫秒级响应（TODOS #25）
+
+### 优化
+- 流式事件 RAF 批量合并（Batching & Coalescing）：在 `store.ts` 引入 `scheduleNotify()` 批处理调度，高频纯文本增量（`text_delta`、`reasoning_delta`）原地追加缓冲，通过 `requestAnimationFrame`（50ms 定时器兜底）合并刷新，消灭每秒几十次的全树重渲，彻底根治流式期间打字滞后与掉帧（TODOS #28）
+- 细粒度版本信号解耦：拆分 `structureVersion` 结构版本号，仅在新增/删除消息、回合折叠等关键时刻递增，将重度 DOM 测量与高频文本流式彻底解耦（TODOS #28）
+- 消除回合条目线性扫描：`appendToBlock` 与 `flushAssistant` 采用 `WeakSet` O(1) 判定，消除每个 delta 对回合条目数组的线性扫描（TODOS #28）
+- Token 估算多级缓存与轻量化：静态系统提示词与工具规格缓存避免每次组件渲染重复序列化和分词数万 Token；历史定型条目与完结回合全量采用 `WeakMap` 多级缓存，历史长文本 O(1) 秒取，消除长会话重复 BPE 编码（TODOS #28）
+- 根治滚动中的 Layout Thrashing：时间线轨道 `measure()` 刻度计算解耦仅响应结构性变动；滚动监听采用 `requestAnimationFrame` 节流；静态 Y 坐标偏移仅在尺寸或结构变动时预存，滚动中只做纯数字比对，杜绝滚动中密集调用 `getBoundingClientRect()`（TODOS #28）
+- 时间线轨道动效平滑化：时间线悬停波浪动效引入 RAF 节流，消除指针移动时的样式计算堆积（TODOS #28）
+- Markdown 与代码高亮多级缓存：`markdown.ts` 引入双 LRU 缓存（Markdown 编译结果 200 条、hljs 代码高亮 300 条），避免已闭合代码块重复执行复杂的正则着色；`Md` 组件引入 `React.memo` 浅比对优化（TODOS #28）
+
 ## [0.1.14] - 2026-09-21
 
 ### 新增

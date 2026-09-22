@@ -33,6 +33,9 @@ export class IpcAgentClient implements AgentClient {
   createSession(options: Parameters<AgentClient['createSession']>[0]) {
     return this.invoke<SessionMeta>('create-session', options);
   }
+  forkSession(id: string, options?: { upToMessageId?: string; beforeUserIndex?: number }) {
+    return this.invoke<SessionMeta>('fork-session', { id, options });
+  }
   deleteSession(id: string) {
     return this.invoke<void>('delete-session', { id });
   }
@@ -104,6 +107,9 @@ export class IpcAgentClient implements AgentClient {
   detectShells() {
     return this.invoke<ShellInfo[]>('detect-shells');
   }
+  listWorkspaceFiles(id: string, query?: string) {
+    return this.invoke<string[]>('list-workspace-files', { id, query });
+  }
   onEvent(listener: (payload: { sessionId: string; event: AgentEvent }) => void) {
     this.bridge.onEvent(listener);
     return () => this.bridge.offEvent(listener);
@@ -166,6 +172,7 @@ export function createDemoClient(): AgentClient {
   return {
     listSessions: () => wrap(() => server.listSessions()),
     createSession: (options) => wrap(() => server.createSession(options)),
+    forkSession: (id, options) => wrap(() => server.forkSession(id, options)),
     deleteSession: (id) => wrap(() => server.deleteSession(id)),
     renameSession: (id, title) => wrap(() => server.renameSession(id, title)),
     getSession: (id) => wrap(() => server.getSession(id)),
@@ -201,6 +208,7 @@ export function createDemoClient(): AgentClient {
       }),
     testWebSearch: () =>
       wrap(() => ({ ok: false, latencyMs: 0, error: '演示模式无搜索后端' })),
+    listWorkspaceFiles: (id, query) => wrap(() => server.listWorkspaceFiles(id, query)),
     pickWorkspace: async () => '/demo-workspace',
     openPath: async (_path) => { /* 演示模式：无实际文件系统 */ },
     openInVscode: async (_path) => { /* 演示模式：无实际文件系统 */ },

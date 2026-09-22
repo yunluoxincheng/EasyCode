@@ -62,6 +62,7 @@ type Handler = (args: any, event: Electron.IpcMainInvokeEvent) => unknown;
 const handlers: Record<string, Handler> = {
   'list-sessions': () => server.listSessions(),
   'create-session': (args) => server.createSession(args),
+  'fork-session': (args) => server.forkSession(args.id, args.options),
   'delete-session': (args) => server.deleteSession(args.id),
   'rename-session': (args) => server.renameSession(args.id, args.title),
   'get-session': (args) => server.getSession(args.id),
@@ -95,6 +96,7 @@ const handlers: Record<string, Handler> = {
   'list-provider-models': (args) => server.listProviderModels(args.id),
   'test-provider-model': (args) => server.testProviderModel(args.id, args.model),
   'test-web-search': () => server.testWebSearch(),
+  'list-workspace-files': (args) => server.listWorkspaceFiles(args.id as string, args.query as string | undefined),
   'pick-workspace': async () => {
     if (!mainWindow) return null;
     const result = await dialog.showOpenDialog(mainWindow, {

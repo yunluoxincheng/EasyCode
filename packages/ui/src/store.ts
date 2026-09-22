@@ -6,7 +6,7 @@ export type ViewBlock = { type: 'text' | 'thinking'; text: string };
 export type ViewName = 'chat' | 'settings';
 export type SettingsSection = 'models' | 'websearch' | 'general' | 'about';
 
-export type UserItem = { kind: 'user'; id: string; text: string; ts?: number };
+export type UserItem = { kind: 'user'; id: string; text: string; ts?: number; msgId?: string };
 export type AssistantItem = { kind: 'assistant'; id: string; blocks: ViewBlock[] };
 export type ToolItem = {
   kind: 'tool';
@@ -80,6 +80,12 @@ export class AppStore {
   private seq = 0;
   /** 快照版本号：每次 notify 递增，供 useSyncExternalStore 感知变化 */
   version = 0;
+  /** 结构版本号：仅在会话切换、消息/卡片增删、回合折叠展开等结构性变更时递增，用于解耦高频流式与重度 DOM 测量 */
+  structureVersion = 0;
+
+  private rafId: number | null = null;
+  private timerId: ReturnType<typeof setTimeout> | null = null;
+  private turnItemSet = new WeakSet<object>();
 
   subscribe = (listener: () => void): (() => void) => {
     this.listeners.add(listener);
@@ -99,7 +105,39 @@ export class AppStore {
     });
   }
 
-  notify(): void {
+  /** 调度合并通知：在高频流式 delta 时将多帧合并为单次 RAF / 50ms 刷新，消灭每秒几十次的全树重渲 */
+  scheduleNotify(): void {
+    if (this.rafId !== null || this.timerId !== null) return;
+    if (typeof requestAnimationFrame === 'function') {
+      this.rafId = requestAnimationFrame(() => {
+        this.rafId = null;
+        this.notify(false);
+      });
+    } else {
+      this.timerId = setTimeout(() => {
+        this.timerId = null;
+        this.notify(false);
+      }, 50);
+    }
+  }
+
+  /** 立即刷新任何待处理的批处理更新 */
+  flushPendingNotify(): void {
+    if (this.rafId !== null) {
+      if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(this.rafId);
+      this.rafId = null;
+    }
+    if (this.timerId !== null) {
+      clearTimeout(this.timerId);
+      this.timerId = null;
+    }
+  }
+
+  notify(structural = false): void {
+    this.flushPendingNotify();
+    if (structural) {
+      this.structureVersion++;
+    }
     this.version++;
     for (const l of this.listeners) l();
   }
@@ -261,7 +299,7 @@ export class AppStore {
     } catch {
       /* 会话可能刚被删除 */
     }
-    this.notify();
+    this.notify(true);
   }
 
   /** 显示名（用户设置的名称优先于 id，如 CPA） */
@@ -354,6 +392,7 @@ export class AppStore {
           id: this.nextId(),
           text: msg.content,
           ts: toTs(msg.createdAt),
+          msgId: msg.id,
         });
         continue;
       }
@@ -434,7 +473,7 @@ export class AppStore {
     if (current && current.title === trimmed) return;
     const meta = await this.client.renameSession(id, trimmed);
     this.sessions = this.sessions.map((s) => (s.id === id ? meta : s));
-    this.notify();
+    this.notify(true);
   }
 
   async deleteSession(id: string): Promise<void> {
@@ -446,7 +485,50 @@ export class AppStore {
       this.items = [];
       if (this.sessions.length > 0) await this.selectSession(this.sessions[0].id);
     }
-    this.notify();
+    this.notify(true);
+  }
+
+  /** 从指定节点分叉（Fork）出新会话并自动切换进入 */
+  async forkSession(anchor?: { kind: 'beforeUser' | 'afterTurn'; itemId: string }): Promise<void> {
+    if (!this.activeId || this.running) return;
+    let beforeUserIndex: number | undefined;
+    let upToMessageId: string | undefined;
+
+    if (anchor) {
+      if (anchor.kind === 'beforeUser') {
+        let uIdx = 0;
+        for (const it of this.items) {
+          if (it.kind === 'user') {
+            if (it.id === anchor.itemId) {
+              beforeUserIndex = uIdx;
+              upToMessageId = it.msgId;
+              break;
+            }
+            uIdx++;
+          }
+        }
+      } else if (anchor.kind === 'afterTurn') {
+        let uIdx = 0;
+        for (let i = 0; i < this.items.length; i++) {
+          const it = this.items[i];
+          if (it.kind === 'user') {
+            uIdx++;
+          } else if (it.kind === 'turn' && it.id === anchor.itemId) {
+            beforeUserIndex = uIdx;
+            break;
+          }
+        }
+      }
+    }
+
+    try {
+      const meta = await this.client.forkSession(this.activeId, { beforeUserIndex, upToMessageId });
+      this.sessions = [meta, ...this.sessions];
+      await this.selectSession(meta.id);
+      this.showToast('已成功分叉出新会话');
+    } catch (err) {
+      this.showToast(err instanceof Error ? err.message : String(err), 'err');
+    }
   }
 
   /** 发送时递增，驱动会话区滚动到底部 */
@@ -457,7 +539,7 @@ export class AppStore {
   setAtBottom(v: boolean): void {
     if (this.atBottom !== v) {
       this.atBottom = v;
-      this.notify();
+      this.notify(false);
     }
   }
 
@@ -478,7 +560,7 @@ export class AppStore {
       this.scrollTick++;
       this.atBottom = true;
     }
-    this.notify();
+    this.notify(true);
     try {
       await this.client.sendMessage(this.activeId, text.trim());
     } catch (err) {
@@ -490,7 +572,7 @@ export class AppStore {
       if (this.currentTurn) this.currentTurn.items.push(errorItem);
       else this.items.push(errorItem);
       this.running = false;
-      this.notify();
+      this.notify(true);
     }
   }
 
@@ -513,7 +595,7 @@ export class AppStore {
     this.currentTurn = turn;
     this.running = true;
     if (this.autoScrollOn) this.scrollTick++;
-    this.notify();
+    this.notify(true);
     try {
       await this.client.editLastUserMessage(this.activeId, text);
     } catch (err) {
@@ -525,7 +607,7 @@ export class AppStore {
       if (this.currentTurn) this.currentTurn.items.push(errorItem);
       else this.items.push(errorItem);
       this.running = false;
-      this.notify();
+      this.notify(true);
     }
   }
 
@@ -546,7 +628,7 @@ export class AppStore {
     );
     if (turn) {
       turn.collapsed = !turn.collapsed;
-      this.notify();
+      this.notify(true);
     }
   }
 
@@ -620,8 +702,12 @@ export class AppStore {
 
   /** 事件产生的条目进入当前回合 */
   private pushToTurn(item: TurnEntry): void {
-    if (this.currentTurn) this.currentTurn.items.push(item);
-    else this.items.push(item);
+    if (this.currentTurn) {
+      this.currentTurn.items.push(item);
+      this.turnItemSet.add(item);
+    } else {
+      this.items.push(item);
+    }
   }
 
   private findInTurn<T extends TurnEntry>(pred: (i: TurnEntry) => i is T): T | undefined {
@@ -631,20 +717,25 @@ export class AppStore {
   handleEvent(event: AgentEvent): void {
     switch (event.type) {
       case 'assistant_start':
+        this.flushPendingNotify();
         // 开启新的助手消息（懒创建：第一个 delta 到达时再显示，避免空泡）
         this.currentAssistant = { kind: 'assistant', id: this.nextId(), blocks: [] };
+        this.notify(true);
         break;
       case 'text_delta': {
         const item = this.ensureAssistant();
         this.appendToBlock(item, 'text', event.delta);
+        this.scheduleNotify();
         break;
       }
       case 'reasoning_delta': {
         const item = this.ensureAssistant();
         this.appendToBlock(item, 'thinking', event.delta);
+        this.scheduleNotify();
         break;
       }
       case 'tool_call_start': {
+        this.flushPendingNotify();
         this.flushAssistant();
         if (event.call.name === 'todo_write') {
           const input = event.call.input as { todos?: TodoItem[] } | undefined;
@@ -661,9 +752,11 @@ export class AppStore {
           status: 'running',
           startedAt: Date.now(),
         });
+        this.notify(true);
         break;
       }
       case 'tool_result': {
+        this.flushPendingNotify();
         // 同一回合可能出现相同 callId 的并行调用：优先匹配仍在运行的那张卡片
         const tool =
           this.findInTurn(
@@ -681,9 +774,11 @@ export class AppStore {
             }
           }
         }
+        this.notify(true);
         break;
       }
       case 'approval_request':
+        this.flushPendingNotify();
         this.flushAssistant();
         this.pushToTurn({
           kind: 'approval',
@@ -693,13 +788,16 @@ export class AppStore {
           input: event.input,
           status: 'pending',
         });
+        this.notify(true);
         break;
       case 'approval_resolved': {
+        this.flushPendingNotify();
         const approval = this.findInTurn(
           (i): i is ApprovalItem =>
             i.kind === 'approval' && i.requestId === event.requestId,
         );
         if (approval) approval.status = event.approved ? 'approved' : 'denied';
+        this.notify(true);
         break;
       }
       case 'step_end':
@@ -712,12 +810,16 @@ export class AppStore {
             cached: event.sessionUsage.cached ?? 0,
           };
         }
+        this.notify(false);
         break;
       case 'error':
+        this.flushPendingNotify();
         this.flushAssistant();
         this.pushToTurn({ kind: 'error', id: this.nextId(), message: event.message });
+        this.notify(true);
         break;
       case 'done':
+        this.flushPendingNotify();
         this.flushAssistant();
         if (this.currentTurn) {
           this.currentTurn.durationMs = Date.now() - this.currentTurn.startedAt;
@@ -730,9 +832,9 @@ export class AppStore {
         } else {
           this.running = false;
         }
+        this.notify(true);
         break;
     }
-    this.notify();
   }
 
   private currentAssistant: AssistantItem | null = null;
@@ -752,17 +854,19 @@ export class AppStore {
     const last = item.blocks.at(-1);
     if (last && last.type === type) last.text += delta;
     else item.blocks.push({ type, text: delta });
-    // 首个内容到达时入列
-    if (this.currentTurn && !this.currentTurn.items.includes(item)) {
+    // 首个内容到达时入列（WeakSet O(1) 判定，避免 N 次数组线性扫描）
+    if (this.currentTurn && !this.turnItemSet.has(item)) {
       this.currentTurn.items.push(item);
+      this.turnItemSet.add(item);
     }
   }
 
   /** 当前流式助手消息落盘成普通条目 */
   private flushAssistant(): void {
     if (this.currentAssistant && this.currentAssistant.blocks.length > 0) {
-      if (this.currentTurn && !this.currentTurn.items.includes(this.currentAssistant)) {
+      if (this.currentTurn && !this.turnItemSet.has(this.currentAssistant)) {
         this.currentTurn.items.push(this.currentAssistant);
+        this.turnItemSet.add(this.currentAssistant);
       }
     }
     this.currentAssistant = null;

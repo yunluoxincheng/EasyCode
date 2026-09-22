@@ -14,6 +14,7 @@ import {
   runAgentLoop,
   createBuiltinTools,
   runWebSearch,
+  listFilesRecursively,
   type ApprovalMode,
   type TodoItem,
 } from '@easycode/core';
@@ -100,6 +101,87 @@ export class AgentServer {
     };
     this.sessions.set(meta.id, runtime);
     await this.persistSession(runtime);
+    return meta;
+  }
+
+  /**
+   * 从指定会话分叉（Fork）出新会话：
+   * - 继承原会话的工作区绑定、模型服务、模型覆盖与思考档位；
+   * - 截取指定点以前的消息历史并深拷贝；
+   * - 继承该时间点的任务清单，重置 Token 计费统计；
+   * - 新会话标题默认追加「（分支）」后缀。
+   */
+  async forkSession(
+    sessionId: string,
+    options?: { upToMessageId?: string; beforeUserIndex?: number },
+  ): Promise<SessionMeta> {
+    await this.ensureSettings();
+    const rt = this.requireSession(sessionId);
+    if (rt.running) {
+      throw new Error('原会话正在运行中，请等待完成或停止后再分叉');
+    }
+
+    let slicedMessages: ChatMessage[] = [];
+    if (options?.beforeUserIndex !== undefined) {
+      const targetUserIndex = options.beforeUserIndex;
+      if (targetUserIndex <= 0) {
+        slicedMessages = [];
+      } else {
+        let userCount = 0;
+        let cutIdx = rt.data.messages.length;
+        for (let i = 0; i < rt.data.messages.length; i++) {
+          if (rt.data.messages[i].role === 'user') {
+            if (userCount === targetUserIndex) {
+              cutIdx = i;
+              break;
+            }
+            userCount++;
+          }
+        }
+        slicedMessages = rt.data.messages.slice(0, cutIdx);
+      }
+    } else if (options?.upToMessageId) {
+      const targetId = options.upToMessageId;
+      const idx = rt.data.messages.findIndex((m) => m.id === targetId);
+      if (idx === -1) {
+        slicedMessages = rt.data.messages.slice();
+      } else {
+        let endIdx = idx + 1;
+        while (endIdx < rt.data.messages.length && rt.data.messages[endIdx].role === 'tool_result') {
+          endIdx++;
+        }
+        slicedMessages = rt.data.messages.slice(0, endIdx);
+      }
+    } else {
+      slicedMessages = rt.data.messages.slice();
+    }
+
+    const clonedMessages = structuredClone(slicedMessages);
+    const now = new Date().toISOString();
+    const meta: SessionMeta = {
+      id: `s_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+      title: `${rt.data.meta.title || '新会话'}（分支）`,
+      workspaceRoot: rt.data.meta.workspaceRoot,
+      providerId: rt.data.meta.providerId,
+      model: rt.data.meta.model,
+      reasoningEffort: rt.data.meta.reasoningEffort,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    const latestTodos = extractLatestTodos(clonedMessages);
+    const newRuntime: SessionRuntime = {
+      data: {
+        meta,
+        messages: clonedMessages,
+        todos: latestTodos ? structuredClone(latestTodos) : undefined,
+      },
+      approval: new ApprovalManager(this.emitterFor(meta.id), this.settings.defaultApprovalMode),
+      running: false,
+    };
+
+    this.sessions.set(meta.id, newRuntime);
+    await this.persistSession(newRuntime);
     return meta;
   }
 
@@ -633,6 +715,58 @@ export class AgentServer {
         ? stored.defaultProvider
         : Object.keys(providers)[0] ?? DEFAULT_SETTINGS.defaultProvider;
     return { ...DEFAULT_SETTINGS, ...stored, providers, defaultProvider };
+  }
+
+  /** 工作区文件列表短时缓存（3秒 TTL），避免连续敲击字符时频繁扫描磁盘 */
+  private workspaceFilesCache = new Map<string, { files: string[]; expiresAt: number }>();
+
+  /**
+   * 列出工作区文件列表，支持 query 模糊过滤（供 Composer @文件 快捷补全）
+   */
+  async listWorkspaceFiles(sessionId: string, query?: string, limit = 25): Promise<string[]> {
+    const session = this.sessions.get(sessionId);
+    const root = session?.data.meta.workspaceRoot;
+    if (!root) return [];
+
+    const now = Date.now();
+    let allFiles: string[] = [];
+    const cached = this.workspaceFilesCache.get(root);
+    if (cached && cached.expiresAt > now) {
+      allFiles = cached.files;
+    } else {
+      try {
+        const stat = await this.host.fs.stat(root);
+        if (!stat || !stat.isDirectory) return [];
+        allFiles = await listFilesRecursively(this.host, root, { limit: 1500 });
+        this.workspaceFilesCache.set(root, { files: allFiles, expiresAt: now + 3000 });
+      } catch {
+        return [];
+      }
+    }
+
+    const q = (query ?? '').trim().toLowerCase();
+    if (!q) {
+      return allFiles.slice(0, limit);
+    }
+
+    // 模糊过滤：优先匹配文件名开头，其次匹配文件名包含，再次匹配全路径包含
+    const scored: Array<{ path: string; score: number }> = [];
+    for (const p of allFiles) {
+      const lower = p.toLowerCase();
+      const lastSlash = lower.lastIndexOf('/');
+      const fileName = lastSlash === -1 ? lower : lower.slice(lastSlash + 1);
+
+      if (fileName.startsWith(q)) {
+        scored.push({ path: p, score: 100 });
+      } else if (fileName.includes(q)) {
+        scored.push({ path: p, score: 80 });
+      } else if (lower.includes(q)) {
+        scored.push({ path: p, score: 50 });
+      }
+    }
+
+    scored.sort((a, b) => b.score - a.score || a.path.length - b.path.length);
+    return scored.slice(0, limit).map((s) => s.path);
   }
 }
 

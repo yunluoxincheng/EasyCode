@@ -13,17 +13,45 @@ const BAR_COMPACT_WIDTH = 640;
 
 export function Composer() {
   const store = useStore();
+  const session = store.activeSession;
   const [text, setText] = useState('');
   const [dragOver, setDragOver] = useState(false);
   const [compact, setCompact] = useState(false);
   const taRef = useRef<HTMLTextAreaElement>(null);
   const barRef = useRef<HTMLDivElement>(null);
   const inputWrapRef = useRef<HTMLDivElement>(null);
+  const mentionListRef = useRef<HTMLDivElement>(null);
+
+  /** @文件 mention 悬浮检索状态 */
+  const [mention, setMention] = useState<{
+    open: boolean;
+    query: string;
+    startIndex: number;
+    selectedIndex: number;
+    files: string[];
+    loading: boolean;
+  }>({
+    open: false,
+    query: '',
+    startIndex: -1,
+    selectedIndex: 0,
+    files: [],
+    loading: false,
+  });
+
   /** ↑/↓ 浏览历史的状态：会话切换或发送后重置 */
   const historyRef = useRef<{ list: string[]; index: number; draft: string } | null>(null);
 
   useEffect(() => {
     historyRef.current = null;
+    setMention({
+      open: false,
+      query: '',
+      startIndex: -1,
+      selectedIndex: 0,
+      files: [],
+      loading: false,
+    });
   }, [store.activeId]);
 
   /** 自适应撑高（TODOS #20）：按内容即时量高，CSS min/max-height 兜底 2~8 行；发送清空后自动收缩 */
@@ -123,10 +151,144 @@ export function Composer() {
     const t = text;
     setText('');
     historyRef.current = null;
+    setMention({
+      open: false,
+      query: '',
+      startIndex: -1,
+      selectedIndex: 0,
+      files: [],
+      loading: false,
+    });
     store.send(t);
   };
 
+  const checkMention = (val: string, caretPos: number) => {
+    const before = val.slice(0, caretPos);
+    const lastAt = before.lastIndexOf('@');
+    if (lastAt === -1) {
+      if (mention.open) setMention((m) => ({ ...m, open: false }));
+      return;
+    }
+    // 检查 @ 前字符：必须是首字符、空格、标点或括号
+    if (lastAt > 0 && !/[\s([{"'`<:;]/.test(val[lastAt - 1])) {
+      if (mention.open) setMention((m) => ({ ...m, open: false }));
+      return;
+    }
+    const query = before.slice(lastAt + 1);
+    // query 不能包含空白或换行
+    if (/[\s\r\n]/.test(query)) {
+      if (mention.open) setMention((m) => ({ ...m, open: false }));
+      return;
+    }
+    setMention((m) => ({
+      ...m,
+      open: true,
+      query,
+      startIndex: lastAt,
+    }));
+  };
+
+  const selectFile = (filePath: string) => {
+    const ta = taRef.current;
+    if (!ta) return;
+    const start = mention.startIndex;
+    const caret = ta.selectionStart ?? (start + mention.query.length + 1);
+    const replacement = `@${filePath} `;
+    const newText = text.slice(0, start) + replacement + text.slice(caret);
+    setText(newText);
+    setMention({
+      open: false,
+      query: '',
+      startIndex: -1,
+      selectedIndex: 0,
+      files: [],
+      loading: false,
+    });
+    requestAnimationFrame(() => {
+      ta.focus();
+      const nextPos = start + replacement.length;
+      ta.selectionStart = ta.selectionEnd = nextPos;
+    });
+  };
+
+  // 防抖检索工作区文件列表
+  useEffect(() => {
+    if (!mention.open || !session?.id) return;
+    if (!session.workspaceRoot) {
+      setMention((m) => ({ ...m, files: [], loading: false }));
+      return;
+    }
+    const timer = setTimeout(async () => {
+      try {
+        setMention((m) => ({ ...m, loading: true }));
+        const list = await store.client.listWorkspaceFiles(session.id, mention.query);
+        setMention((m) => ({ ...m, files: list, loading: false, selectedIndex: 0 }));
+      } catch {
+        setMention((m) => ({ ...m, files: [], loading: false }));
+      }
+    }, 60);
+    return () => clearTimeout(timer);
+  }, [mention.open, mention.query, session?.id, session?.workspaceRoot]);
+
+  // 键盘移动选中项时保持滚动条在视口内
+  useEffect(() => {
+    if (!mention.open || mention.files.length === 0) return;
+    const listEl = mentionListRef.current;
+    const itemEl = listEl?.querySelector('.mention-item.selected') as HTMLElement | null;
+    if (listEl && itemEl) {
+      const listTop = listEl.scrollTop;
+      const listBottom = listTop + listEl.clientHeight;
+      const itemTop = itemEl.offsetTop;
+      const itemBottom = itemTop + itemEl.offsetHeight;
+      if (itemTop < listTop) {
+        listEl.scrollTop = itemTop;
+      } else if (itemBottom > listBottom) {
+        listEl.scrollTop = itemBottom - listEl.clientHeight;
+      }
+    }
+  }, [mention.selectedIndex, mention.open]);
+
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // 优先响应 @文件 补全浮层的键盘导航
+    if (mention.open) {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        setMention((m) => ({ ...m, open: false }));
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        e.stopPropagation();
+        if (mention.files.length > 0) {
+          setMention((m) => ({
+            ...m,
+            selectedIndex: (m.selectedIndex - 1 + m.files.length) % m.files.length,
+          }));
+        }
+        return;
+      }
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        e.stopPropagation();
+        if (mention.files.length > 0) {
+          setMention((m) => ({
+            ...m,
+            selectedIndex: (m.selectedIndex + 1) % m.files.length,
+          }));
+        }
+        return;
+      }
+      if ((e.key === 'Enter' || e.key === 'Tab') && !e.shiftKey && !e.nativeEvent.isComposing) {
+        if (mention.files.length > 0 && mention.files[mention.selectedIndex]) {
+          e.preventDefault();
+          e.stopPropagation();
+          selectFile(mention.files[mention.selectedIndex]);
+          return;
+        }
+      }
+    }
+
     if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault();
       submit();
@@ -200,8 +362,6 @@ export function Composer() {
     insertPaths(files.map(filePathOf));
   };
 
-  const session = store.activeSession;
-
   return (
     <div className="composer">
       <div className="composer-bar" ref={barRef}>
@@ -238,16 +398,78 @@ export function Composer() {
         onDragLeave={onDragLeave}
         onDrop={onDrop}
       >
+        {mention.open && (
+          <div className="mention-pop" ref={mentionListRef}>
+            <div className="mention-head">
+              <span className="mention-tag">[ @ 文件引用 ]</span>
+              <span className="mention-hint">
+                {!session?.workspaceRoot
+                  ? '未绑定工作区'
+                  : mention.loading
+                    ? '检索中...'
+                    : mention.files.length === 0
+                      ? '无匹配文件'
+                      : `↑↓ 移动 · Tab/Enter 补全 (${mention.files.length})`}
+              </span>
+            </div>
+            {!session?.workspaceRoot ? (
+              <div className="mention-empty">
+                当前会话未绑定项目工作区，点击上方「＋ 绑定项目」即可引用代码文件
+              </div>
+            ) : mention.files.length === 0 && !mention.loading ? (
+              <div className="mention-empty">未检索到与 "{mention.query}" 匹配的文件</div>
+            ) : (
+              <div className="mention-list">
+                {mention.files.map((file, idx) => {
+                  const isSelected = idx === mention.selectedIndex;
+                  const lastSlash = file.lastIndexOf('/');
+                  const fileName = lastSlash === -1 ? file : file.slice(lastSlash + 1);
+                  const dirPath = lastSlash === -1 ? '' : file.slice(0, lastSlash + 1);
+                  return (
+                    <div
+                      key={file}
+                      className={`mention-item ${isSelected ? 'selected' : ''}`}
+                      onMouseEnter={() => setMention((m) => ({ ...m, selectedIndex: idx }))}
+                      onMouseDown={(e) => {
+                        e.preventDefault(); // 防止 textarea 失焦
+                        selectFile(file);
+                      }}
+                    >
+                      <span className="mention-cursor">{isSelected ? '❯' : ' '}</span>
+                      <span className="mention-name">{fileName}</span>
+                      {dirPath && <span className="mention-dir">{dirPath}</span>}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
         <textarea
           ref={taRef}
           value={text}
-          onChange={(e) => setText(e.target.value)}
+          onChange={(e) => {
+            const nextVal = e.target.value;
+            const caret = e.target.selectionStart ?? nextVal.length;
+            setText(nextVal);
+            checkMention(nextVal, caret);
+          }}
+          onClick={(e) => {
+            const ta = e.currentTarget;
+            checkMention(ta.value, ta.selectionStart ?? ta.value.length);
+          }}
+          onKeyUp={(e) => {
+            // 忽略已由 onKeyDown 劫持的方向键和回车
+            if (['ArrowUp', 'ArrowDown', 'Enter', 'Tab', 'Escape'].includes(e.key)) return;
+            const ta = e.currentTarget;
+            checkMention(ta.value, ta.selectionStart ?? ta.value.length);
+          }}
           onKeyDown={onKeyDown}
           placeholder={
             !session
               ? '先在左侧新建一个会话…'
               : session.workspaceRoot
-                ? `描述任务，Enter 发送，Shift+Enter 换行（工作区: ${session.workspaceRoot}）`
+                ? `输入 @ 快速引用文件，Enter 发送，Shift+Enter 换行`
                 : '直接对话即可；要操作文件请先点击上方「＋ 绑定项目」'
           }
           disabled={!session || store.running}

@@ -9,7 +9,7 @@ export * from './approval.js';
 export { ToolRegistry, executeTool, resolveWorkspacePath, createBuiltinTools, runWebSearch } from './tools/index.js';
 export type { Tool, ToolSpec, ToolContext, ToolExecution } from './tools/index.js';
 export { readFileTool, writeFileTool, editFileTool, listDirTool } from './tools/fs.js';
-export { searchFilesTool } from './tools/search.js';
+export { searchFilesTool, listFilesRecursively } from './tools/search.js';
 export { runCommandTool } from './tools/shell.js';
 export { todoWriteTool } from './tools/todo.js';
 // Provider

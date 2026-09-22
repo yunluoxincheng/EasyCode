@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useStore } from '../useStore.js';
+import type { TurnItem, TurnEntry, UserItem } from '../store.js';
 import { createBuiltinTools, type Host } from '@easycode/core';
 import {
   buildSystemPrompt,
@@ -15,6 +16,86 @@ function count(text: string): number {
 }
 function fmtTk(n: number): string {
   return n >= 10000 ? `${(n / 10000).toFixed(1)}万` : n.toLocaleString();
+}
+
+/** 缓存已定型历史回合（turn.durationMs !== undefined）的总 token 计数 */
+const completedTurnTokensCache = new WeakMap<object, number>();
+/** 缓存已定型条目/代码块的 token 计数 */
+const itemTokensCache = new WeakMap<object, number>();
+
+/** 静态配置（系统工具规格 + 系统提示词）Token 计数缓存 */
+interface StaticTokensCache {
+  key: string;
+  toolsTokens: number;
+  promptTokens: number;
+}
+let staticTokensCache: StaticTokensCache | null = null;
+
+function countTurnItem(it: TurnEntry, isLive: boolean): number {
+  if (it.kind === 'tool') {
+    // 运行中的工具结果可能变化，完成后结果固定
+    if (it.status !== 'running') {
+      const cached = itemTokensCache.get(it);
+      if (cached !== undefined) return cached;
+      const tok = count(JSON.stringify(it.input ?? {})) + count(it.result ?? '');
+      itemTokensCache.set(it, tok);
+      return tok;
+    }
+    return count(JSON.stringify(it.input ?? {})) + count(it.result ?? '');
+  }
+
+  if (it.kind === 'approval') {
+    const cached = itemTokensCache.get(it);
+    if (cached !== undefined) return cached;
+    const tok = count(JSON.stringify(it.input ?? {}));
+    itemTokensCache.set(it, tok);
+    return tok;
+  }
+
+  if (it.kind === 'assistant') {
+    let sum = 0;
+    for (let i = 0; i < it.blocks.length; i++) {
+      const b = it.blocks[i];
+      // 最后一个 block 如果处于当前 live 运行态，可能在流式追加中，不缓存；已闭合 block 长期缓存
+      const isLiveBlock = isLive && i === it.blocks.length - 1;
+      if (!isLiveBlock) {
+        let tok = itemTokensCache.get(b);
+        if (tok === undefined) {
+          tok = count(b.text);
+          itemTokensCache.set(b, tok);
+        }
+        sum += tok;
+      } else {
+        sum += count(b.text);
+      }
+    }
+    return sum;
+  }
+
+  return 0;
+}
+
+function countTurn(turn: TurnItem, isLive: boolean): number {
+  if (!isLive && turn.durationMs !== undefined) {
+    const cached = completedTurnTokensCache.get(turn);
+    if (cached !== undefined) return cached;
+  }
+  let sum = 0;
+  for (const it of turn.items) {
+    sum += countTurnItem(it, isLive);
+  }
+  if (!isLive && turn.durationMs !== undefined) {
+    completedTurnTokensCache.set(turn, sum);
+  }
+  return sum;
+}
+
+function countUserItem(it: UserItem): number {
+  const cached = itemTokensCache.get(it);
+  if (cached !== undefined) return cached;
+  const tok = count(it.text);
+  itemTokensCache.set(it, tok);
+  return tok;
 }
 
 const DEFAULT_WINDOW = 1_000_000;
@@ -46,27 +127,17 @@ export function ContextChip({ compact = false }: { compact?: boolean }) {
     session.model || (provider?.models ?? []).find((m) => m.enabled !== false)?.name || '';
   const modelCfg = (provider?.models ?? []).find((m) => m.name === effectiveModel);
   const windowTok = modelCfg?.contextWindow ?? provider?.contextWindow ?? DEFAULT_WINDOW;
-  // 分类精确计数
+
+  // 分类精确计数（全面使用 WeakMap 多级缓存，消除长会话重复 BPE 分词）
   const rows: Array<{ label: string; tokens: number }> = [];
   let msgTokens = 0;
-  const countTurnItems = (items: { kind: string }[]): void => {
-    for (const it of items) {
-      if (it.kind === 'assistant') {
-        for (const b of (it as unknown as { blocks: { type: string; text: string }[] }).blocks) {
-          msgTokens += count(b.text);
-        }
-      } else if (it.kind === 'tool') {
-        const t = it as unknown as { input: unknown; result?: string };
-        msgTokens += count(JSON.stringify(t.input ?? {}));
-        msgTokens += count(t.result ?? '');
-      } else if (it.kind === 'approval') {
-        msgTokens += count(JSON.stringify((it as unknown as { input: unknown }).input ?? {}));
-      }
-    }
-  };
   for (const it of store.items) {
-    if (it.kind === 'user') msgTokens += count(it.text);
-    else if (it.kind === 'turn') countTurnItems(it.items);
+    if (it.kind === 'user') {
+      msgTokens += countUserItem(it);
+    } else if (it.kind === 'turn') {
+      const isLive = store.running && it.durationMs === undefined;
+      msgTokens += countTurn(it, isLive);
+    }
   }
   rows.push({ label: '消息', tokens: msgTokens });
 
@@ -87,15 +158,23 @@ export function ContextChip({ compact = false }: { compact?: boolean }) {
           },
         }
       : undefined;
-  rows.push({ label: '系统工具', tokens: count(JSON.stringify(createBuiltinTools(builtinSearch).listSpecs())) });
 
-  const stubHost = {
-    paths: { sep: navigator.platform.includes('Win') ? '\\' : '/' },
-  } as unknown as Host;
-  rows.push({
-    label: '系统提示词',
-    tokens: count(buildSystemPrompt(stubHost, session.workspaceRoot, { webSearch: searchOn })),
-  });
+  // 静态系统提示词与工具规格缓存：避免每次组件重绘都重复序列化与分词数万 Token
+  const staticCacheKey = `${effectiveModel}:${provider?.kind}:${session.workspaceRoot}:${searchOn}:${useNativeSearch}:${wsCfg?.backend}`;
+  if (!staticTokensCache || staticTokensCache.key !== staticCacheKey) {
+    const toolsTok = count(JSON.stringify(createBuiltinTools(builtinSearch).listSpecs()));
+    const stubHost = {
+      paths: { sep: navigator.platform.includes('Win') ? '\\' : '/' },
+    } as unknown as Host;
+    const promptTok = count(buildSystemPrompt(stubHost, session.workspaceRoot, { webSearch: searchOn }));
+    staticTokensCache = {
+      key: staticCacheKey,
+      toolsTokens: toolsTok,
+      promptTokens: promptTok,
+    };
+  }
+  rows.push({ label: '系统工具', tokens: staticTokensCache.toolsTokens });
+  rows.push({ label: '系统提示词', tokens: staticTokensCache.promptTokens });
 
   const other = store.items.length * 4; // 每条消息的角色/框架开销
   rows.push({ label: '其他', tokens: other });
