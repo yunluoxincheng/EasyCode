@@ -1,7 +1,7 @@
 import { invoke, Channel } from '@tauri-apps/api/core';
 import type { AgentClient, ShellInfo } from '@easycode/engine';
 import { AgentServer } from '@easycode/engine';
-import type { Host, ProcessResult, FsDirent } from '@easycode/core';
+import type { Host, ProcessResult, FsDirent, DecisionPolicy } from '@easycode/core';
 
 /* ------------------------------------------------------------------ */
 /* 路径实现（同步，纯 TS；平台分隔符由 Rust 侧告知）                      */
@@ -259,10 +259,13 @@ function patchFetch(): void {
 /* AgentClient：WebView 内运行完整引擎（core + engine + TauriHost）        */
 /* ------------------------------------------------------------------ */
 
-export async function createTauriClient(): Promise<AgentClient> {
+export async function createTauriClient(options?: { reflexPolicy?: DecisionPolicy }): Promise<AgentClient> {
   patchFetch();
   const host = await createTauriHost();
   const server = new AgentServer(host);
+  if (options?.reflexPolicy) {
+    server.setReflexPolicy(options.reflexPolicy);
+  }
   return {
     listSessions: () => server.listSessions(),
     createSession: (options) => server.createSession(options),

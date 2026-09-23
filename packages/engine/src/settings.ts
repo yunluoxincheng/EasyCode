@@ -117,6 +117,8 @@ export interface Settings {
   closeToTray?: boolean;
   /** 全局通用开发规范与偏好（TODOS #33） */
   globalRules?: string;
+  /** Reflex 端侧微模型影子模式旁路观测开关（TODOS #40）；开时在端侧真实推理并落盘，关时零旁路开销；默认关 */
+  reflexShadowMode?: boolean;
 }
 
 export interface ContextCompactionConfig {
@@ -180,6 +182,7 @@ export const DEFAULT_SETTINGS: Settings = {
   closeToTray: true,
   webSearch: { enabled: false, backend: 'searxng', maxResults: 5 },
   shell: 'auto',
+  reflexShadowMode: false,
 };
 
 export function providerLabel(id: string, entry: ProviderEntry | undefined): string {

@@ -869,6 +869,25 @@ export function SettingsPage() {
                 </div>
               </div>
               <div className="field">
+                <span>Reflex 影子模式旁路观测</span>
+                <div className="auto-scroll-row">
+                  <button
+                    className={`switch ${draft.reflexShadowMode === true ? 'on' : ''}`}
+                    title={
+                      draft.reflexShadowMode === true
+                        ? '已开启（点击关闭，完全停止端侧小模型旁路推理与日志记录）'
+                        : '已关闭（点击开启，Agent 运行关键决策点将在后台以毫秒级运行 22M INT8 决策小脑）'
+                    }
+                    onClick={() => patch({ reflexShadowMode: draft.reflexShadowMode !== true })}
+                  >
+                    <span className="knob" />
+                  </button>
+                  <span className="auto-scroll-text">
+                    {draft.reflexShadowMode === true ? '开启（端侧旁路观测与评估）' : '关闭（零旁路开销）'}
+                  </span>
+                </div>
+              </div>
+              <div className="field">
                 <span>复古 CRT 扫描线</span>
                 <div className="auto-scroll-row">
                   <button

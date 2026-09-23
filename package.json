@@ -20,7 +20,9 @@
   "pnpm": {
     "onlyBuiltDependencies": [
       "electron",
-      "esbuild"
+      "esbuild",
+      "protobufjs",
+      "onnxruntime-node"
     ]
   }
 }

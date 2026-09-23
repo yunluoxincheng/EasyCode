@@ -63,8 +63,11 @@ export class ShadowDecisionPolicy implements DecisionPolicy {
       agreement: !result.defer,
     };
 
-    // 纯旁路异步写入，不 await，不捕获向上抛出
-    void this.statsManager.recordDecision(record).catch(() => {});
+    // 严格工程准则：若底层模型未就绪或未产生真实有效预测（置信度为 0 且耗时为 0），坚决不记录垃圾空数据！
+    if (result.confidence > 0 || result.latencyMs > 0) {
+      // 纯旁路异步写入，不 await，不捕获向上抛出
+      void this.statsManager.recordDecision(record).catch(() => {});
+    }
 
     return result;
   }

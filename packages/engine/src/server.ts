@@ -29,6 +29,7 @@ import {
   type GitDiffResult,
   type GitDiffOptions,
   NoopDecisionPolicy,
+  type DecisionPolicy,
   type DecisionStats,
   type ProjectDecisionTree,
 } from '@easycode/core';
@@ -88,11 +89,21 @@ export class AgentServer {
   private readonly events = new Emitter<SessionEventPayload>();
   private readonly workspaceLocks = new WorkspaceLockManager();
   private readonly decisionStats: DecisionStatsManager;
+  private reflexPolicy: DecisionPolicy = new NoopDecisionPolicy();
   private settings: Settings = structuredClone(DEFAULT_SETTINGS);
   private settingsLoaded = false;
 
   constructor(private readonly host: Host) {
     this.decisionStats = new DecisionStatsManager(host);
+  }
+
+  /** 注入端侧真实决策推理策略（如 WebOnnxPolicy 或 LocalOnnxPolicy） */
+  setReflexPolicy(policy: DecisionPolicy): void {
+    this.reflexPolicy = policy;
+  }
+
+  private resolveReflexPolicy(): DecisionPolicy {
+    return this.reflexPolicy;
   }
 
   /* -------------------- 事件订阅 -------------------- */
@@ -418,15 +429,18 @@ export class AgentServer {
           : mergeSystemIntoUser(rt.data.messages, systemPrompt);
 
       // 装配微型决策策略（TODOS #40：Shadow Mode 旁路观测）
-      const policy = new ShadowDecisionPolicy(
-        new NoopDecisionPolicy(),
-        this.decisionStats,
-        {
-          sessionId: rt.data.meta.id,
-          sessionTitle: rt.data.meta.title,
-          workspaceRoot: rt.data.meta.workspaceRoot,
-        },
-      );
+      // 门控：仅当用户开启 reflexShadowMode 开关时挂载，关闭时 policy 为 undefined（零 CPU 额外计算、零日志写入）
+      const policy = this.settings.reflexShadowMode
+        ? new ShadowDecisionPolicy(
+            this.resolveReflexPolicy(),
+            this.decisionStats,
+            {
+              sessionId: rt.data.meta.id,
+              sessionTitle: rt.data.meta.title,
+              workspaceRoot: rt.data.meta.workspaceRoot,
+            },
+          )
+        : undefined;
 
       const result = await runAgentLoop({
         provider,

@@ -3,3 +3,5 @@ packages:
 allowBuilds:
   electron: true
   esbuild: true
+  onnxruntime-node: true
+  protobufjs: true

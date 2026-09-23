@@ -10,4 +10,10 @@ packages/desktop-tauri/src-tauri/target/
 prototypes/shot-*.png
 .tmp-shots/
 
+# Reflex 端侧模型资产 (由 copy-models 脚本生成，不入 git)
+packages/ui/public/models/
+packages/ui/public/ort/
+public/models/
+public/ort/
+
 .zcode/

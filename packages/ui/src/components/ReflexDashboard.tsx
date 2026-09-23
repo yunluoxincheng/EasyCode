@@ -81,9 +81,22 @@ export function ReflexDashboard() {
     }
   };
 
+  const isEnabled = store.settings?.reflexShadowMode === true;
+  const toggleShadowMode = async () => {
+    try {
+      await store.saveSettings({ reflexShadowMode: !isEnabled });
+      store.showToast(
+        !isEnabled ? '已开启 Reflex 影子模式旁路观测' : '已关闭 Reflex 影子模式（零旁路开销）',
+        'ok',
+      );
+    } catch {
+      store.showToast('切换影子模式失败', 'err');
+    }
+  };
+
   return (
     <div className="reflex-dashboard">
-      <div className="page-head" style={{ marginBottom: 20 }}>
+      <div className="page-head" style={{ marginBottom: 16 }}>
         <div>
           <div className="page-desc">
             端侧微型决策模型（Reflex ~22M DeBERTa-v3 INT8）在线旁路观测、效能评估与微调闭环
@@ -105,6 +118,45 @@ export function ReflexDashboard() {
             title="一键导出所有项目会话沉淀的全部微调数据集"
           >
             ⤓ 导出全量微调集 (.jsonl)
+          </button>
+        </div>
+      </div>
+
+      {/* 影子模式主控开关卡片 */}
+      <div
+        className="general-panel"
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          padding: '14px 18px',
+          marginBottom: 16,
+          borderColor: isEnabled ? 'var(--green-dim)' : 'var(--border)',
+        }}
+      >
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-bright)' }}>
+            Reflex 影子模式 (Shadow Mode) 旁路观测开关
+          </div>
+          <div style={{ fontSize: 11, color: 'var(--dim)', marginTop: 4, lineHeight: 1.5 }}>
+            {isEnabled
+              ? '【运行中】Agent 运行时关键决策点将在后台以毫秒级运行 22M INT8 决策小脑，真实记录评估轨迹与置信度。'
+              : '【已关闭】完全停止端侧小模型推理与日志记录，主循环零额外 CPU 消耗、零文件写入。'}
+          </div>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <span style={{ fontSize: 12, color: isEnabled ? 'var(--green)' : 'var(--dim)', fontWeight: 500 }}>
+            {isEnabled ? '● 运行中 (Active)' : '○ 已关闭 (Disabled)'}
+          </span>
+          <button
+            className={`switch ${isEnabled ? 'on' : ''}`}
+            type="button"
+            role="switch"
+            aria-checked={isEnabled}
+            onClick={toggleShadowMode}
+            title={isEnabled ? '点击关闭影子模式' : '点击开启影子模式'}
+          >
+            <span className="knob" />
           </button>
         </div>
       </div>

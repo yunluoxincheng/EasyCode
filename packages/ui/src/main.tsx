@@ -18,7 +18,8 @@ async function bootstrap(): Promise<void> {
 
     if (env === 'tauri') {
       const { createTauriClient } = await import('@easycode/host-tauri');
-      client = await createTauriClient();
+      const { ReflexWebPolicy } = await import('./utils/reflexEngine.js');
+      client = await createTauriClient({ reflexPolicy: new ReflexWebPolicy() });
     } else if (env === 'electron') {
       client = new IpcAgentClient(w.easycode as ConstructorParameters<typeof IpcAgentClient>[0]);
     } else {
