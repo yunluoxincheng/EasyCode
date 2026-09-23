@@ -8,6 +8,9 @@ const TASK_FAMILY_NAMES: Record<string, { label: string; color: string }> = {
   recovery: { label: '错误自愈 (Recovery)', color: '#38bdf8' },
   safety: { label: '安全风控 (Safety)', color: '#fbbf24' },
   context_management: { label: '上下文压缩 (Context)', color: '#c084fc' },
+  information_sufficiency: { label: '信息充分性 (Sufficiency)', color: '#34d399' },
+  verification: { label: '验证决策 (Verification)', color: '#f472b6' },
+  tool_routing: { label: '工具路由 (Tool Routing)', color: '#a78bfa' },
   other: { label: '其他决策', color: '#94a3b8' },
 };
 
