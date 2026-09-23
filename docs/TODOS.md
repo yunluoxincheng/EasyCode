@@ -243,11 +243,43 @@ EasyCode 作为开放、可扩展的桌面 Coding Agent，目前仅提供内置�
      - **Tauri / 浏览器**：由 WebView 使用 `onnxruntime-web` 或经 Rust Tauri 命令代理；
    - 降级保护：任何 ONNX 加载失败、超时或内部异常，一律自动降级为 Noop，主流程绝不报错。
 
+5. **内置统计分析引擎 (`DecisionStatsManager`)**：
+   - **持久化路径**：在用户数据目录集中追加存储 `${this.host.env.dataDir()}/reflex_decisions/${sessionId}.jsonl`，会话级隔离、写入无锁追加、会话删除同步清理，绝不污染代码库；
+   - **核心指标聚合计算**：
+     - `totalDecisions`：累计微决策次数；
+     - `avgLatencyMs`：端侧决策平均耗时（ms）；
+     - `deferRate`：模型主动降级/转交主大模型的比例；
+     - `agreementRate`：与主会话大模型实际决策的吻合率；
+     - `taskFamilyDistribution`：四大任务族的触发频度占比；
+     - `confidenceBuckets`：置信度区间分布统计（健康度阶梯）。
+
+6. **设置界面可视化决策历史：项目 $\to$ 会话分级展开 (`SettingsPage`)**：
+   - 设置页导航新增导航项：`{ id: 'reflex', label: 'Reflex 决策监控', group: '模型与分析' }`；
+   - **顶层：全局指标看板 (KPI Cards)**：总决策量、平均端侧耗时（~26ms）、一致率（%）、安全降级率（%）及任务族色彩占比条；
+   - **主体：项目 $\to$ 会话两级折叠树 (Hierarchical Accordion)**：
+     - **Level 1（项目卡片）**：以 `workspaceRoot` 聚合，展示项目路径、关联会话数、累计决策数、操作栏【⤓ 导出该项目微调数据】；
+     - **Level 2（会话条目）**：展开项目后列出该项目下的所有会话，展示标题、时间戳、决策数、一致率胶囊标签、操作栏【⤓ 导出本会话】；
+     - **Level 3（决策明细卡片）**：展开会话后按时间轴展示决策记录：
+       - 标头徽章：任务族类型（`[RECOVERY]` 等）、端侧耗时（`⚡ 28ms`）、校准置信度（`82.5%`）；
+       - 决策对比：Reflex 预测选择 vs 大模型实际选择（一致为绿，分歧为黄）；
+       - 候选概率条形图：动态横向柱状图渲染候选分布（Softmax 分布）；
+       - 上下文抽屉：点击展开查看完整 `instruction`、`state.summary`、`state.goal` 与上下文历史。
+
+7. **一键导出微调数据集（数据飞轮闭环）**：
+   - 基于 UI 现有成熟的 `downloadFile` 工具，提供多维度导出能力：
+     - 单会话导出：`EasyCode-Reflex-[SessionTitle]-[Timestamp].jsonl`
+     - 单项目导出：`EasyCode-Reflex-Project-[ProjectName]-[Timestamp].jsonl`
+     - 全局一键打包导出：导出所有项目沉淀的高价值样本；
+   - **格式完全兼容**：导出格式严格遵循 Reflex 训练集规范（`data/v1/prototype.jsonl`），导出的文件可直接放入 Reflex 项目的 `data/` 目录中，无需任何清洗二次加工，直接用于增量微调（Fine-tuning），实现真实 Trajectory 驱动的模型进化闭环。
+
 **涉及改动**：
-- `packages/core/src/policy.ts`：新增 `DecisionPolicy` / `DecisionRequest` / `DecisionResult` 接口与 `NoopPolicy`；
+- `packages/core/src/policy.ts`：新增 `DecisionPolicy` / `DecisionRequest` / `DecisionResult` / `DecisionRecord` 接口与 `NoopPolicy`；
 - `packages/core/src/loop.ts` & `approval.ts`：`LoopOptions` 与 `ToolContext` 增加可选 `policy?: DecisionPolicy`；
 - `packages/engine/src/shadow.ts`：实现 Shadow Mode 旁路事件捕获与 JSONL 日志归档；
-- `packages/engine/src/server.ts`：装配层注入决策策略与影子观察器。
+- `packages/engine/src/stats.ts`：实现 `DecisionStatsManager` 统计引擎与索引聚合；
+- `packages/engine/src/server.ts`：装配层注入决策策略与影子观察器，提供 stats / export IPC API；
+- `packages/ui/src/components/SettingsPage.tsx`：新增 `ReflexDashboard` 监控面板、KPI 卡片与两级折叠树；
+- `packages/ui/src/utils/exportDecision.ts`：微调数据集导出器。
 
 ---
 
