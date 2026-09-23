@@ -236,30 +236,41 @@ export class DecisionStatsManager {
     const lines: string[] = [];
 
     for (const r of records) {
-      // 确定最佳标签 target index
-      let label = -100;
-      if (r.actualAction?.selectedId) {
-        const found = r.candidates.findIndex((c) => c.id === r.actualAction!.selectedId);
-        if (found !== -1) label = found;
+      // 确定最佳目标动作 ID
+      let selectedId = r.actualAction?.selectedId;
+      if (!selectedId && r.prediction?.selectedId && !r.prediction.defer) {
+        selectedId = r.prediction.selectedId;
       }
-      if (label === -100 && r.prediction?.selectedId && !r.prediction.defer) {
-        const found = r.candidates.findIndex((c) => c.id === r.prediction.selectedId);
-        if (found !== -1) label = found;
+      if (!selectedId) {
+        selectedId = r.candidates[0]?.id ?? 'none';
       }
 
       const item = {
+        id: r.id,
+        schema_version: 1,
         decision: {
-          family: r.taskFamily,
           instruction: r.instruction,
+          mode: 'select_one',
         },
         state: {
+          goal: r.state.goal || 'Advance the agent task efficiently and reliably.',
           summary: r.state.summary,
-          goal: r.state.goal || 'Complete current task',
           history: r.state.history || [],
+          metadata: {
+            domain: 'coding',
+            task_family: r.taskFamily,
+          },
         },
-        candidates: r.candidates.map((c) => ({ text: c.text })),
-        label,
-        defer: r.prediction?.defer ?? false,
+        candidates: r.candidates.map((c) => ({ id: c.id, text: c.text })),
+        target: {
+          selected: [selectedId],
+          defer: r.prediction?.defer ?? false,
+        },
+        source: {
+          type: 'online_shadow_mode',
+          sessionId: r.sessionId,
+          workspaceRoot: r.workspaceRoot,
+        },
         metadata: {
           sessionId: r.sessionId,
           timestamp: r.timestamp,

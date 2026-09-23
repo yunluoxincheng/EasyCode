@@ -73,22 +73,26 @@ export class ReflexWebPolicy implements DecisionPolicy {
     }
 
     try {
-      // 1. 组装输入文本结构
+      // 1. 组装输入文本结构（对前文状态与历史进行长度保护，确保末尾的 [CAND] 候选标记绝不会被截断）
+      const safeSummary = (req.state.summary || '').slice(0, 400);
+      const safeGoal = req.state.goal ? req.state.goal.slice(0, 200) : '';
+      const safeHistory = (req.state.history || []).slice(-5);
+
       const parts = ['[TASK]', req.instruction];
-      if (req.state.goal) parts.push('', '[GOAL]', req.state.goal);
-      parts.push('', '[STATE]', req.state.summary);
-      if (req.state.history && req.state.history.length > 0) {
+      if (safeGoal) parts.push('', '[GOAL]', safeGoal);
+      parts.push('', '[STATE]', safeSummary);
+      if (safeHistory.length > 0) {
         parts.push('', '[HISTORY]');
-        for (const h of req.state.history) parts.push(`- ${h}`);
+        for (const h of safeHistory) parts.push(`- ${h.slice(0, 100)}`);
       }
       for (const c of req.candidates) {
         parts.push('', '[CAND]', c.text);
       }
       const text = parts.join('\n');
 
-      // 2. Tokenize
+      // 2. Tokenize（使用 DeBERTa-v3 原生 512 上限）
       const encoded = await this.tokenizer(text, {
-        max_length: 256,
+        max_length: 512,
         truncation: true,
       });
 
@@ -114,7 +118,10 @@ export class ReflexWebPolicy implements DecisionPolicy {
 
       for (let i = 0; i < numCands; i++) {
         const start = candPositions[i] + 1;
-        const end = i + 1 < numCands ? candPositions[i + 1] : seqLen - 1;
+        let end = i + 1 < numCands ? candPositions[i + 1] : seqLen - 1;
+        if (end <= start) {
+          end = Math.min(seqLen, start + 1);
+        }
         for (let j = start; j < end; j++) {
           if (j < seqLen) {
             candidateTokenMaskData[i * seqLen + j] = 1;

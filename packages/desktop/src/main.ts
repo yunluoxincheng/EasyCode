@@ -9,6 +9,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
+import type { DecisionPolicy, DecisionRequest, DecisionResult } from '@easycode/core';
+import { NoopDecisionPolicy } from '@easycode/core';
 import { AgentServer } from '@easycode/engine';
 import { NodeHost } from '@easycode/host-node';
 
@@ -98,6 +100,54 @@ function createWindow(): void {
 const dataDir = () => app.getPath('userData');
 const host = new NodeHost({ dataDir: dataDir() });
 const server = new AgentServer(host);
+
+/**
+ * Electron 渲染进程端侧模型决策桥接策略：
+ * 当处于 Electron 环境且开启影子模式时，将主进程 Agent 循环产生的决策请求
+ * 通过 IPC 派发给渲染进程运行的 WebAssembly ONNX 模型，并接收真实推理结果。
+ */
+class ElectronBridgeDecisionPolicy implements DecisionPolicy {
+  private pending = new Map<string, (res: DecisionResult) => void>();
+
+  handleResult(reqId: string, result: DecisionResult): void {
+    const resolve = this.pending.get(reqId);
+    if (resolve) {
+      this.pending.delete(reqId);
+      resolve(result);
+    }
+  }
+
+  async decide(req: DecisionRequest): Promise<DecisionResult> {
+    const win = mainWindow;
+    if (!win || win.isDestroyed()) {
+      return new NoopDecisionPolicy().decide(req);
+    }
+    const reqId = `ref_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+    return new Promise<DecisionResult>((resolve) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(reqId);
+        resolve(new NoopDecisionPolicy().decide(req));
+      }, 5000);
+
+      this.pending.set(reqId, (res) => {
+        clearTimeout(timer);
+        resolve(res);
+      });
+
+      win.webContents.send('easycode:event', {
+        sessionId: '__reflex__',
+        event: {
+          type: 'reflex_decide',
+          reqId,
+          request: req,
+        },
+      });
+    });
+  }
+}
+
+const bridgePolicy = new ElectronBridgeDecisionPolicy();
+server.setReflexPolicy(bridgePolicy);
 
 // 引擎事件 → 渲染进程
 server.onEvent((payload) => {
@@ -225,6 +275,12 @@ const handlers: Record<string, Handler> = {
     if (args?.action === 'min') win.minimize();
     else if (args?.action === 'max') (win.isMaximized() ? win.unmaximize() : win.maximize());
     else if (args?.action === 'close') win.close();
+    return null;
+  },
+  'reflex-decide-result': (args: { reqId: string; result: DecisionResult }) => {
+    if (args?.reqId && args?.result) {
+      bridgePolicy.handleResult(args.reqId, args.result);
+    }
     return null;
   },
 };

@@ -21,7 +21,30 @@ async function bootstrap(): Promise<void> {
       const { ReflexWebPolicy } = await import('./utils/reflexEngine.js');
       client = await createTauriClient({ reflexPolicy: new ReflexWebPolicy() });
     } else if (env === 'electron') {
-      client = new IpcAgentClient(w.easycode as ConstructorParameters<typeof IpcAgentClient>[0]);
+      const bridge = w.easycode as ConstructorParameters<typeof IpcAgentClient>[0];
+      client = new IpcAgentClient(bridge);
+
+      // 在渲染进程挂载真实 WebAssembly 端侧推理引擎，响应 Electron 主进程派发的决策请求
+      void import('./utils/reflexEngine.js').then(({ ReflexWebPolicy }) => {
+        const webPolicy = new ReflexWebPolicy();
+        bridge.onEvent((payload) => {
+          const ev = payload?.event as
+            | {
+                type?: string;
+                reqId?: string;
+                request?: Parameters<ReflexWebPolicy['decide']>[0];
+              }
+            | undefined;
+          if (ev && ev.type === 'reflex_decide' && ev.reqId && ev.request) {
+            void webPolicy.decide(ev.request).then((result) => {
+              void bridge.invoke('reflex-decide-result', {
+                reqId: ev.reqId,
+                result,
+              });
+            });
+          }
+        });
+      });
     } else {
       client = createDemoClient();
     }

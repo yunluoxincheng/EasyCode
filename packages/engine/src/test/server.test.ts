@@ -313,3 +313,57 @@ test('AgentServer: 工作区自定义指令 .easycode/prompts/*.md 扫描 (TODOS
   const empty = await server.listCustomPrompts('/nonexistent');
   assert.deepEqual(empty, []);
 });
+
+test('AgentServer: 影子模式开关开启时执行 policy 并记录，开关关闭时零旁路开销', async () => {
+  const host = new MemoryHost({
+    '/ws/file.txt': 'test',
+  });
+  const server = new AgentServer(host);
+
+  let decideCalls = 0;
+  const mockPolicy = {
+    async decide(req: any) {
+      decideCalls++;
+      return {
+        selectedId: req.candidates[0].id,
+        selectedText: req.candidates[0].text,
+        confidence: 0.95,
+        defer: false,
+        scores: { [req.candidates[0].id]: 0.95 },
+        latencyMs: 15.5,
+      };
+    },
+  };
+  server.setReflexPolicy(mockPolicy);
+
+  await server.updateSettings({
+    providers: {
+      mock: {
+        kind: 'mock',
+        baseURL: '',
+        name: 'Mock',
+        enabled: true,
+        models: [{ name: 'mock-model', enabled: true }],
+      },
+    },
+    defaultProvider: 'mock',
+    reflexShadowMode: false,
+  });
+
+  const session = await server.createSession({ workspaceRoot: '/ws', providerId: 'mock', title: '测试会话' });
+  await server.setApprovalMode(session.id, 'yolo');
+
+  // 1. 关闭状态下发消息：decideCalls 应保持为 0，零记录
+  await server.sendMessage(session.id, '请帮我写个函数');
+  assert.equal(decideCalls, 0, '开关关闭时 policy 绝不调用');
+  const statsOff = await server.getDecisionStats();
+  assert.equal(statsOff.totalDecisions, 0, '开关关闭时零日志写入');
+
+  // 2. 开启影子模式：decideCalls 应该增加，并且成功落盘记录
+  await server.updateSettings({ reflexShadowMode: true });
+  await server.sendMessage(session.id, '再写一个测试用例');
+  assert.ok(decideCalls > 0, '开启开关后执行真实决策推理');
+  const statsOn = await server.getDecisionStats();
+  assert.ok(statsOn.totalDecisions > 0, '开启开关后成功落盘审计日志');
+  assert.ok(statsOn.avgLatencyMs > 0, '包含真实推理耗时');
+});

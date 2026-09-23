@@ -117,8 +117,9 @@ test('DecisionStatsManager 写入决策记录、聚合统计并导出 JSONL 微�
   const lines = jsonl.trim().split('\n');
   assert.equal(lines.length, 2);
   const row1 = JSON.parse(lines[0]);
-  assert.equal(row1.decision.family, 'reasoning_effort');
-  assert.equal(row1.label, 0, 'fast 对应候选第 0 项');
+  assert.equal(row1.schema_version, 1);
+  assert.equal(row1.target.selected[0], 'fast', 'fast 对应选中项');
+  assert.equal(row1.candidates[0].id, 'fast');
   assert.equal(row1.candidates.length, 2);
 
   // 5. 清理
