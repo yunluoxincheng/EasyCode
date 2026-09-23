@@ -194,6 +194,115 @@ EasyCode 作为开放、可扩展的桌面 Coding Agent，目前仅提供内置�
 
 ---
 
+### 41. API Key 系统钥匙串安全存储（Keychain / Credential Manager）
+
+**状态**：⏳ 待办（规划中）
+
+**背景**：
+目前各模型服务的 API Key 以明文形式直接存储在设置 JSON 文件中（`Settings.providers[].apiKey`），任何能读取用户配置目录的进程或恶意脚本均可直接窃取明文密钥。随着应用走向正式发布（NSIS 安装包、签名分发），密钥安全将成为不可回避的底线问题。操作系统原生提供了受保护的凭据存储能力（Windows Credential Manager、macOS Keychain、Linux libsecret），应当优先利用而非自造轮子。
+
+**设计方案**：
+1. **Host 凭据存取能力注入**：
+   - `Host` 能力接口新增 `secretGet` / `secretSet` / `secretDelete` 三个方法，core 与 engine 仅面向接口编程，保持零平台依赖；
+   - **Tauri 宿主**：Rust 侧引入 `keyring` crate，新增 `secret_set` / `secret_get` / `secret_delete` 命令；
+   - **Electron 宿主**：主进程采用 `safeStorage` API 加密后落盘；
+   - **演示模式 / CLI**：内存实现或明文文件兜底，保证接口可用。
+2. **设置层平滑迁移**：
+   - Settings 中 `apiKey` 字段替换为 `apiKeyRef`（钥匙串条目标识），首次启动检测到旧明文 Key 时自动迁移至系统钥匙串并从配置文件中抹除，迁移成功 Toast 告知；
+   - 保留「不使用钥匙串」设置开关（部分 Linux 环境无 libsecret 服务），此时回退明文存储并在设置页显著标注安全提示。
+3. **设置页感知**：
+   - 模型服务表单中 Key 输入框仅显示掩码（`sk-****`），支持「更新密钥」与「清除密钥」操作，不再回显完整明文。
+
+**涉及改动**：
+- `packages/core/src/host.ts`：Host 接口扩展 secret 三方法与 MemoryHost 空实现；
+- `packages/desktop-tauri/src-tauri/src/main.rs`：keyring 凭据命令；
+- `packages/desktop/src/main.ts`：Electron safeStorage 实现与 preload 白名单；
+- `packages/engine/src/settings.ts`：`apiKeyRef` 引用模型与启动迁移逻辑；
+- `packages/ui/src/components/SettingsPage.tsx`：密钥掩码展示与迁移提示。
+
+---
+
+### 42. 子 Agent 任务委派（Sub-Agent Delegation）
+
+**状态**：⏳ 待办（规划中）
+
+**背景**：
+当前所有工作都在主会话的单一 Agent 循环内完成。执行「大范围检索代码定位实现」「阅读多份文档汇总调研结论」这类探索型子任务时，大量的中间读取输出（大文件内容、搜索命中列表）会持续挤占主会话上下文窗口，加速触发上下文压缩（#31），压缩过程的摘要损耗又会伤害主任务的关键记忆。业界主流 Coding Agent（Claude Code 的 Task/subagent、Codex）均采用「子 Agent 独立上下文探索、仅回传结论摘要」的架构来解决这一矛盾。
+
+**设计方案**：
+1. **`task` 委派工具（注册制内置工具）**：
+   - 主循环可调用 `task` 工具发起委派，参数：`description`（子任务目标）、`hints`（建议探查方向/文件）、`return_format`（期望回传格式）；
+   - 子 Agent 拥有完全独立的 `messages` 数组与独立上下文窗口，复用同一 `runAgentLoop`、同一工具集与审批策略（继承主会话审批模式与工作区绑定），可自主多步读文件、搜索、跑只读命令；
+   - 子循环结束后仅将最终结论文本作为 `task` 工具结果回传主循环，中间过程不进入主会话上下文。
+2. **资源与安全约束**：
+   - 子 Agent 默认禁用写操作与 `run_command`（只读探索），可通过参数显式申请写权限（仍走审批）；
+   - 嵌套深度上限 1 层（子 Agent 不可再委派），并发子任务数上限（默认 2），总步数独立受限；
+   - 主循环可中止（AbortSignal 贯穿），主回合被打断时子任务一并终止。
+3. **UI 过程可见**：
+   - 回合内渲染 `TaskCard`：展示子任务目标、实时状态（运行中/已完成/已中止）、耗时与可展开的子过程只读回放（不占主上下文但过程留档可查）。
+
+**涉及改动**：
+- `packages/core/src/tools/task.ts`：新建 `task` 委派工具定义；
+- `packages/core/src/loop.ts`：抽象循环入口支持子循环复用（独立 messages、受限工具集、嵌套深度控制）；
+- `packages/engine/src/server.ts`：子 Agent 生命周期管理与并发配额；
+- `packages/ui/src/components/Transcript.tsx` / `TaskCard.tsx`：委派卡片与子过程回放。
+
+---
+
+### 43. Git Worktree 并行会话（Worktree Parallel Sessions）
+
+**状态**：⏳ 待办（规划中）
+
+**背景**：
+#29 已实现多会话并发执行与运行态无感切换，但对绑定同一工作区的多个会话，敏感写操作只能经 `WorkspaceLockManager` 排队串行——两个会话在「同一份代码」上并行改动依然会互相踩踏，无法真正做到物理隔离的并行开发。Git worktree 提供了官方正解：同一仓库可检出多个独立工作目录，各自拥有独立分支与未提交改动，互不干扰。
+
+**设计方案**：
+1. **并行会话创建入口**：
+   - 项目切换器与会话侧栏新增「⑂ 并行分支会话」入口：选择或输入分支名（基于当前 HEAD 创建新分支 + worktree，目录位于 `<repo>/.easycode/worktrees/<branch>/` 并自动 gitignore）；
+   - 新会话自动绑定该 worktree 目录，Agent 的全部读写与命令都在隔离目录内进行，与主工作区物理隔离。
+2. **会话与 worktree 生命周期绑定**：
+   - 侧栏并行会话显示分支徽标（`⑂ feat/xxx`）与所属主仓库路径；
+   - 会话删除时询问是否同步清理 worktree（`git worktree remove`，有未提交改动时强提示）；
+   - 应用启动时自动探测孤儿 worktree（会话已删但目录残留）并提供清理入口。
+3. **成果回流闭环**：
+   - 并行会话内完成开发后，通过 `/commit`（#32）提交到该分支；Git 检视面板（#34）提供「⇅ 合并回当前分支」快捷操作（`git merge`，冲突时引导用户在终端或外部工具处理）；
+   - 与 #40 决策路由天然衔接：worktree 会话可作为「试验田」，失败即弃、成功即并，无风险试错。
+
+**涉及改动**：
+- `packages/engine/src/worktrees.ts`：新建 worktree 创建/清理/探测管理器；
+- `packages/core/src/tools/git.ts`：worktree 相关只读探测支持；
+- `packages/engine/src/server.ts`：会话创建接口扩展 worktree 绑定参数；
+- `packages/ui/src/components/Sidebar.tsx` / `ProjectSwitcher.tsx`：并行会话入口与分支徽标；
+- `packages/ui/src/components/GitInspectorModal.tsx`：合并回流操作。
+
+---
+
+### 44. 内嵌 Web 预览面板（Embedded Preview）
+
+**状态**：⏳ 待办（规划中）
+
+**背景**：
+前端开发的高频循环是「改代码 → 看 effect → 再改」。当前 #37 落地后，Agent 启动 dev server 并捕获 `localhost:5173` 地址，用户仍需点击「↗ 浏览器打开」切换到外部浏览器查看——窗口来回切换打断了心流。若能把运行中的本地服务直接内嵌到应用侧边实时预览，配合 Agent 的多会话并发（#29），即可形成「左侧 Agent 改码、右侧页面实时刷新」的沉浸闭环。
+
+**设计方案**：
+1. **侧边预览面板**：
+   - 可从右侧滑出/收起的预览分区（与主会话区左右分栏，可调宽度），内部以 WebView/iframe 加载目标地址；
+   - 面板顶部极客风地址栏：当前 URL、⟳ 刷新、外部浏览器打开兜底、设备视口宽度快捷切换（桌面/平板/手机）。
+2. **与 #37 后台任务条联动**：
+   - 端口探测捕获到服务地址后，任务条上的「↗ 浏览器打开」旁增加「⧉ 内嵌预览」按钮，一键在侧边打开该地址；
+   - 服务被停止或端口失活时，预览面板自动展示失联占位态（`● 服务已停止 [▶ 重新启动]`，可一键重新拉起后台任务）。
+3. **开发刷新体验**：
+   - 支持「跟随刷新」模式：检测到后台任务产生新的输出行（dev server 热更新日志）时自动轻刷新预览；
+   - HMR（vite/webpack dev server 自带热更新）天然生效，无需额外处理；仅作为 HMR 失效场景的兜底。
+
+**涉及改动**：
+- `packages/ui/src/components/PreviewPanel.tsx`：新建预览面板组件（地址栏、视口切换、失联占位）；
+- `packages/ui/src/components/BackgroundTasksBar.tsx`：任务条增加内嵌预览入口；
+- `packages/ui/src/App.tsx`：主区左右分栏布局与面板开合状态管理；
+- `packages/ui/src/styles.css`：预览面板与地址栏样式。
+
+---
+
 ### 32. Composer `/` 斜杠快捷指令系统（Slash Commands & Custom Prompts）
 
 **状态**：✅ 已完成（2026-09-22）——Composer `/` 触发监听与光标探测 + 极客风 `.command-pop` 指令面板 + 动作类执行（`/compact` 压缩上下文、`/fork` 分叉会话、`/export` 导出会话、`/clear` 清空草稿）与模板类补全（`/commit` 规范提交、`/review` 深度审查、`/test` 单元测试、`/fix` 缺陷修复）+ 工作区 `.easycode/prompts/*.md` 自定义指令自动合流 + 纯键盘驱动（↑↓ 导航、Tab/Enter 补全执行、Esc 退出、输入法合成防误触）
