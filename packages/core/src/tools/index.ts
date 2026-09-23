@@ -1,7 +1,7 @@
 import type { Host } from '../host.js';
 import { validateToolInput, type JsonSchema } from '../jsonschema.js';
 import type { ApprovalManager } from '../approval.js';
-import type { DecisionPolicy } from '../policy.js';
+import { startDecisionObservation, type DecisionPolicy, type DecisionOutcome } from '../policy.js';
 import { readFileTool, writeFileTool, editFileTool, listDirTool } from './fs.js';
 import { searchFilesTool } from './search.js';
 import { runCommandTool } from './shell.js';
@@ -135,6 +135,21 @@ export interface ToolExecution {
   durationMs: number;
 }
 
+/** 只判断工具调用本身的可观测结果，不推断整个 Agent 任务是否成功。 */
+export function getToolExecutionOutcome(name: string, execution: ToolExecution): DecisionOutcome {
+  if (!execution.approved) return { status: 'unknown', evidence: 'Tool was not executed' };
+  if (execution.isError) return { status: 'failure', evidence: 'Tool execution failed' };
+  if (name === 'run_command') {
+    const exit = /^退出码: (\d+|signal)(?:\n|$)/.exec(execution.content)?.[1];
+    if (!exit) return { status: 'unknown', evidence: 'Command exit code unavailable' };
+    return {
+      status: exit === '0' ? 'success' : 'failure',
+      evidence: `Command exit code: ${exit}`,
+    };
+  }
+  return { status: 'success', evidence: 'Tool call completed without exception' };
+}
+
 /** 工具执行管线：校验 → 审批 → 执行 → 统一错误捕获 */
 export async function executeTool(
   registry: ToolRegistry,
@@ -165,8 +180,8 @@ export async function executeTool(
     };
   }
   // 敏感操作语义安全风险评估旁路（TODOS #40 Safety）
-  if (registry.isSensitive(name) && ctx.policy) {
-    void ctx.policy.decide({
+  const safetyObservation = registry.isSensitive(name) && ctx.policy
+    ? startDecisionObservation(ctx.policy, {
       taskFamily: 'safety',
       instruction: 'Assess the semantic risk of executing this action.',
       state: {
@@ -178,13 +193,19 @@ export async function executeTool(
         { id: 'block', text: 'BLOCK: Hazardous command, reject immediately' },
       ],
       metadata: { toolName: name, input: validated.value },
-    }).catch(() => {});
-  }
+    }) : undefined;
   // 仅敏感工具（写文件/执行命令）在 ask 模式下需要审批，只读工具直接放行
   const approved = registry.isSensitive(name)
     ? await ctx.approval.request(name, validated.value)
     : true;
+  safetyObservation?.actual({
+    // 审批模式是配置，不是 Agent 对语义风险的判断；不可参与模型一致率。
+    description: ctx.approval.modeValue === 'ask'
+      ? `Approval requested (${approved ? 'approved' : 'denied'})`
+      : 'YOLO mode allowed action',
+  });
   if (!approved) {
+    safetyObservation?.outcome({ status: 'unknown', evidence: 'User denied execution' });
     return {
       content:
         '用户拒绝了此操作。请不要重复尝试同一操作，向用户说明你的意图或改用其他方案。',
@@ -199,8 +220,11 @@ export async function executeTool(
       registry.isSensitive(name) && ctx.workspaceLock
         ? await ctx.workspaceLock.withLock(run, ctx.signal)
         : await run();
-    return { content, approved: true, isError: false, durationMs: Date.now() - started };
+    const execution = { content, approved: true, isError: false, durationMs: Date.now() - started };
+    safetyObservation?.outcome(getToolExecutionOutcome(name, execution));
+    return execution;
   } catch (err) {
+    safetyObservation?.outcome({ status: 'failure', evidence: 'Tool execution failed' });
     return {
       content: `工具执行失败: ${err instanceof Error ? err.message : String(err)}`,
       approved: true,

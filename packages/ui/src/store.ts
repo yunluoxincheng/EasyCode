@@ -332,6 +332,11 @@ export class AppStore {
     this.notify();
   }
 
+  async loadSessions(): Promise<void> {
+    this.sessions = await this.client.listSessions();
+    this.notify(true);
+  }
+
   /** 获取或创建指定会话的池化状态 */
   getOrCreateSessionState(id: string): SessionViewState {
     let state = this.sessionStates.get(id);

@@ -93,6 +93,12 @@ export interface AgentClient {
   /** 获取 Reflex 项目->会话两级决策树（TODOS #40） */
   getDecisionTree?(): Promise<ProjectDecisionTree[]>;
   /** 导出微调数据集 JSONL（TODOS #40） */
-  exportDecisionDataset?(filter?: { workspaceRoot?: string; sessionId?: string }): Promise<string>;
+  exportDecisionDataset?(filter?: { workspaceRoot?: string; sessionId?: string; includeUnreviewed?: boolean }): Promise<string>;
+  /** 人工确认正确候选或 defer；只有审核样本可进入训练集。 */
+  reviewDecision?(
+    sessionId: string,
+    recordId: string,
+    label: { selectedId?: string; defer: boolean },
+  ): Promise<void>;
   onEvent(listener: (payload: { sessionId: string; event: AgentEvent }) => void): () => void;
 }

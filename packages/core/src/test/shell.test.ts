@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { runCommandTool } from '../tools/shell.js';
+import { getToolExecutionOutcome } from '../tools/index.js';
 import type { Host, ProcessResult, ProcessRunOptions } from '../host.js';
 
 function createMockHost(result: ProcessResult, onRun?: (cmd: string, opts: ProcessRunOptions) => void): Host {
@@ -8,6 +9,7 @@ function createMockHost(result: ProcessResult, onRun?: (cmd: string, opts: Proce
     fs: {
       readFile: async () => '',
       writeFile: async () => {},
+      appendFile: async () => {},
       mkdir: async () => {},
       readdir: async () => [],
       stat: async () => null,
@@ -60,6 +62,15 @@ test('runCommandTool透传shell、cwd与timeoutMs', async () => {
   assert.equal(capturedOpts?.shell, 'git-bash');
   assert.match(out, /退出码: 0/);
   assert.match(out, /total 42/);
+});
+
+test('旁路结果以命令退出码为准，拒绝执行不记为成功', () => {
+  const base = { approved: true, isError: false, durationMs: 1 };
+  assert.equal(getToolExecutionOutcome('run_command', { ...base, content: '退出码: 0\nstdout:\nok' }).status, 'success');
+  assert.equal(getToolExecutionOutcome('run_command', { ...base, content: '退出码: 1\nstderr:\nfailed' }).status, 'failure');
+  assert.equal(getToolExecutionOutcome('run_command', { ...base, content: '退出码: signal' }).status, 'failure');
+  assert.equal(getToolExecutionOutcome('run_command', { ...base, content: 'no exit code' }).status, 'unknown');
+  assert.equal(getToolExecutionOutcome('run_command', { ...base, approved: false, content: '退出码: 0' }).status, 'unknown');
 });
 
 test('runCommandTool在未显式传shell时透传undefined或auto', async () => {

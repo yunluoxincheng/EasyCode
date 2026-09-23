@@ -171,7 +171,7 @@ EasyCode 作为开放、可扩展的桌面 Coding Agent，目前仅提供内置�
 
 ### 40. AgentRuntime 决策与路由挂载接口（Reflex 决策小模型 / DecisionPolicy 挂载与 Shadow Mode 旁路）
 
-**状态**：✅ 已完成（2026-09-23）——Core 零依赖契约 + 四大决策点旁路注入 + DecisionStatsManager 统计引擎 + 设置页 Reflex 决策监控看板（项目→会话两级折叠树与概率柱状图）+ Reflex V1 标准微调数据集导出
+**状态**：🟡 Stage A 工程实现完成，待真实会话验收（2026-09-24）——已接入四个可观测决策点、事件日志、统计看板与人工审核后导出；尚未积累和评估真实审核样本，也未启用模型接管。
 
 **背景**：
 在现有的 Agent 核心循环中，意图识别、推理档位分配（Reasoning Effort）、敏感操作审批、工具报错恢复以及上下文压缩时机等所有控制流决策，要么完全依赖主会话的大模型（LLM）进行全量高延迟生成，要么依赖硬编码的朴素阈值（如敏感布尔值、0.85 上下文压缩硬触发、报错直接回传模型自行思考）。这种模式增加了单次回合的延迟与 Token 消耗，且缺乏端侧自适应调控能力。
@@ -217,17 +217,21 @@ EasyCode 作为开放、可扩展的桌面 Coding Agent，目前仅提供内置�
    }
    ```
 
-2. **预留首批落地关键决策介入点**：
+2. **预留首批落地关键决策介入点（已全量接入 7 大决策任务族）**：
    - **决策点 1：推理深度动态分配 (`reasoning_effort`)**：根据用户输入意图与工作区复杂度，决策 `fast` / `medium` / `high`；
    - **决策点 2：工具执行错误恢复 (`recovery`)**：工具报错时，快速决策是 `retry_same` / `modify_input` / `search_dir` / `ask_user` / `stop`；
    - **决策点 3：上下文修剪决策 (`context_management`)**：根据当前历史密度，决策是否提前做工具输出修剪或消息合并，而非仅靠 0.85 静态阈值；
-   - **决策点 4：敏感命令审批建议 (`safety`)**：为 `ApprovalManager` 注入语义风险评分，辅助区分安全只读、常规修改与破坏性高危操作。
+   - **决策点 4：敏感命令审批建议 (`safety`)**：旁路预测语义风险；当前审批仍按既有模式执行，审批模式不充当风险真值；
+   - **决策点 5：信息充分性判断 (`information_sufficiency`)**：评估当前上下文是否充足，决策是 `proceed` / `read_more` / `search` / `ask_user`；
+   - **决策点 6：代码变更验证手段 (`verification`)**：代码写入后，决策最优验证手段 `run_test` / `run_build` / `inspect_diff` / `no_verify`；
+   - **决策点 7：工具路由预测 (`tool_routing`)**：预测下一步工具家族（读检查/写修改/搜索探索/命令执行/Git版本控制/直接回复）。
 
 3. **四阶段渐进式接管与安全网（Stage-gated Rollout）**：
    - **Stage A: Shadow Mode（当前集成第一目标）**：
      - 完全不改变 EasyCode 现有的任何主逻辑与执行动作；
      - 关键决策点异步旁路触发 `policy.decide()`，主循环零阻塞；
-     - 落盘记录影子决策日志（`State`、`Candidates`、`Reflex 预测与置信度`、`主模型实际动作`、`最终 Outcome 结果`），用于在真实开发场景中验证模型准确率并持续收集 Trajectory 数据；
+     - 按决策事件落盘记录实际送入模型的脱敏 `State`、`Candidates`、预测状态、Agent 或既有规则的实际动作及可观测执行结果；无法映射候选时留空，不猜测动作或成功率；
+     - 一致率只统计有效预测与可映射实际动作的交集；人工审核标签是训练目标的唯一来源。真实会话数据质量验收仍待完成；
    - **Stage B: Advisory Mode（建议模式）**：
      - 在开发者日志或 UI 旁路轻量展示微模型建议（如“Reflex 建议当前任务可使用 fast 推理档位”）；
    - **Stage C: Low-risk Control（低风险接管）**：
@@ -237,19 +241,20 @@ EasyCode 作为开放、可扩展的桌面 Coding Agent，目前仅提供内置�
 
 4. **运行时与工程架构分层**：
    - `packages/core`：只包含接口定义与默认 `NoopDecisionPolicy`，保持零外部依赖；
-   - `packages/engine`：提供 `ShadowLoggerPolicy`，在 `server.ts` `runTurn` 组装时按需注入；
+   - `packages/engine`：提供 `ShadowDecisionPolicy`，在 `server.ts` `runTurn` 组装时按需注入；
    - 端侧 ONNX 运行时实现：
-     - **Electron / CLI**：由主进程/NodeHost 侧使用 `onnxruntime-node` 加载 80MB 权重；
-     - **Tauri / 浏览器**：由 WebView 使用 `onnxruntime-web` 或经 Rust Tauri 命令代理；
+     - **Electron**：主进程经 IPC 向渲染进程请求推理，由渲染进程的 `onnxruntime-web` 执行；
+     - **Tauri**：WebView 内的 `onnxruntime-web` 直接注入策略；**CLI / 演示客户端**目前使用 Noop，不能计入有效预测；
    - 降级保护：任何 ONNX 加载失败、超时或内部异常，一律自动降级为 Noop，主流程绝不报错。
 
 5. **内置统计分析引擎 (`DecisionStatsManager`)**：
-   - **持久化路径**：在用户数据目录集中追加存储 `${this.host.env.dataDir()}/reflex_decisions/${sessionId}.jsonl`，会话级隔离、写入无锁追加、会话删除同步清理，绝不污染代码库；
+   - **持久化路径**：在用户数据目录追加存储 `${this.host.env.dataDir()}/reflex_decisions/${sessionId}.jsonl`，会话级串行追加、会话删除同步清理，绝不污染代码库；
    - **核心指标聚合计算**：
      - `totalDecisions`：累计微决策次数；
      - `avgLatencyMs`：端侧决策平均耗时（ms）；
      - `deferRate`：模型主动降级/转交主大模型的比例；
-     - `agreementRate`：与主会话大模型实际决策的吻合率；
+     - `agreementRate`：有效预测与可映射实际动作的吻合率，不能解释为正确率；
+     - `validPredictions` / `comparableDecisions` / `reviewedSamples` / `writeFailures`：分别标明预测、对照、人工标签和当前进程写入失败的数量；
      - `taskFamilyDistribution`：四大任务族的触发频度占比；
      - `confidenceBuckets`：置信度区间分布统计（健康度阶梯）。
 
@@ -261,16 +266,19 @@ EasyCode 作为开放、可扩展的桌面 Coding Agent，目前仅提供内置�
      - **Level 2（会话条目）**：展开项目后列出该项目下的所有会话，展示标题、时间戳、决策数、一致率胶囊标签、操作栏【⤓ 导出本会话】；
      - **Level 3（决策明细卡片）**：展开会话后按时间轴展示决策记录：
        - 标头徽章：任务族类型（`[RECOVERY]` 等）、端侧耗时（`⚡ 28ms`）、校准置信度（`82.5%`）；
-       - 决策对比：Reflex 预测选择 vs 大模型实际选择（一致为绿，分歧为黄）；
+       - 决策对比：Reflex 预测选择 vs Agent 或既有规则实际动作；安全审批模式与预测风险不做一致率比较；
        - 候选概率条形图：动态横向柱状图渲染候选分布（Softmax 分布）；
        - 上下文抽屉：点击展开查看完整 `instruction`、`state.summary`、`state.goal` 与上下文历史。
 
-7. **一键导出微调数据集（数据飞轮闭环）**：
+7. **微调数据集导出（双轨模式：支持全量轨迹与人工审核样本）**：
    - 基于 UI 现有成熟的 `downloadFile` 工具，提供多维度导出能力：
-     - 单会话导出：`EasyCode-Reflex-[SessionTitle]-[Timestamp].jsonl`
-     - 单项目导出：`EasyCode-Reflex-Project-[ProjectName]-[Timestamp].jsonl`
-     - 全局一键打包导出：导出所有项目沉淀的高价值样本；
-   - **格式完全兼容**：导出格式严格遵循 Reflex 训练集规范（`data/v1/prototype.jsonl`），导出的文件可直接放入 Reflex 项目的 `data/` 目录中，无需任何清洗二次加工，直接用于增量微调（Fine-tuning），实现真实 Trajectory 驱动的模型进化闭环。
+     - 单会话导出：`Reflex-Session-[SessionTitle]-[Timestamp].jsonl`
+     - 单项目导出：`Reflex-Project-[ProjectName]-[Timestamp].jsonl`
+     - 全局一键导出：`Reflex-AllProjects-Finetune-[Timestamp].jsonl`；
+   - **双轨导出机制**：
+     - **全量轨迹集（默认可用）**：直接导出 Agent 真实运行轨迹，自动将可观测的 Agent 动作记录为 `observed_action` 参照目标，方便开发者即时离线分析；
+     - **人工审核样本集（高精度闭环）**：在 Reflex 看板中经人工确认正确候选或标记 DEFER 的样本，以 `label_basis: 'human'` 导出，杜绝模型自标注漂移；
+   - **格式完全对齐**：导出结构 100% 遵循 Reflex V1 JSONL 规范（`id`, `schema_version: 1`, `decision`, `state`, `candidates`, `target`, `source`, `split_group`），同一 Agent 回合共享 `split_group`，避免训练与评测跨集合泄漏，可直接无缝投喂给 Reflex 训练管线。
 
 **涉及改动**：
 - `packages/core/src/policy.ts`：新增 `DecisionPolicy` / `DecisionRequest` / `DecisionResult` / `DecisionRecord` 接口与 `NoopPolicy`；

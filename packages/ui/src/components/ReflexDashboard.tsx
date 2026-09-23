@@ -20,6 +20,8 @@ export function ReflexDashboard() {
   const [tree, setTree] = useState<ProjectDecisionTree[]>([]);
   const [loading, setLoading] = useState(true);
   const [exporting, setExporting] = useState(false);
+  const [reviewing, setReviewing] = useState(false);
+  const [reviewSelection, setReviewSelection] = useState<Record<string, string>>({});
 
   // 展开状态追踪
   const [expandedProjects, setExpandedProjects] = useState<Record<string, boolean>>({});
@@ -67,17 +69,39 @@ export function ReflexDashboard() {
     setExpandedRecords((prev) => ({ ...prev, [rid]: !prev[rid] }));
   };
 
-  const handleExport = async (filter?: { workspaceRoot?: string; sessionId?: string }, title?: string) => {
+  const handleExport = async (
+    filter?: { workspaceRoot?: string; sessionId?: string; includeUnreviewed?: boolean },
+    title?: string,
+  ) => {
     setExporting(true);
     try {
       const res = await downloadDecisionDataset(store.client, filter, title);
       if (res.ok) {
-        store.showToast(`已成功导出 ${res.count} 条微调训练样本 (.jsonl)`, 'ok');
+        store.showToast(`已成功导出 ${res.count} 条样本 (.jsonl)`, 'ok');
       } else {
         store.showToast(res.error || '导出失败', 'err');
       }
     } finally {
       setExporting(false);
+    }
+  };
+
+  const handleReview = async (record: DecisionRecord, defer: boolean) => {
+    if (!store.client.reviewDecision) return;
+    const selectedId = defer ? undefined : (reviewSelection[record.id] ?? record.review?.selectedId);
+    if (!defer && !selectedId) {
+      store.showToast('请先人工选择正确候选项', 'err');
+      return;
+    }
+    setReviewing(true);
+    try {
+      await store.client.reviewDecision(record.sessionId, record.id, { selectedId, defer });
+      store.showToast('人工标签已保存；可用于审核后的训练集导出', 'ok');
+      await loadData();
+    } catch (err) {
+      store.showToast(`审核失败: ${err instanceof Error ? err.message : String(err)}`, 'err');
+    } finally {
+      setReviewing(false);
     }
   };
 
@@ -99,7 +123,7 @@ export function ReflexDashboard() {
       <div className="page-head" style={{ marginBottom: 16 }}>
         <div>
           <div className="page-desc">
-            端侧微型决策模型（Reflex ~22M DeBERTa-v3 INT8）在线旁路观测、效能评估与微调闭环
+            Reflex 端侧旁路观测；实际行为用于对照，只有人工确认的标签进入训练集
           </div>
         </div>
         <div className="page-actions" style={{ display: 'flex', gap: 10 }}>
@@ -113,12 +137,22 @@ export function ReflexDashboard() {
           </button>
           <button
             className="btn primary mini-btn"
-            onClick={() => handleExport(undefined, 'Global')}
+            onClick={() => handleExport({ includeUnreviewed: true }, 'Global-Trajectory')}
             disabled={exporting || !stats || stats.totalDecisions === 0}
-            title="一键导出所有项目会话沉淀的全部微调数据集"
+            title="一键导出所有项目会话的真实决策轨迹与执行对照"
           >
-            ⤓ 导出全量微调集 (.jsonl)
+            ⤓ 导出全量轨迹集 (.jsonl)
           </button>
+          {(stats?.reviewedSamples ?? 0) > 0 && (
+            <button
+              className="btn ghost mini-btn"
+              onClick={() => handleExport({ includeUnreviewed: false }, 'Global-Audited')}
+              disabled={exporting}
+              title="仅导出经人工审核确认的高质量训练样本"
+            >
+              ★ 导出已审核样本 ({stats?.reviewedSamples})
+            </button>
+          )}
         </div>
       </div>
 
@@ -140,7 +174,7 @@ export function ReflexDashboard() {
           </div>
           <div style={{ fontSize: 11, color: 'var(--dim)', marginTop: 4, lineHeight: 1.5 }}>
             {isEnabled
-              ? '【运行中】Agent 运行时关键决策点将在后台以毫秒级运行 22M INT8 决策小脑，真实记录评估轨迹与置信度。'
+              ? '【运行中】记录 Reflex 预测和 Agent 实际行为；未审核样本不会进入训练集。'
               : '【已关闭】完全停止端侧小模型推理与日志记录，主循环零额外 CPU 消耗、零文件写入。'}
           </div>
         </div>
@@ -200,11 +234,11 @@ export function ReflexDashboard() {
             </div>
 
             <div className="general-panel" style={{ padding: '14px 16px' }}>
-              <div style={{ fontSize: 11, color: 'var(--dim)', textTransform: 'uppercase' }}>与大模型决策一致率</div>
+              <div style={{ fontSize: 11, color: 'var(--dim)', textTransform: 'uppercase' }}>与实际动作一致率</div>
               <div style={{ fontSize: 24, fontWeight: 700, color: stats.agreementRate >= 0.8 ? 'var(--green)' : 'var(--amber)', marginTop: 4 }}>
-                {(stats.agreementRate * 100).toFixed(1)}%
+                {(stats.comparableDecisions ?? 0) > 0 ? `${(stats.agreementRate * 100).toFixed(1)}%` : '暂无数据'}
               </div>
-              <div style={{ fontSize: 11, color: 'var(--faint)', marginTop: 2 }}>Reflex 预测吻合度</div>
+              <div style={{ fontSize: 11, color: 'var(--faint)', marginTop: 2 }}>有效对照 {stats.comparableDecisions ?? 0} 条；一致不代表正确</div>
             </div>
 
             <div className="general-panel" style={{ padding: '14px 16px' }}>
@@ -212,8 +246,12 @@ export function ReflexDashboard() {
               <div style={{ fontSize: 24, fontWeight: 700, color: 'var(--amber)', marginTop: 4 }}>
                 {(stats.deferRate * 100).toFixed(1)}%
               </div>
-              <div style={{ fontSize: 11, color: 'var(--faint)', marginTop: 2 }}>低置信度转交主大模型</div>
+              <div style={{ fontSize: 11, color: 'var(--faint)', marginTop: 2 }}>仅统计 {stats.validPredictions ?? 0} 条有效预测</div>
             </div>
+          </div>
+
+          <div style={{ fontSize: 12, color: 'var(--dim)', marginBottom: 14 }}>
+            已人工审核 {stats.reviewedSamples ?? 0} 条 · 实际动作待映射 {stats.unresolvedDecisions ?? 0} 条 · 本次运行日志写入失败 {stats.writeFailures ?? 0} 次
           </div>
 
           {/* 任务族比例分布条 */}
@@ -340,7 +378,7 @@ export function ReflexDashboard() {
 
                               <div style={{ display: 'flex', alignItems: 'center', gap: 10 }} onClick={(e) => e.stopPropagation()}>
                                 <span style={{ fontSize: 11, padding: '2px 6px', borderRadius: 2, background: 'var(--border2)', color: 'var(--dim)' }}>
-                                  一致率 {(s.agreementRate * 100).toFixed(0)}%
+                                  {(s.comparableDecisions ?? 0) > 0 ? `一致率 ${(s.agreementRate * 100).toFixed(0)}%` : '暂无可比动作'}
                                 </span>
                                 <span style={{ fontSize: 12, color: 'var(--dim)' }}>
                                   {s.totalDecisions} 次决策
@@ -348,9 +386,9 @@ export function ReflexDashboard() {
                                 <button
                                   className="btn ghost mini-btn"
                                   style={{ fontSize: 11, padding: '2px 6px' }}
-                                  onClick={() => handleExport({ sessionId: s.sessionId }, s.sessionTitle)}
-                                  disabled={exporting}
-                                  title="导出本会话的微调样本"
+                                  onClick={() => handleExport({ sessionId: s.sessionId, includeUnreviewed: true }, s.sessionTitle)}
+                                  disabled={exporting || s.totalDecisions === 0}
+                                  title="导出本会话的全部决策轨迹"
                                 >
                                   ⤓ 导出会话
                                 </button>
@@ -389,9 +427,9 @@ export function ReflexDashboard() {
 
                                         <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 11 }}>
                                           <span style={{ color: 'var(--dim)' }}>
-                                            ⚡ {r.prediction?.latencyMs} ms
+                                             {r.predictionStatus === 'ready' ? `⚡ ${r.prediction?.latencyMs} ms` : '预测未就绪'}
                                           </span>
-                                          <span style={{ color: r.prediction?.confidence >= 0.7 ? 'var(--green)' : 'var(--amber)', fontWeight: 600 }}>
+                                          <span style={{ color: (r.prediction?.confidence ?? 0) >= 0.7 ? 'var(--green)' : 'var(--amber)', fontWeight: 600 }}>
                                             置信度: {((r.prediction?.confidence ?? 0) * 100).toFixed(1)}%
                                           </span>
                                           {r.prediction?.defer && (
@@ -418,16 +456,40 @@ export function ReflexDashboard() {
                                         <div>
                                           <span style={{ color: 'var(--dim)', marginRight: 6 }}>Reflex 预测:</span>
                                           <span style={{ color: 'var(--green)', fontWeight: 600 }}>
-                                            {r.prediction?.selectedId} ({r.prediction?.selectedText})
+                                            {r.predictionStatus === 'ready'
+                                              ? `${r.prediction?.selectedId} (${r.prediction?.selectedText})`
+                                              : '不可用'}
                                           </span>
                                         </div>
                                         {r.actualAction && (
                                           <div>
                                             <span style={{ color: 'var(--dim)', marginRight: 6 }}>实际动作:</span>
                                             <span style={{ color: r.agreement ? 'var(--green)' : 'var(--amber)' }}>
-                                              {r.actualAction.description}
+                                              {r.actualAction.description}{r.actualAction.selectedId ? ` [${r.actualAction.selectedId}]` : ' [未映射]'}
                                             </span>
                                           </div>
+                                        )}
+                                      </div>
+
+                                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8, fontSize: 11 }}>
+                                        <span style={{ color: 'var(--dim)' }}>
+                                          {r.review ? `人工标签：${r.review.defer ? 'DEFER' : r.review.selectedId}` : '未审核：实际行为不作为训练标签'}
+                                        </span>
+                                        {r.turnId && store.client.reviewDecision && (
+                                          <>
+                                            <select
+                                              value={reviewSelection[r.id] ?? r.review?.selectedId ?? ''}
+                                              onChange={(e) => setReviewSelection((prev) => ({ ...prev, [r.id]: e.target.value }))}
+                                              style={{ background: 'var(--panel2)', color: 'var(--text-bright)', border: '1px solid var(--border)' }}
+                                            >
+                                              <option value="">人工选择正确候选</option>
+                                              {cands.map((c) => <option key={c.id} value={c.id}>{c.id}: {c.text}</option>)}
+                                            </select>
+                                            <button className="btn ghost mini-btn" disabled={reviewing}
+                                              onClick={() => void handleReview(r, false)}>确认标签</button>
+                                            <button className="btn ghost mini-btn" disabled={reviewing}
+                                              onClick={() => void handleReview(r, true)}>标记候选不足</button>
+                                          </>
                                         )}
                                       </div>
 

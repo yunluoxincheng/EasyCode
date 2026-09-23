@@ -5,6 +5,7 @@ import { StoreProvider } from './useStore.js';
 import { AppStore } from './store.js';
 import { IpcAgentClient, createDemoClient } from './client.js';
 import type { AgentClient } from './client.js';
+import type { DecisionRequest } from '@easycode/core';
 import './styles.css';
 
 /** 运行环境三态：Tauri（Rust 宿主）/ Electron（IPC 宿主）/ 浏览器演示（内存宿主） */
@@ -32,7 +33,7 @@ async function bootstrap(): Promise<void> {
             | {
                 type?: string;
                 reqId?: string;
-                request?: Parameters<ReflexWebPolicy['decide']>[0];
+                request?: DecisionRequest;
               }
             | undefined;
           if (ev && ev.type === 'reflex_decide' && ev.reqId && ev.request) {

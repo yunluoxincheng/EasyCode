@@ -23,6 +23,7 @@ export interface Host {
   fs: {
     readFile(path: string): Promise<string>;
     writeFile(path: string, data: string): Promise<void>;
+    appendFile(path: string, data: string): Promise<void>;
     mkdir(path: string, options?: { recursive?: boolean }): Promise<void>;
     readdir(path: string): Promise<FsDirent[]>;
     stat(path: string): Promise<null | { isDirectory: boolean; size: number; mtimeMs: number }>;
@@ -94,6 +95,10 @@ export class MemoryHost implements Host {
     },
     writeFile: async (p: string, data: string) => {
       this.files.set(this.norm(p), data);
+    },
+    appendFile: async (p: string, data: string) => {
+      const key = this.norm(p);
+      this.files.set(key, (this.files.get(key) ?? '') + data);
     },
     mkdir: async () => {},
     readdir: async (p: string) => {

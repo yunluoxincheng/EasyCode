@@ -100,7 +100,7 @@ export class ReflexWebPolicy implements DecisionPolicy {
         truncation: true,
       });
 
-      const inputIdsArray = Array.from(encoded.input_ids.data as BigInt64Array | number[]).map(Number);
+      const inputIdsArray = Array.from(encoded.input_ids.data as Iterable<number | bigint>, Number);
       const seqLen = inputIdsArray.length;
       const candTokenId = this.runtimeConfig?.special_tokens?.cand_token_id ?? 128005;
 
@@ -186,6 +186,7 @@ export class ReflexWebPolicy implements DecisionPolicy {
         defer: shouldDefer,
         scores: scoreMap,
         latencyMs,
+        modelVersion: `${this.runtimeConfig?.backbone ?? 'deberta-v3-xsmall'}:int8`,
       };
     } catch (err) {
       console.warn('[Reflex] Inference error:', err);

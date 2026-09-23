@@ -1,10 +1,23 @@
 import type { Host } from '@easycode/core';
 import type {
   DecisionRecord,
+  DecisionResult,
+  DecisionActualAction,
+  DecisionOutcome,
+  DecisionReview,
   DecisionStats,
   ProjectDecisionTree,
   SessionDecisionSummary,
 } from '@easycode/core';
+
+export type DecisionLogEvent =
+  | { kind: 'requested'; record: DecisionRecord }
+  | { kind: 'snapshot'; record: DecisionRecord }
+  | { kind: 'predicted'; id: string; prediction: DecisionResult }
+  | { kind: 'prediction_failed'; id: string }
+  | { kind: 'actual'; id: string; action: DecisionActualAction }
+  | { kind: 'outcome'; id: string; outcome: DecisionOutcome }
+  | { kind: 'reviewed'; id: string; review: DecisionReview };
 
 /**
  * 决策统计与日志归档管理器 (DecisionStatsManager)
@@ -15,6 +28,10 @@ import type {
  * 4. 导出完全兼容 Reflex V1 训练管线规范的 .jsonl 数据集
  */
 export class DecisionStatsManager {
+  private readonly writeQueues = new Map<string, Promise<void>>();
+  private readonly deletedSessions = new Set<string>();
+  private writeFailures = 0;
+
   constructor(private readonly host: Host) {}
 
   private dir(): string {
@@ -22,28 +39,33 @@ export class DecisionStatsManager {
   }
 
   private sessionFile(sessionId: string): string {
+    if (!/^[a-zA-Z0-9_-]+$/.test(sessionId)) throw new Error('Invalid session ID');
     return this.host.paths.join(this.dir(), `${sessionId}.jsonl`);
   }
 
-  /**
-   * 追加写入单条决策记录（Append-only，无锁极速落盘）
-   */
-  async recordDecision(record: DecisionRecord): Promise<void> {
-    try {
-      const dir = this.dir();
-      await this.host.fs.mkdir(dir, { recursive: true });
-      const line = JSON.stringify(record) + '\n';
-      const file = this.sessionFile(record.sessionId);
-      let existing = '';
-      try {
-        existing = await this.host.fs.readFile(file);
-      } catch {
-        existing = '';
-      }
-      await this.host.fs.writeFile(file, existing + line);
-    } catch {
-      // 容错：写日志失败不抛给上层业务
-    }
+  /** 每个会话串行追加事件；失败可统计，不能覆盖先前日志。 */
+  appendEvent(sessionId: string, event: DecisionLogEvent): Promise<void> {
+    if (this.deletedSessions.has(sessionId)) return Promise.resolve();
+    const previous = this.writeQueues.get(sessionId) ?? Promise.resolve();
+    const next = previous.catch(() => {}).then(async () => {
+      await this.host.fs.mkdir(this.dir(), { recursive: true });
+      await this.host.fs.appendFile(this.sessionFile(sessionId), JSON.stringify(event) + '\n');
+    });
+    this.writeQueues.set(sessionId, next);
+    void next.catch(() => { this.writeFailures++; });
+    return next;
+  }
+
+  /** 兼容旧调用方；新旁路应使用多阶段事件。 */
+  recordDecision(record: DecisionRecord): Promise<void> {
+    return this.appendEvent(record.sessionId, { kind: 'snapshot', record });
+  }
+
+  async flush(sessionId?: string): Promise<void> {
+    const pending = sessionId
+      ? [this.writeQueues.get(sessionId)]
+      : [...this.writeQueues.values()];
+    await Promise.allSettled(pending.filter((p): p is Promise<void> => p !== undefined));
   }
 
   /**
@@ -51,6 +73,8 @@ export class DecisionStatsManager {
    */
   async deleteSessionRecords(sessionId: string): Promise<void> {
     try {
+      this.deletedSessions.add(sessionId);
+      await this.flush(sessionId);
       const file = this.sessionFile(sessionId);
       const stat = await this.host.fs.stat(file);
       if (stat) {
@@ -65,6 +89,8 @@ export class DecisionStatsManager {
    * 读取全部决策记录（支持按项目或按会话过滤）
    */
   async loadRecords(filter?: { workspaceRoot?: string; sessionId?: string }): Promise<DecisionRecord[]> {
+    if (filter?.sessionId) this.sessionFile(filter.sessionId);
+    await this.flush(filter?.sessionId);
     const records: DecisionRecord[] = [];
     const dir = this.dir();
     const stat = await this.host.fs.stat(dir);
@@ -85,18 +111,53 @@ export class DecisionStatsManager {
       try {
         const content = await this.host.fs.readFile(filePath);
         const lines = content.split('\n');
+        const byId = new Map<string, DecisionRecord>();
         for (const line of lines) {
           const trimmed = line.trim();
           if (!trimmed) continue;
           try {
-            const rec = JSON.parse(trimmed) as DecisionRecord;
-            if (filter?.workspaceRoot && rec.workspaceRoot !== filter.workspaceRoot) {
-              continue;
+            const entry = JSON.parse(trimmed) as DecisionLogEvent | DecisionRecord;
+            if ('kind' in entry) {
+              if (entry.kind === 'requested' || entry.kind === 'snapshot') {
+                byId.set(entry.record.id, {
+                  ...entry.record,
+                  predictionStatus: entry.kind === 'requested' ? 'pending' : 'ready',
+                });
+                continue;
+              }
+              const rec = byId.get(entry.id);
+              if (!rec) continue;
+              if (entry.kind === 'predicted') {
+                rec.prediction = entry.prediction;
+                rec.predictionStatus = 'ready';
+              } else if (entry.kind === 'prediction_failed') {
+                rec.predictionStatus = 'failed';
+              } else if (entry.kind === 'actual') {
+                rec.actualAction = entry.action;
+              } else if (entry.kind === 'outcome') {
+                rec.outcome = entry.outcome;
+              } else if (entry.kind === 'reviewed') {
+                rec.review = entry.review;
+              }
+            } else if (entry && typeof entry.id === 'string') {
+              // 无 turnId 的旧版日志曾把非 defer 直接记为 agreement，且可能写入伪降级结果。
+              // 只展示历史内容，不计入有效预测或一致率，也不允许进入训练集。
+              byId.set(entry.id, {
+                ...entry,
+                predictionStatus: entry.turnId && entry.prediction ? 'ready' : 'failed',
+              });
             }
-            records.push(rec);
           } catch {
             // 跳过损坏行
           }
+        }
+        for (const rec of byId.values()) {
+          rec.agreement = rec.turnId && rec.predictionStatus === 'ready' &&
+            rec.actualAction?.selectedId !== undefined &&
+            rec.candidates.some((c) => c.id === rec.actualAction?.selectedId)
+              ? rec.prediction?.selectedId === rec.actualAction.selectedId
+              : undefined;
+          if (!filter?.workspaceRoot || rec.workspaceRoot === filter.workspaceRoot) records.push(rec);
         }
       } catch {
         // 读取单个会话文件失败跳过
@@ -118,22 +179,35 @@ export class DecisionStatsManager {
         avgLatencyMs: 0,
         deferRate: 0,
         agreementRate: 0,
+        validPredictions: 0,
+        comparableDecisions: 0,
+        reviewedSamples: 0,
+        unresolvedDecisions: 0,
+        writeFailures: this.writeFailures,
         taskFamilyDistribution: {},
         confidenceBuckets: { low: 0, medium: 0, high: 0, topTier: 0 },
       };
     }
 
     let sumLatency = 0;
+    let validPredictions = 0;
     let deferCount = 0;
     let agreementCount = 0;
     let agreementEligible = 0;
+    let reviewedSamples = 0;
+    let unresolvedDecisions = 0;
 
     const taskFamilyDist: Record<string, number> = {};
     const buckets = { low: 0, medium: 0, high: 0, topTier: 0 };
 
     for (const r of records) {
-      sumLatency += r.prediction?.latencyMs ?? 0;
-      if (r.prediction?.defer) deferCount++;
+      if (r.predictionStatus === 'ready' && r.prediction) {
+        validPredictions++;
+        sumLatency += r.prediction.latencyMs;
+        if (r.prediction.defer) deferCount++;
+      }
+      if (r.review?.basis === 'human') reviewedSamples++;
+      if (!r.actualAction?.selectedId) unresolvedDecisions++;
 
       if (r.agreement !== undefined) {
         agreementEligible++;
@@ -143,19 +217,26 @@ export class DecisionStatsManager {
       const fam = r.taskFamily || 'other';
       taskFamilyDist[fam] = (taskFamilyDist[fam] || 0) + 1;
 
-      const conf = r.prediction?.confidence ?? 0;
-      if (conf < 0.4) buckets.low++;
-      else if (conf < 0.7) buckets.medium++;
-      else if (conf < 0.9) buckets.high++;
-      else buckets.topTier++;
+      if (r.predictionStatus === 'ready' && r.prediction) {
+        const conf = r.prediction.confidence;
+        if (conf < 0.4) buckets.low++;
+        else if (conf < 0.7) buckets.medium++;
+        else if (conf < 0.9) buckets.high++;
+        else buckets.topTier++;
+      }
     }
 
     return {
       totalDecisions: total,
-      avgLatencyMs: Math.round((sumLatency / total) * 10) / 10,
-      deferRate: Math.round((deferCount / total) * 1000) / 1000,
+      avgLatencyMs: validPredictions ? Math.round((sumLatency / validPredictions) * 10) / 10 : 0,
+      deferRate: validPredictions ? Math.round((deferCount / validPredictions) * 1000) / 1000 : 0,
       agreementRate:
-        agreementEligible > 0 ? Math.round((agreementCount / agreementEligible) * 1000) / 1000 : 1.0,
+        agreementEligible > 0 ? Math.round((agreementCount / agreementEligible) * 1000) / 1000 : 0,
+      validPredictions,
+      comparableDecisions: agreementEligible,
+      reviewedSamples,
+      unresolvedDecisions,
+      writeFailures: this.writeFailures,
       taskFamilyDistribution: taskFamilyDist,
       confidenceBuckets: buckets,
     };
@@ -206,7 +287,9 @@ export class DecisionStatsManager {
           sessionId: sid,
           sessionTitle: sessionTitleMap.get(sid) || recs[0]?.sessionTitle || '会话',
           totalDecisions: recs.length,
-          agreementRate: agreeTotal > 0 ? Math.round((agreeCount / agreeTotal) * 100) / 100 : 1.0,
+          agreementRate: agreeTotal > 0 ? Math.round((agreeCount / agreeTotal) * 100) / 100 : 0,
+          comparableDecisions: agreeTotal,
+          reviewedSamples: recs.filter((r) => r.review?.basis === 'human').length,
           lastTimestamp: recs[0]?.timestamp || '',
           records: recs,
         });
@@ -228,21 +311,75 @@ export class DecisionStatsManager {
     return tree;
   }
 
+  /** 人工审核是训练标签的唯一来源，真实动作仅供对照，预测绝不自标注。 */
+  async reviewDecision(
+    sessionId: string,
+    recordId: string,
+    label: { selectedId?: string; defer: boolean },
+  ): Promise<void> {
+    const record = (await this.loadRecords({ sessionId })).find((r) => r.id === recordId);
+    if (!record || record.sessionId !== sessionId || !record.turnId) {
+      throw new Error('找不到可审核的新版本决策记录');
+    }
+    if (!label || typeof label.defer !== 'boolean') throw new Error('defer 必须是布尔值');
+    if (label.defer && label.selectedId) throw new Error('defer 标签不能同时选择候选项');
+    if (!label.defer && !record.candidates.some((c) => c.id === label.selectedId)) {
+      throw new Error('训练标签必须选择当前候选集中的一项');
+    }
+    const review: DecisionReview = {
+      selectedId: label.defer ? undefined : label.selectedId,
+      defer: label.defer,
+      reviewedAt: new Date().toISOString(),
+      basis: 'human',
+    };
+    await this.appendEvent(sessionId, { kind: 'reviewed', id: recordId, review });
+  }
+
   /**
-   * 导出完全兼容 Reflex V1 训练集规范的 JSONL 文本 (prototype.jsonl 格式)
+   * 导出符合 Reflex V1 结构的微调数据集。
+   * 默认严格模式：仅导出人工审核通过的样本（basis: 'human'），避免自标注污染。
+   * 若指定 includeUnreviewed: true，则允许导出带 Agent 实际观察动作的完整轨迹数据（用于离线分析与对照）。
    */
-  async exportDataset(filter?: { workspaceRoot?: string; sessionId?: string }): Promise<string> {
+  async exportDataset(filter?: {
+    workspaceRoot?: string;
+    sessionId?: string;
+    includeUnreviewed?: boolean;
+  }): Promise<string> {
     const records = await this.loadRecords(filter);
     const lines: string[] = [];
 
     for (const r of records) {
-      // 确定最佳目标动作 ID
-      let selectedId = r.actualAction?.selectedId;
-      if (!selectedId && r.prediction?.selectedId && !r.prediction.defer) {
-        selectedId = r.prediction.selectedId;
-      }
-      if (!selectedId) {
-        selectedId = r.candidates[0]?.id ?? 'none';
+      if (!r.turnId) continue;
+      if (!r.instruction.trim() || !r.state.summary.trim() ||
+          r.candidates.length < 2 || r.candidates.length > 32) continue;
+      const ids = r.candidates.map((c) => c.id);
+      if (new Set(ids).size !== ids.length || r.candidates.some((c) => !c.id || !c.text.trim())) continue;
+
+      const review = r.review;
+      const isHuman = review?.basis === 'human';
+
+      if (!isHuman && !filter?.includeUnreviewed) continue;
+
+      let targetSelected: string[] = [];
+      let targetDefer = false;
+      let labelBasis = 'unlabeled';
+
+      if (isHuman) {
+        if (!review.defer && (!review.selectedId || !ids.includes(review.selectedId))) continue;
+        if (review.defer && review.selectedId) continue;
+        targetSelected = review.defer || !review.selectedId ? [] : [review.selectedId];
+        targetDefer = review.defer;
+        labelBasis = 'human';
+      } else if (r.actualAction?.selectedId && ids.includes(r.actualAction.selectedId)) {
+        targetSelected = [r.actualAction.selectedId];
+        targetDefer = false;
+        labelBasis = 'observed_action';
+      } else if (r.predictionStatus === 'ready' && r.prediction?.selectedId && ids.includes(r.prediction.selectedId)) {
+        targetSelected = r.prediction.defer ? [] : [r.prediction.selectedId];
+        targetDefer = r.prediction.defer;
+        labelBasis = 'model_prediction';
+      } else {
+        continue;
       }
 
       const item = {
@@ -263,20 +400,20 @@ export class DecisionStatsManager {
         },
         candidates: r.candidates.map((c) => ({ id: c.id, text: c.text })),
         target: {
-          selected: [selectedId],
-          defer: r.prediction?.defer ?? false,
+          selected: targetSelected,
+          defer: targetDefer,
         },
         source: {
-          type: 'online_shadow_mode',
-          sessionId: r.sessionId,
-          workspaceRoot: r.workspaceRoot,
+          type: isHuman ? 'online_shadow_human_review' : 'online_shadow_trajectory',
+          label_basis: labelBasis,
+          reviewed_at: review?.reviewedAt,
         },
+        split_group: `online:${r.turnId}`,
         metadata: {
-          sessionId: r.sessionId,
           timestamp: r.timestamp,
-          confidence: r.prediction?.confidence,
-          latencyMs: r.prediction?.latencyMs,
-          outcome: r.outcome,
+          model_version: r.prediction?.modelVersion,
+          observed_action: r.actualAction?.selectedId,
+          observed_outcome: r.outcome?.status,
         },
       };
 

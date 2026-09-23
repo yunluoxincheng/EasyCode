@@ -5,7 +5,7 @@
 //! 业务逻辑全部在 WebView 内的 @easycode/core + @easycode/engine。
 
 use std::collections::HashMap;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::net::IpAddr;
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
@@ -114,6 +114,16 @@ fn fs_read(path: String) -> Result<String, String> {
 #[tauri::command]
 fn fs_write(path: String, data: String) -> Result<(), String> {
     std::fs::write(&path, data.as_bytes()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn fs_append(path: String, data: String) -> Result<(), String> {
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| e.to_string())?;
+    file.write_all(data.as_bytes()).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -807,6 +817,7 @@ fn main() {
             host_info,
             fs_read,
             fs_write,
+            fs_append,
             fs_mkdir,
             fs_readdir,
             fs_stat,

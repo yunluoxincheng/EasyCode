@@ -214,6 +214,7 @@ const handlers: Record<string, Handler> = {
   'get-decision-stats': (args) => server.getDecisionStats(args),
   'get-decision-tree': () => server.getDecisionTree(),
   'export-decision-dataset': (args) => server.exportDecisionDataset(args),
+  'review-decision': (args) => server.reviewDecision(args.sessionId, args.recordId, args.label),
   'detect-shells': () => {
     const isWin = process.platform === 'win32';
     if (!isWin) return [];

@@ -40,12 +40,33 @@ export interface DecisionResult {
   scores: Record<string, number>;
   /** 端侧决策耗时 (毫秒) */
   latencyMs: number;
+  /** 导出模型的标识；用于区分不同权重产生的影子预测 */
+  modelVersion?: string;
 }
 
-/** 单条已完成的决策审计记录（用于日志归档、统计聚合与微调数据反哺） */
+export interface DecisionActualAction {
+  /** 无法无歧义映射到候选项时留空，不能猜测 */
+  selectedId?: string;
+  description: string;
+}
+
+export interface DecisionOutcome {
+  status: 'success' | 'failure' | 'unknown';
+  evidence: string;
+}
+
+export interface DecisionReview {
+  selectedId?: string;
+  defer: boolean;
+  reviewedAt: string;
+  basis: 'human';
+}
+
+/** 单条决策审计记录；预测、实际行为和人工标签来源彼此独立。 */
 export interface DecisionRecord {
   id: string;
   timestamp: string;
+  turnId?: string;
   workspaceRoot: string;
   sessionId: string;
   sessionTitle: string;
@@ -57,15 +78,13 @@ export interface DecisionRecord {
     history?: string[];
   };
   candidates: DecisionCandidate[];
-  prediction: DecisionResult;
-  actualAction?: {
-    selectedId?: string;
-    description: string;
-  };
+  prediction?: DecisionResult;
+  predictionStatus?: 'pending' | 'ready' | 'failed';
+  actualAction?: DecisionActualAction;
   /** Reflex 预测与实际动作是否一致 */
   agreement?: boolean;
-  /** 后续动作执行 outcome 结果 */
-  outcome?: 'success' | 'failure';
+  outcome?: DecisionOutcome;
+  review?: DecisionReview;
 }
 
 /** 决策统计摘要指标 */
@@ -74,6 +93,11 @@ export interface DecisionStats {
   avgLatencyMs: number;
   deferRate: number;
   agreementRate: number;
+  validPredictions?: number;
+  comparableDecisions?: number;
+  reviewedSamples?: number;
+  unresolvedDecisions?: number;
+  writeFailures?: number;
   taskFamilyDistribution: Record<string, number>;
   confidenceBuckets: {
     low: number;      // [0, 0.4)
@@ -89,6 +113,8 @@ export interface SessionDecisionSummary {
   sessionTitle: string;
   totalDecisions: number;
   agreementRate: number;
+  comparableDecisions?: number;
+  reviewedSamples?: number;
   lastTimestamp: string;
   records: DecisionRecord[];
 }
@@ -104,6 +130,27 @@ export interface ProjectDecisionTree {
 /** 核心决策策略接口 */
 export interface DecisionPolicy {
   decide(req: DecisionRequest): Promise<DecisionResult>;
+  observe?(req: DecisionRequest): DecisionObservation;
+}
+
+export interface DecisionObservation {
+  actual(action: DecisionActualAction): void;
+  outcome(outcome: DecisionOutcome): void;
+}
+
+/** 兼容纯 DecisionPolicy 实现，观测失败不影响 Agent 主循环。 */
+export function startDecisionObservation(
+  policy: DecisionPolicy | undefined,
+  req: DecisionRequest,
+): DecisionObservation | undefined {
+  if (!policy) return undefined;
+  try {
+    if (policy.observe) return policy.observe(req);
+    void policy.decide(req).catch(() => {});
+  } catch {
+    // 旁路失败不改变真实执行。
+  }
+  return undefined;
 }
 
 /**

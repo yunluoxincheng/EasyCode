@@ -24,6 +24,7 @@ export class NodeHost implements Host {
   readonly fs = {
     readFile: (p: string) => fsp.readFile(p, 'utf8'),
     writeFile: (p: string, data: string) => fsp.writeFile(p, data, 'utf8'),
+    appendFile: (p: string, data: string) => fsp.appendFile(p, data, 'utf8'),
     mkdir: async (p: string, opts?: { recursive?: boolean }) => {
       await fsp.mkdir(p, opts);
     },

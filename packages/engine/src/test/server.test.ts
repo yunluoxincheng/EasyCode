@@ -329,7 +329,9 @@ test('AgentServer: 影子模式开关开启时执行 policy 并记录，开关�
         selectedText: req.candidates[0].text,
         confidence: 0.95,
         defer: false,
-        scores: { [req.candidates[0].id]: 0.95 },
+        scores: Object.fromEntries(req.candidates.map((c: { id: string }, i: number) => [
+          c.id, i === 0 ? 0.95 : 0.05 / (req.candidates.length - 1),
+        ])),
         latencyMs: 15.5,
       };
     },

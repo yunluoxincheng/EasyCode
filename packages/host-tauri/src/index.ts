@@ -85,6 +85,7 @@ export async function createTauriHost(): Promise<Host> {
     fs: {
       readFile: (p) => invoke<string>('fs_read', { path: p }),
       writeFile: (p, data) => invoke<void>('fs_write', { path: p, data }),
+      appendFile: (p, data) => invoke<void>('fs_append', { path: p, data }),
       mkdir: (p, opts) => invoke<void>('fs_mkdir', { path: p, recursive: opts?.recursive ?? false }),
       readdir: (p) => invoke<FsDirent[]>('fs_readdir', { path: p }),
       stat: (p) => invoke<FsDirent extends never ? never : { isDirectory: boolean; size: number; mtimeMs: number } | null>('fs_stat', { path: p }),
@@ -313,6 +314,7 @@ export async function createTauriClient(options?: { reflexPolicy?: DecisionPolic
     getDecisionStats: (filter) => server.getDecisionStats(filter),
     getDecisionTree: () => server.getDecisionTree(),
     exportDecisionDataset: (filter) => server.exportDecisionDataset(filter),
+    reviewDecision: (sessionId, recordId, label) => server.reviewDecision(sessionId, recordId, label),
     onEvent: (listener) => server.onEvent(listener),
   };
 }

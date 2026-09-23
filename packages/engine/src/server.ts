@@ -381,8 +381,11 @@ export class AgentServer {
   /** 执行一轮 Agent（消息由调用方先行构造；负责运行态与持久化） */
   private async runTurn(rt: SessionRuntime): Promise<void> {
     const id = rt.data.meta.id;
+    const lastUserMessage = [...rt.data.messages].reverse().find((m) => m.role === 'user');
+    const turnId = `${id}_${lastUserMessage?.id ?? Date.now().toString(36)}`;
     rt.running = true;
     rt.controller = new AbortController();
+    let shadowPolicy: ShadowDecisionPolicy | undefined;
     let wireMessages: ChatMessage[] | undefined;
     try {
       const entry = this.settings.providers[rt.data.meta.providerId];
@@ -431,15 +434,16 @@ export class AgentServer {
       // 装配微型决策策略（TODOS #40：Shadow Mode 旁路观测）
       // 门控：仅当用户开启 reflexShadowMode 开关时挂载，关闭时 policy 为 undefined（零 CPU 额外计算、零日志写入）
       const policy = this.settings.reflexShadowMode
-        ? new ShadowDecisionPolicy(
+        ? (shadowPolicy = new ShadowDecisionPolicy(
             this.resolveReflexPolicy(),
             this.decisionStats,
             {
               sessionId: rt.data.meta.id,
               sessionTitle: rt.data.meta.title,
               workspaceRoot: rt.data.meta.workspaceRoot,
+              turnId,
             },
-          )
+          ))
         : undefined;
 
       const result = await runAgentLoop({
@@ -487,6 +491,7 @@ export class AgentServer {
         this.events.emit({ sessionId: id, event: { type: 'error', message: result.errorMessage } });
       }
     } finally {
+      await shadowPolicy?.drain();
       if (wireMessages && wireMessages !== rt.data.messages) {
         rt.data.messages = wireMessages;
       }
@@ -1131,8 +1136,16 @@ export class AgentServer {
   }
 
   /** 导出完全兼容 Reflex V1 训练集规范的微调数据集 JSONL */
-  async exportDecisionDataset(filter?: { workspaceRoot?: string; sessionId?: string }): Promise<string> {
+  async exportDecisionDataset(filter?: { workspaceRoot?: string; sessionId?: string; includeUnreviewed?: boolean }): Promise<string> {
     return this.decisionStats.exportDataset(filter);
+  }
+
+  async reviewDecision(
+    sessionId: string,
+    recordId: string,
+    label: { selectedId?: string; defer: boolean },
+  ): Promise<void> {
+    return this.decisionStats.reviewDecision(sessionId, recordId, label);
   }
 }
 

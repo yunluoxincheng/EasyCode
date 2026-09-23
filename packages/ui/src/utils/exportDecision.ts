@@ -20,7 +20,7 @@ export function getDecisionExportFilename(scope: 'global' | 'project' | 'session
  */
 export async function downloadDecisionDataset(
   client: AgentClient,
-  filter?: { workspaceRoot?: string; sessionId?: string },
+  filter?: { workspaceRoot?: string; sessionId?: string; includeUnreviewed?: boolean },
   scopeTitle?: string,
 ): Promise<{ ok: boolean; count: number; error?: string }> {
   try {

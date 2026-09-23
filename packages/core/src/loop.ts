@@ -4,9 +4,9 @@ import type { ChatMessage, ToolResultMessage } from './types.js';
 import type { Provider, StreamRequest } from './providers/index.js';
 import { extractToolCalls } from './providers/index.js';
 import { ApprovalManager } from './approval.js';
-import { executeTool, ToolRegistry } from './tools/index.js';
+import { executeTool, getToolExecutionOutcome, ToolRegistry } from './tools/index.js';
 import { compactHistoryMessages, pruneHistoricalToolResults } from './compaction.js';
-import type { DecisionPolicy } from './policy.js';
+import { startDecisionObservation, type DecisionPolicy, type DecisionObservation } from './policy.js';
 
 export interface LoopOptions {
   provider: Provider;
@@ -74,6 +74,7 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
     policy,
   } = options;
 
+  let pendingRecoveries: Array<{ observation: DecisionObservation; name: string; input: unknown }> = [];
   try {
     const readFiles = new Set<string>();
     for (let step = 0; step < maxSteps; step++) {
@@ -82,8 +83,7 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
       // 决策点 1：推理深度自适应旁路（TODOS #40 reasoning_effort）
       if (step === 0 && policy) {
         const lastUser = [...messages].reverse().find((m) => m.role === 'user');
-        void policy
-          .decide({
+        const observation = startDecisionObservation(policy, {
             taskFamily: 'reasoning_effort',
             instruction: 'Choose the appropriate reasoning effort for the current task.',
             state: {
@@ -97,33 +97,38 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
               { id: 'medium', text: 'MEDIUM: Standard reasoning for typical bugs and features' },
               { id: 'high', text: 'HIGH: Extended reasoning for complex architecture and deep logic' },
             ],
-          })
-          .catch(() => {});
+          });
+        const selectedId = reasoningEffort === 'low' || reasoningEffort === 'fast'
+          ? 'fast' : reasoningEffort === 'medium' ? 'medium'
+          : reasoningEffort === 'high' ? 'high' : undefined;
+        observation?.actual({
+          selectedId,
+          description: selectedId ? `Configured request effort: ${reasoningEffort}` : 'Provider default or unsupported effort',
+        });
       }
 
       // 决策点 5：信息充分性判断旁路（TODOS #40 information_sufficiency）
+      let infoObservation: DecisionObservation | undefined;
       if (policy) {
         const lastUser = [...messages].reverse().find((m) => m.role === 'user');
-        void policy
-          .decide({
-            taskFamily: 'information_sufficiency',
-            instruction: 'Assess whether the current context information is sufficient to proceed.',
-            state: {
-              summary:
-                typeof lastUser?.content === 'string'
-                  ? lastUser.content.slice(0, 300)
-                  : 'Task in progress',
-              history: messages.slice(-3).map((m) => m.role),
-            },
-            candidates: [
-              { id: 'proceed', text: 'PROCEED: Information is sufficient, proceed with action' },
-              { id: 'read_more', text: 'READ_MORE: Need to inspect more files or details' },
-              { id: 'search', text: 'SEARCH: Need to search codebase for missing context' },
-              { id: 'ask_user', text: 'ASK_USER: Requirement is ambiguous, need user clarification' },
-            ],
-            metadata: { step },
-          })
-          .catch(() => {});
+        infoObservation = startDecisionObservation(policy, {
+          taskFamily: 'information_sufficiency',
+          instruction: 'Assess whether the current context information is sufficient to proceed.',
+          state: {
+            summary:
+              typeof lastUser?.content === 'string'
+                ? lastUser.content.slice(0, 300)
+                : 'Task in progress',
+            history: messages.slice(-3).map((m) => m.role),
+          },
+          candidates: [
+            { id: 'proceed', text: 'PROCEED: Information is sufficient, proceed with action' },
+            { id: 'read_more', text: 'READ_MORE: Need to inspect more files or details' },
+            { id: 'search', text: 'SEARCH: Need to search codebase for missing context' },
+            { id: 'ask_user', text: 'ASK_USER: Requirement is ambiguous, need user clarification' },
+          ],
+          metadata: { step },
+        });
       }
 
       emit({ type: 'assistant_start' });
@@ -146,38 +151,94 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
       emit({ type: 'step_end', usage: turn.usage });
 
       const calls = extractToolCalls(turn.blocks);
-      if (calls.length === 0) {
-        return finish('completed');
+      let recoveryFollowup: DecisionObservation | undefined;
+      if (pendingRecoveries.length > 0) {
+        const first = calls[0];
+        const single = pendingRecoveries.length === 1 && calls.length === 1
+          ? pendingRecoveries[0] : undefined;
+        let selectedId: string | undefined;
+        if (single && first) {
+          if (first.name === single.name) {
+            selectedId = JSON.stringify(first.input) === JSON.stringify(single.input)
+              ? 'retry_same' : 'modify_input';
+          } else if (['read_file', 'list_dir', 'search_files'].includes(first.name)) {
+            selectedId = 'search_dir';
+          }
+          recoveryFollowup = single.observation;
+        }
+        for (const pending of pendingRecoveries) {
+          pending.observation.actual({
+            selectedId: single ? selectedId : undefined,
+            description: first
+              ? `Next agent tool: ${first.name}${single ? '' : ' (multiple preceding failures)'}`
+              : 'Assistant replied without a tool call',
+          });
+          if (!first || !single) pending.observation.outcome({
+            status: 'unknown', evidence: 'No unambiguous recovery tool execution',
+          });
+        }
+        pendingRecoveries = [];
+      }
+
+      if (infoObservation) {
+        let actualInfo = 'proceed';
+        if (calls.length > 0) {
+          const fn = calls[0].name;
+          if (fn === 'read_file' || fn === 'list_dir') actualInfo = 'read_more';
+          else if (fn === 'search_files') actualInfo = 'search';
+          else actualInfo = 'proceed';
+        } else {
+          const text = turn.blocks.filter((b): b is { type: 'text'; text: string } => b.type === 'text').map((b) => b.text).join(' ');
+          actualInfo = /[?？]/.test(text) ? 'ask_user' : 'proceed';
+        }
+        infoObservation.actual({
+          selectedId: actualInfo,
+          description: calls.length > 0 ? `Agent invoked ${calls[0].name}` : `Agent replied (${actualInfo})`,
+        });
       }
 
       // 决策点 8：工具路由预测旁路（TODOS #40 tool_routing）
-      if (policy) {
-        const actualTool = calls[0]?.name;
+      if (policy && calls.length > 0) {
         const textParts = turn.blocks
           .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
           .map((b) => b.text)
           .join(' ');
-        void policy
-          .decide({
-            taskFamily: 'tool_routing',
-            instruction: 'Predict the most appropriate tool family for the current step.',
-            state: {
-              summary:
-                textParts.slice(0, 300) ||
-                `Planned tools: ${calls.map((c) => c.name).join(', ')}`,
-              history: calls.map((c) => c.name),
-            },
-            candidates: [
-              { id: 'read_inspect', text: 'READ_INSPECT: Read file content or list directory' },
-              { id: 'edit_write', text: 'EDIT_WRITE: Edit existing code or write files' },
-              { id: 'search_explore', text: 'SEARCH_EXPLORE: Search symbols or regex in project' },
-              { id: 'run_command', text: 'RUN_COMMAND: Run shell command or execute tests' },
-              { id: 'git_vcs', text: 'GIT_VCS: Check git status or diff changes' },
-              { id: 'stop_respond', text: 'STOP_RESPOND: Stop tool calling and respond to user' },
-            ],
-            metadata: { actualTool, totalCalls: calls.length },
-          })
-          .catch(() => {});
+        const toolObs = startDecisionObservation(policy, {
+          taskFamily: 'tool_routing',
+          instruction: 'Predict the most appropriate tool family for the current step.',
+          state: {
+            summary:
+              textParts.slice(0, 300) ||
+              `Planned tools: ${calls.map((c) => c.name).join(', ')}`,
+            history: calls.map((c) => c.name),
+          },
+          candidates: [
+            { id: 'read_inspect', text: 'READ_INSPECT: Read file content or list directory' },
+            { id: 'edit_write', text: 'EDIT_WRITE: Edit existing code or write files' },
+            { id: 'search_explore', text: 'SEARCH_EXPLORE: Search symbols or regex in project' },
+            { id: 'run_command', text: 'RUN_COMMAND: Run shell command or execute tests' },
+            { id: 'git_vcs', text: 'GIT_VCS: Check git status or diff changes' },
+            { id: 'stop_respond', text: 'STOP_RESPOND: Stop tool calling and respond to user' },
+          ],
+          metadata: { actualTool: calls[0]?.name, totalCalls: calls.length },
+        });
+
+        const actualToolName = calls[0]?.name;
+        let mappedRoutingId: string | undefined;
+        if (actualToolName === 'read_file' || actualToolName === 'list_dir') mappedRoutingId = 'read_inspect';
+        else if (actualToolName === 'write_file' || actualToolName === 'edit_file') mappedRoutingId = 'edit_write';
+        else if (actualToolName === 'search_files') mappedRoutingId = 'search_explore';
+        else if (actualToolName === 'run_command') mappedRoutingId = 'run_command';
+        else if (actualToolName === 'git_status' || actualToolName === 'git_diff') mappedRoutingId = 'git_vcs';
+
+        toolObs?.actual({
+          selectedId: mappedRoutingId,
+          description: `First tool call: ${actualToolName}`,
+        });
+      }
+
+      if (calls.length === 0) {
+        return finish('completed');
       }
 
       for (const call of calls) {
@@ -193,11 +254,13 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
           workspaceLock,
           policy,
         });
+        if (recoveryFollowup && call === calls[0]) {
+          recoveryFollowup.outcome(getToolExecutionOutcome(call.name, execution));
+        }
 
         // 决策点 2：工具执行错误恢复旁路（TODOS #40 recovery）
         if (execution.isError && policy) {
-          void policy
-            .decide({
+          const observation = startDecisionObservation(policy, {
               taskFamily: 'recovery',
               instruction: 'Decide the best recovery strategy after tool execution failure.',
               state: {
@@ -212,8 +275,8 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
                 { id: 'stop', text: 'Stop execution and report error' },
               ],
               metadata: { toolName: call.name, content: execution.content },
-            })
-            .catch(() => {});
+            });
+          if (observation) pendingRecoveries.push({ observation, name: call.name, input: call.input });
         }
 
         // 决策点 6：代码变更验证手段旁路（TODOS #40 verification）
@@ -222,27 +285,28 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
           (call.name === 'edit_file' || call.name === 'write_file') &&
           policy
         ) {
-          void policy
-            .decide({
-              taskFamily: 'verification',
-              instruction:
-                'Choose the most effective verification method for the recent code changes.',
-              state: {
-                summary: `Modified file via '${call.name}'. Workspace: ${workspace}`,
-                history: [call.name],
+          const verifyObs = startDecisionObservation(policy, {
+            taskFamily: 'verification',
+            instruction:
+              'Choose the most effective verification method for the recent code changes.',
+            state: {
+              summary: `Modified file via '${call.name}'. Workspace: ${workspace}`,
+              history: [call.name],
+            },
+            candidates: [
+              { id: 'run_test', text: 'RUN_TEST: Run automated unit/integration tests' },
+              { id: 'run_build', text: 'RUN_BUILD: Run project build or compile check' },
+              { id: 'inspect_diff', text: 'INSPECT_DIFF: Inspect git diff of modified lines' },
+              {
+                id: 'no_verify',
+                text: 'NO_VERIFY: Pure documentation or minor tweak, skip verification',
               },
-              candidates: [
-                { id: 'run_test', text: 'RUN_TEST: Run automated unit/integration tests' },
-                { id: 'run_build', text: 'RUN_BUILD: Run project build or compile check' },
-                { id: 'inspect_diff', text: 'INSPECT_DIFF: Inspect git diff of modified lines' },
-                {
-                  id: 'no_verify',
-                  text: 'NO_VERIFY: Pure documentation or minor tweak, skip verification',
-                },
-              ],
-              metadata: { toolName: call.name, input: call.input },
-            })
-            .catch(() => {});
+            ],
+            metadata: { toolName: call.name, input: call.input },
+          });
+          verifyObs?.actual({
+            description: `File modified via ${call.name}; observe follow-up verification`,
+          });
         }
 
         emit({
@@ -264,10 +328,10 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
       }
 
       // 决策点 3：上下文压缩前瞻旁路（TODOS #40 context_management）
+      let contextObservation: DecisionObservation | undefined;
       if (contextWindow && turn.usage?.inputTokens && policy) {
         const ratio = turn.usage.inputTokens / contextWindow;
-        void policy
-          .decide({
+        contextObservation = startDecisionObservation(policy, {
             taskFamily: 'context_management',
             instruction: 'Decide whether to prune or compact context history.',
             state: {
@@ -280,10 +344,10 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
               { id: 'compact_all', text: 'Compact early history messages into summary' },
             ],
             metadata: { inputTokens: turn.usage.inputTokens, contextWindow, ratio },
-          })
-          .catch(() => {});
+          });
       }
 
+      let contextAction: 'keep' | 'prune_tools' | 'compact_all' = 'keep';
       // 上下文超限保护（TODOS #31）：若本轮输入的 Token 超过设定阈值，触发智能阶梯压缩
       if (
         contextWindow &&
@@ -293,6 +357,7 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
         const beforeTokens = turn.usage.inputTokens;
         const compactRes = compactHistoryMessages(messages, { keepRecentTurns: 2, pruneTools: true });
         if (compactRes.compacted) {
+          contextAction = 'compact_all';
           messages.splice(0, messages.length, ...compactRes.messages);
           emit({
             type: 'context_compacted',
@@ -302,6 +367,7 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
         } else {
           const pruneRes = pruneHistoricalToolResults(messages, { keepRecentTurns: 1 });
           if (pruneRes.modified) {
+            contextAction = 'prune_tools';
             emit({
               type: 'context_compacted',
               beforeTokens,
@@ -310,6 +376,7 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
           }
         }
       }
+      contextObservation?.actual({ selectedId: contextAction, description: `Context rule: ${contextAction}` });
     }
     return finish(
       'error',
@@ -326,6 +393,11 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
   }
 
   function finish(reason: LoopResult['reason'], errorMessage?: string): LoopResult {
+    for (const pending of pendingRecoveries) {
+      pending.observation.actual({ description: `No follow-up action: ${reason}` });
+      pending.observation.outcome({ status: 'unknown', evidence: 'Agent turn ended before recovery' });
+    }
+    pendingRecoveries = [];
     emit({ type: 'done', reason });
     return errorMessage === undefined ? { reason } : { reason, errorMessage };
   }

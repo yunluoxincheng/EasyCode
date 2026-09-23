@@ -151,8 +151,11 @@ export class IpcAgentClient implements AgentClient {
   getDecisionTree() {
     return this.invoke<ProjectDecisionTree[]>('get-decision-tree');
   }
-  exportDecisionDataset(filter?: { workspaceRoot?: string; sessionId?: string }) {
+  exportDecisionDataset(filter?: { workspaceRoot?: string; sessionId?: string; includeUnreviewed?: boolean }) {
     return this.invoke<string>('export-decision-dataset', filter);
+  }
+  reviewDecision(sessionId: string, recordId: string, label: { selectedId?: string; defer: boolean }) {
+    return this.invoke<void>('review-decision', { sessionId, recordId, label });
   }
   onEvent(listener: (payload: { sessionId: string; event: AgentEvent }) => void) {
     this.bridge.onEvent(listener);
@@ -282,6 +285,7 @@ export function createDemoClient(): AgentClient {
     getDecisionStats: (f) => wrap(() => server.getDecisionStats(f)),
     getDecisionTree: () => wrap(() => server.getDecisionTree()),
     exportDecisionDataset: (f) => wrap(() => server.exportDecisionDataset(f)),
+    reviewDecision: (sid, rid, label) => wrap(() => server.reviewDecision(sid, rid, label)),
     onEvent: (listener) => server.onEvent(listener),
   };
 }
