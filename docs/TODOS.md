@@ -169,28 +169,85 @@ EasyCode 作为开放、可扩展的桌面 Coding Agent，目前仅提供内置�
 
 ---
 
-### 40. AgentRuntime 决策与路由挂载接口（Decision Oracle / Micro-Model Router Hook）
+### 40. AgentRuntime 决策与路由挂载接口（Reflex 决策小模型 / DecisionPolicy 挂载与 Shadow Mode 旁路）
 
-**状态**：⏳ 待办（规划中）
+**状态**：⏳ 待办（规划中 / 准备集成）
 
 **背景**：
-在现有的 Agent 核心循环中，意图识别、候选工具选择、目标文件预筛选以及是否继续循环等所有决策，完全由主会话的大模型（LLM）进行全量推理。这种模式在面对复杂工作区或多步调用时，容易产生较高的推理延迟与长上下文 Token 开销。
-随着端侧及超小型决策模型（如 Jev、微型路由模型、轻量级 SLM）的发展，由专用超轻量模型充当“前置导航员/快速决策路由器”已成为提高执行效率与降低开销的前沿方向。
-为了支持未来灵活接入此类超小型决策模型（如 Jev 模型），需要在 AgentRuntime / Core 架构中为所有关键判断节点预留可扩展的决策钩子或抽象接口。
+在现有的 Agent 核心循环中，意图识别、推理档位分配（Reasoning Effort）、敏感操作审批、工具报错恢复以及上下文压缩时机等所有控制流决策，要么完全依赖主会话的大模型（LLM）进行全量高延迟生成，要么依赖硬编码的朴素阈值（如敏感布尔值、0.85 上下文压缩硬触发、报错直接回传模型自行思考）。这种模式增加了单次回合的延迟与 Token 消耗，且缺乏端侧自适应调控能力。
+目前专为 Agent 高频离散决策设计的端侧微型决策模型 **Reflex**（基于 `microsoft/deberta-v3-xsmall` ~22M 骨干，已完成 Phase 1~4 研发与 INT8 动态量化）已经就绪：
+- **模型体量**：单个独立 ONNX 文件 `model_int8.onnx` 仅 **79.20 MB**，配合 8MB Fast Tokenizer（`tokenizer.json`）；
+- **推理开销**：普通 CPU 单次推理延迟 **~31ms**，全链路端到端决策（分词 + 特征组装 + ONNX 推理 + 温度缩放）仅 **22~29ms**，完全可作为毫秒级反射层；
+- **决策可靠度**：测试集整体准确率 85.19%，310 对对抗反事实成对通过率 72.90%，且**前 20% 高置信区间准确率达 100.00%**，自带温度缩放（$T=78.2$）与动态降级机制（`defer_to_system2`）。
 
-**设计方向（概括性预留）**：
-1. **决策器抽象接口（`DecisionEngine` / `DecisionHook`）**：
-   - 在 Core/Engine 中抽象统一的决策扩展点，支持挂载自定义轻量决策后端（未来可接入微型模型 API、本地轻量模型服务或启发式决策器）；
-2. **预留关键决策介入点**：
-   - **工具预选与路由（Tool Selection）**：判断当前意图最可能需要调用的工具子集或调用序列，减少无关工具对主模型的干扰；
-   - **文件预选与定位（File Candidates）**：根据用户任务意图，快速从工作区初筛最相关的候选文件清单，辅助定位与预读；
-   - **下一步行动与终止判断（Next Step / Termination）**：快速判定当前信息是否已经充分，辅助主模型决策是否可以提前收敛；
-3. **非阻塞与渐进回退**：
-   - 决策模型的输出作为软提示（Soft Hints）或可选引导输入主模型，决策超时或不可用时自动无感回退至原有主模型标准流程，确保核心稳定性。
+为了在 EasyCode 中无侵入接入 Reflex，需要遵循 EasyCode 的**模块化三原则（单向依赖、注册制扩展、接口能力注入，保持 `@easycode/core` 零运行时依赖）**，设计标准的 `DecisionPolicy` 契约并在关键决策点注入旁路。
+
+**设计方案**：
+
+1. **核心抽象接口（`@easycode/core` 纯类型，零运行时依赖）**：
+   在 `packages/core/src/policy.ts` 中定义统一的 Schema-Conditioned 候选决策契约（与 Reflex 导出品严格对齐）：
+   ```ts
+   export interface DecisionCandidate {
+     id: string;
+     text: string;
+   }
+
+   export interface DecisionRequest {
+     instruction: string;                  // 决策任务描述
+     state: {
+       summary: string;                    // 当前状态摘要
+       goal?: string;                      // 总体任务目标
+       history?: string[];                 // 近期操作历史
+     };
+     candidates: DecisionCandidate[];      // 离散动态候选集
+     metadata?: Record<string, unknown>;
+   }
+
+   export interface DecisionResult {
+     selectedId: string;                   // 最优候选 ID
+     selectedText: string;
+     confidence: number;                   // 校准后 Softmax 置信度 (0~1)
+     defer: boolean;                       // 是否建议转交主大模型处理 (不确定性高或置信度低于门限)
+     scores: Record<string, number>;       // 各候选概率分布
+     latencyMs: number;
+   }
+
+   export interface DecisionPolicy {
+     decide(req: DecisionRequest): Promise<DecisionResult>;
+   }
+   ```
+
+2. **预留首批落地关键决策介入点**：
+   - **决策点 1：推理深度动态分配 (`reasoning_effort`)**：根据用户输入意图与工作区复杂度，决策 `fast` / `medium` / `high`；
+   - **决策点 2：工具执行错误恢复 (`recovery`)**：工具报错时，快速决策是 `retry_same` / `modify_input` / `search_dir` / `ask_user` / `stop`；
+   - **决策点 3：上下文修剪决策 (`context_management`)**：根据当前历史密度，决策是否提前做工具输出修剪或消息合并，而非仅靠 0.85 静态阈值；
+   - **决策点 4：敏感命令审批建议 (`safety`)**：为 `ApprovalManager` 注入语义风险评分，辅助区分安全只读、常规修改与破坏性高危操作。
+
+3. **四阶段渐进式接管与安全网（Stage-gated Rollout）**：
+   - **Stage A: Shadow Mode（当前集成第一目标）**：
+     - 完全不改变 EasyCode 现有的任何主逻辑与执行动作；
+     - 关键决策点异步旁路触发 `policy.decide()`，主循环零阻塞；
+     - 落盘记录影子决策日志（`State`、`Candidates`、`Reflex 预测与置信度`、`主模型实际动作`、`最终 Outcome 结果`），用于在真实开发场景中验证模型准确率并持续收集 Trajectory 数据；
+   - **Stage B: Advisory Mode（建议模式）**：
+     - 在开发者日志或 UI 旁路轻量展示微模型建议（如“Reflex 建议当前任务可使用 fast 推理档位”）；
+   - **Stage C: Low-risk Control（低风险接管）**：
+     - 仅在前 20% 高置信区间（置信度高且 `defer === false`）自动接管推理档位与压缩时机；
+   - **Stage D: Selective Control（关键决策接管）**：
+     - 经过充分在线影子数据验证后，受控接管错误自愈策略与命令审批建议。
+
+4. **运行时与工程架构分层**：
+   - `packages/core`：只包含接口定义与默认 `NoopDecisionPolicy`，保持零外部依赖；
+   - `packages/engine`：提供 `ShadowLoggerPolicy`，在 `server.ts` `runTurn` 组装时按需注入；
+   - 端侧 ONNX 运行时实现：
+     - **Electron / CLI**：由主进程/NodeHost 侧使用 `onnxruntime-node` 加载 80MB 权重；
+     - **Tauri / 浏览器**：由 WebView 使用 `onnxruntime-web` 或经 Rust Tauri 命令代理；
+   - 降级保护：任何 ONNX 加载失败、超时或内部异常，一律自动降级为 Noop，主流程绝不报错。
 
 **涉及改动**：
-- `packages/core/src/types.ts` & `packages/core/src/loop.ts`：预留 `DecisionHook` / `DecisionContext` 接口与调用插槽；
-- `packages/engine/`：预留决策模型配置与挂载逻辑。
+- `packages/core/src/policy.ts`：新增 `DecisionPolicy` / `DecisionRequest` / `DecisionResult` 接口与 `NoopPolicy`；
+- `packages/core/src/loop.ts` & `approval.ts`：`LoopOptions` 与 `ToolContext` 增加可选 `policy?: DecisionPolicy`；
+- `packages/engine/src/shadow.ts`：实现 Shadow Mode 旁路事件捕获与 JSONL 日志归档；
+- `packages/engine/src/server.ts`：装配层注入决策策略与影子观察器。
 
 ---
 
