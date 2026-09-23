@@ -4,6 +4,196 @@
 
 ## 待办需求
 
+### 35. MCP (Model Context Protocol) 协议客户端接入（Stdio / SSE）
+
+**状态**：⏳ 待办（规划中）
+
+**背景**：
+EasyCode 作为开放、可扩展的桌面 Coding Agent，目前仅提供内置的基础文件与命令操作工具（`read_file`, `write_file`, `edit_file`, `list_dir`, `search_files`, `run_command`, `todo_write`, `git_status`, `git_diff`）。
+随着 Anthropic 主导的 Model Context Protocol（MCP）成为大模型工具生态的事实标准，成百上千的高质量开源 MCP Server（如官方提供的 SQLite/PostgreSQL 数据库直连、Puppeteer/Fetch 网页抓取、GitHub Issue/PR 管理、GitLab、Google Drive、Sentry 异常监控等）为 Agent 提供了近乎无限的能力边界。
+目前 EasyCode 在架构设计之初就确立了“注册制扩展点”（Tool 注册制），但缺少一个通用协议桥梁来动态接入外部工具进程。
+
+**设计方案**：
+1. **MCP Client 协议适配层（Core / Engine）**：
+   - 遵循标准 MCP 协议（JSON-RPC 2.0），优先支持 Stdio 进程管道传输（Command + Args + Env），未来可选扩展 SSE；
+   - 握手协议周期：进程启动 → `initialize` 握手协商协议版本与能力 → `tools/list` 枚举外部工具清单（提取工具名、描述、JSON Schema 参数规范）→ 转换为 EasyCode 内置 `ToolDefinition`；
+   - 动态注册进入 `ToolRegistry`：工具命名空间隔离（如 `mcp__postgres__query`），并在 Agent 执行工具时调用 `tools/call` 进行 RPC 派发与结果接收；
+   - 遵循 EasyCode 安全审批机制：外部 MCP 工具默认继承审批策略（`ask` 模式下执行敏感 MCP 工具时触发 `ApprovalCard`，展示工具来源服务器与参数，经用户确认后执行）。
+2. **设置页「MCP 扩展」配置看板**：
+   - 设置页新增「MCP 扩展（MCP Servers）」独立面板；
+   - 支持两种配置方式：
+     - ① 极客友好 JSON 配置编辑器（兼容主流 `mcpServers` 配置格式，如 `{"mcpServers": { "postgres": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-postgres", "..."] } } }`）；
+     - ② 可视化卡片表单：服务器名称、可执行命令、参数列表、环境变量、启用/停用开关；
+   - 实时探活与诊断状态灯：各 MCP 服务卡片实时展示连接状态（绿色已就绪、琥珀色连接中、红色故障）、获取到的工具数量及一键「↻ 重试连接」；
+3. **UI 与 Composer 联动**：
+   - Composer `/` 斜杠快捷指令面板自动合流 MCP 暴露的工具和 Prompt（标注 `[MCP:名称]` 徽标）；
+   - 回合内 `ToolCard` 清晰标注 MCP 来源与返回数据渲染。
+
+**涉及改动**：
+- `packages/core/src/mcp/`：新建 MCP 客户端协议实现（JSON-RPC 2.0 编解码、工具定义映射、结果解包）；
+- `packages/engine/src/mcp/`：MCP Server 进程生命周期管理器（启动、重启、心跳检测、stdio 管道托管）；
+- `packages/engine/src/settings.ts`：Settings 扩展 `mcpServers?: Record<string, McpServerConfig>`；
+- `packages/ui/src/components/SettingsPage.tsx`：新增 MCP 设置管理面板；
+- `packages/ui/src/styles.css`：MCP 服务器状态卡片与徽标样式。
+
+---
+
+### 36. 回合级代码改动快照与一键回退（Turn Checkpoint & Safe Undo）
+
+**状态**：⏳ 待办（规划中）
+
+**背景**：
+在多轮复杂编码任务中，Agent 经常跨多个文件进行大规模修改（`edit_file` / `write_file`）或执行命令。然而，当大模型的实现方向偏离预期、误删逻辑或引入回归缺陷时，用户面临极大的挽救成本：
+1. **手动撤销繁琐**：需要跨多个历史回合的卡片，人工比对并手动改回原有代码；
+2. **Git 粗暴回滚丢失未提交工作**：如果使用 Git 检视面板的 `git checkout`，会连带把用户自己在此之前手工编写的、未暂存/未提交的代码一并销毁；
+3. **限制了 `yolo` 模式的普及**：用户因缺乏安全保障而不敢完全放手让 Agent 自主执行。
+
+**设计方案**：
+1. **轻量原子改动快照（Turn Pre-edit Snapshot）**：
+   - 当某个会话回合（Turn）准备对某个文件发起写操作（`write_file` 覆盖已有文件、`edit_file`）前，Engine/Core 自动记录该文件的 Pre-edit 原始内容快照；
+   - 快照文件存放在项目临时目录 `.easycode/checkpoints/{turnId}/`（自动被 `.gitignore` 忽略）或会话数据持久层中；
+   - 严格记录每个回合所影响的文件变更集合与修改前 SHA/内容，同一回合内多次修改同一文件只以回合开始前的原始版本为基准。
+2. **回合头部「↶ 撤销此回合改动」入口与交互**：
+   - 在已产生代码改动的历史回合头部（`TurnView`）以及右键菜单中，增设「`↶ 撤销此回合改动`」按钮；
+   - 点击后呼出极客风撤销确认弹窗 `<TurnUndoModal>`：
+     - 列出该回合修改过的所有文件路径、当时增删行数；
+     - 提示若文件在后续回合又被修改过的冲突告警；
+     - 提供对比 Diff 预览；
+   - 用户确认后，Engine 安全地将文件恢复至该回合开始前的状态，并自动向当前会话追加一条系统消息“已撤销第 N 回合的文件变更”；
+3. **与 Composer `/undo` 指令闭环**：
+   - 在 Composer 输入 `/undo` 即可默认回滚最近一个包含代码变更的回合，提供丝滑的键盘流回退体验。
+
+**涉及改动**：
+- `packages/engine/src/checkpoints.ts`：新建会话快照管理器（快照捕获、存储、还原、冲突检测）；
+- `packages/engine/src/server.ts`：在工具执行前后挂载快照钩子，暴露 `revertTurnCheckpoints` API；
+- `packages/ui/src/components/Transcript.tsx` / `TurnView`：回合头部添加撤销操作按钮；
+- `packages/ui/src/components/TurnUndoModal.tsx`：新建撤销改动确认与 Diff 弹窗；
+- `packages/ui/src/commands/`：新增 `/undo` 快捷指令。
+
+---
+
+### 37. 长期运行后台进程管理与端口探测（Background Tasks & Port Watcher）
+
+**状态**：⏳ 待办（规划中）
+
+**背景**：
+目前的 `run_command` 工具是面向短命令（如 `git status`, `pnpm build`, `pnpm test` 等能在数秒到两分钟内退出且带有 exit code 的命令）设计的，默认带 120s 超时强制中断。
+但在真实的开发闭环中，用户经常需要让 Agent“启动本地 dev server（如 `pnpm dev`, `vite`, `cargo run`）并进行测试”、“启动后台常驻容器”、“或者开启 watch 监听测试进程”。当前机制下，启动长命令会一直处于运行转圈状态，直到 120s 超时被判定为 Failure 强行杀掉进程，无法维持服务正常运行，且容易造成孤儿端口占用。
+
+**设计方案**：
+1. **后台任务管理核心（Background Process Pool）**：
+   - 扩展 `run_command` 参数：`background?: boolean`（或支持模型自主声明）；
+   - 后台进程启动后即刻返回进程元数据（PID、启动命令、起始时间），不阻塞 Agent 循环的后续步骤；
+   - Host 层维护会话绑定的常驻进程池，在应用关闭、会话重置或用户显式停止时优雅发送 `SIGTERM` / `SIGKILL` 终止，杜绝僵尸进程与端口残留。
+2. **本地网络端口动态探测与捕获（Port Watcher）**：
+   - 监听后台进程的 stdout 输出，通过正则智能捕获本地服务监听的 URL 与端口（如 `http://localhost:3000`、`http://127.0.0.1:5173/`）；
+   - 执行跨平台端口占用探活确认服务已就绪。
+3. **UI 底部常驻任务条与终端日志抽屉**：
+   - 当会话拥有正在运行的后台服务时，在应用底部状态栏以极客暗黑风展示常驻指示条：`[● pnpm dev · localhost:5173 · 运行中 2m15s] [↗ 浏览器打开] [■ 停止]`；
+   - 点击常驻条可滑出半屏终端实时滚动日志抽屉（`.task-drawer`），实时流式查阅最新输出；
+   - Agent 后续步骤亦可随时调用 `read_task_logs(pid)` 检查服务启动日志与报错。
+
+**涉及改动**：
+- `packages/core/src/tools/command.ts`：扩展 `run_command` 工具规范支持 `background` 参数；
+- `packages/engine/src/tasks.ts`：新建后台任务进程管理器与端口探测器；
+- `packages/ui/src/components/StatusBar.tsx` 或新建 `BackgroundTasksBar.tsx`：常驻任务指示器与控制条；
+- `packages/ui/src/components/TaskLogsDrawer.tsx`：拟终端实时日志抽屉与 ANSI 解码；
+- `packages/ui/src/styles.css`：常驻任务指示器与抽屉样式。
+
+---
+
+### 38. 工作区轻量文件树与代码行范围引用（Workspace Tree & Range Mention）
+
+**状态**：⏳ 待办（规划中）
+
+**背景**：
+1. **工作区结构黑盒**：用户打开一个复杂项目后，除非去系统文件管理器或 VS Code 查看，在 EasyCode 界面内无法一览当前工程的目录结构与文件组织；
+2. **整文件引用浪费 Token 且分散注意力**：目前 Composer 的 `@文件` 补全（#25）只能引用完整文件。当一个文件有上千行（如复杂的配置、大型单体组件、数据字典），而用户只想让 Agent 优化其中第 100~150 行时，整文件喂入既浪费了宝贵的上下文窗口，又容易导致大模型注意力漂移。
+
+**设计方案**：
+1. **工作区目录树微型侧栏（Workspace File Explorer）**：
+   - 在会话侧栏底部或以可折叠面板形式增设「📂 工作区文件树」；
+   - 自动递归渲染当前工作区目录结构，智能忽略 `.git`、`node_modules`、`dist`、`target` 等目录；
+   - 极客暗黑风文件图标与展开折叠动效；
+   - 文件右键上下文菜单支持：「⧉ 复制相对路径」、「⌨ 插入到 Composer 输入框」、「✎ 在外部编辑器中打开」；
+2. **代码行号范围引用语法（Code Range Mention）**：
+   - Composer 支持输入 `@path/to/file.ts:50-100` 或 `@path/to/file.ts:35`；
+   - 在 `@` 补全后按 `:` 自动提示行号区间输入帮助；
+   - Engine 注入上下文时自动执行切片截取，附带行号标尺，并对上下文说明：“*用户截取了文件第 50-100 行片段*”，大幅节省 Token 消耗；
+3. **快速轻量预览弹窗**：
+   - 在文件树中单击文件，支持在轻量暗黑代码弹窗中查看内容与行号，直接拖选代码行一键「引用所选行至 Composer」。
+
+**涉及改动**：
+- `packages/ui/src/components/WorkspaceFileTree.tsx`：新建工作区目录树组件与右键菜单；
+- `packages/ui/src/components/Composer.tsx`：支持 `@file:start-end` 语法解析与光标补全提示；
+- `packages/core/src/prompts.ts`：解析并格式化行范围切片代码片段；
+- `packages/ui/src/styles.css`：文件树极客折叠面板与行号高亮样式。
+
+---
+
+### 39. 自主测试运行与排错自愈循环（Auto Test-and-Fix Loop）
+
+**状态**：⏳ 待办（规划中）
+
+**背景**：
+编写代码只是开发的第一步，确保代码正确无误才是工程交付的根本。目前用户在让 Agent 完成代码修改后，通常需要手动打字让模型运行测试、等待模型报出测试错误、再人工提示模型“根据报错继续修改”，多次反复交互，沟通成本高且容易遗漏测试用例。
+如果赋予 Agent“修改完代码 → 自动运行相关测试 → 失败则捕获堆栈自动发起自愈微调 → 直至全绿”的自主循环能力，将极大提升代码生成的可靠度与交付质量。
+
+**设计方案**：
+1. **测试框架与命令自动探知（Test Discovery）**：
+   - Engine 根据工作区特征自动探测测试运行命令：
+     - Node/TS 项目：扫描 `package.json` 中的 `scripts.test`（如 `pnpm test` / `vitest` / `jest`）；
+     - Rust 项目：`cargo test`；
+     - Python 项目：`pytest`；
+     - Go 项目：`go test ./...`；
+   - 支持在 `.easycoderules` 或设置中指定自定义测试命令（如 `testCommand: "pnpm test:unit"`）；
+2. **专属闭环指令 `/test-loop` 与 Git Inspector 一键入口**：
+   - 在 Composer 支持 `/test-loop [目标模块/文件]` 指令；
+   - 在 Git 检视面板（#34）底部增加「`🧪 运行测试并自愈`」操作按钮；
+3. **Agent 自愈循环执行协议（In-Loop Self-Healing）**：
+   - Step 1：执行测试命令并捕获退出码与终端输出；
+   - Step 2：若 exit code === 0，判定成功，输出通过报告；
+   - Step 3：若 exit code !== 0，提取 failure 报错日志、失败测试用例名以及异常堆栈（Stack Trace）；
+   - Step 4：将错误堆栈与该任务所修改的代码 Diff 联合打包作为反馈提示词，模型自动分析根本原因并执行修复（`edit_file`）；
+   - Step 5：自动重新运行测试；
+   - 设置最大自愈轮次保护（如上限 3 次），避免死循环消耗 Token；
+4. **测试进展可视化面板**：
+   - 回合内渲染专门的 `TestRunCard`，直观呈现测试运行用时、通过率（通过 N / 失败 M）、失败用例列表及当前的自愈轮数（Round 1/3）。
+
+**涉及改动**：
+- `packages/core/src/testRunner.ts`：测试环境探知与失败堆栈抽取模块；
+- `packages/engine/src/testLoop.ts`：自愈循环状态机与轮次管理；
+- `packages/ui/src/commands/`：新增 `/test-loop` 指令；
+- `packages/ui/src/components/GitInspectorModal.tsx`：增加运行测试与自愈入口；
+- `packages/ui/src/components/Transcript.tsx` / `TestRunCard.tsx`：极客风测试卡片与自愈轮次动画。
+
+---
+
+### 40. AgentRuntime 决策与路由挂载接口（Decision Oracle / Micro-Model Router Hook）
+
+**状态**：⏳ 待办（规划中）
+
+**背景**：
+在现有的 Agent 核心循环中，意图识别、候选工具选择、目标文件预筛选以及是否继续循环等所有决策，完全由主会话的大模型（LLM）进行全量推理。这种模式在面对复杂工作区或多步调用时，容易产生较高的推理延迟与长上下文 Token 开销。
+随着端侧及超小型决策模型（如 Jev、微型路由模型、轻量级 SLM）的发展，由专用超轻量模型充当“前置导航员/快速决策路由器”已成为提高执行效率与降低开销的前沿方向。
+为了支持未来灵活接入此类超小型决策模型（如 Jev 模型），需要在 AgentRuntime / Core 架构中为所有关键判断节点预留可扩展的决策钩子或抽象接口。
+
+**设计方向（概括性预留）**：
+1. **决策器抽象接口（`DecisionEngine` / `DecisionHook`）**：
+   - 在 Core/Engine 中抽象统一的决策扩展点，支持挂载自定义轻量决策后端（未来可接入微型模型 API、本地轻量模型服务或启发式决策器）；
+2. **预留关键决策介入点**：
+   - **工具预选与路由（Tool Selection）**：判断当前意图最可能需要调用的工具子集或调用序列，减少无关工具对主模型的干扰；
+   - **文件预选与定位（File Candidates）**：根据用户任务意图，快速从工作区初筛最相关的候选文件清单，辅助定位与预读；
+   - **下一步行动与终止判断（Next Step / Termination）**：快速判定当前信息是否已经充分，辅助主模型决策是否可以提前收敛；
+3. **非阻塞与渐进回退**：
+   - 决策模型的输出作为软提示（Soft Hints）或可选引导输入主模型，决策超时或不可用时自动无感回退至原有主模型标准流程，确保核心稳定性。
+
+**涉及改动**：
+- `packages/core/src/types.ts` & `packages/core/src/loop.ts`：预留 `DecisionHook` / `DecisionContext` 接口与调用插槽；
+- `packages/engine/`：预留决策模型配置与挂载逻辑。
+
+---
+
 ### 32. Composer `/` 斜杠快捷指令系统（Slash Commands & Custom Prompts）
 
 **状态**：✅ 已完成（2026-09-22）——Composer `/` 触发监听与光标探测 + 极客风 `.command-pop` 指令面板 + 动作类执行（`/compact` 压缩上下文、`/fork` 分叉会话、`/export` 导出会话、`/clear` 清空草稿）与模板类补全（`/commit` 规范提交、`/review` 深度审查、`/test` 单元测试、`/fix` 缺陷修复）+ 工作区 `.easycode/prompts/*.md` 自定义指令自动合流 + 纯键盘驱动（↑↓ 导航、Tab/Enter 补全执行、Esc 退出、输入法合成防误触）
