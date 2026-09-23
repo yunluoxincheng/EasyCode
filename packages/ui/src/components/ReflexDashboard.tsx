@@ -139,18 +139,18 @@ export function ReflexDashboard() {
             className="btn primary mini-btn"
             onClick={() => handleExport({ includeUnreviewed: true }, 'Global-Trajectory')}
             disabled={exporting || !stats || stats.totalDecisions === 0}
-            title="一键导出所有项目会话的真实决策轨迹与执行对照"
+            title="导出全部未打标的原始观测轨迹（供离线分析，不伪造训练 target）"
           >
-            ⤓ 导出全量轨迹集 (.jsonl)
+            ⤓ 导出观测轨迹 (.jsonl)
           </button>
           {(stats?.reviewedSamples ?? 0) > 0 && (
             <button
               className="btn ghost mini-btn"
               onClick={() => handleExport({ includeUnreviewed: false }, 'Global-Audited')}
               disabled={exporting}
-              title="仅导出经人工审核确认的高质量训练样本"
+              title="仅导出经人工审核确认的高质量训练样本（包含标准 target 字段）"
             >
-              ★ 导出已审核样本 ({stats?.reviewedSamples})
+              ★ 导出已审核微调集 ({stats?.reviewedSamples})
             </button>
           )}
         </div>
@@ -388,9 +388,9 @@ export function ReflexDashboard() {
                                   style={{ fontSize: 11, padding: '2px 6px' }}
                                   onClick={() => handleExport({ sessionId: s.sessionId, includeUnreviewed: true }, s.sessionTitle)}
                                   disabled={exporting || s.totalDecisions === 0}
-                                  title="导出本会话的全部决策轨迹"
+                                  title="导出本会话的全部观测轨迹（供离线分析）"
                                 >
-                                  ⤓ 导出会话
+                                  ⤓ 导出轨迹
                                 </button>
                               </div>
                             </div>

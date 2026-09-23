@@ -360,29 +360,18 @@ export class DecisionStatsManager {
 
       if (!isHuman && !filter?.includeUnreviewed) continue;
 
-      let targetSelected: string[] = [];
-      let targetDefer = false;
-      let labelBasis = 'unlabeled';
+      let target: { selected: string[]; defer: boolean } | undefined;
 
       if (isHuman) {
         if (!review.defer && (!review.selectedId || !ids.includes(review.selectedId))) continue;
         if (review.defer && review.selectedId) continue;
-        targetSelected = review.defer || !review.selectedId ? [] : [review.selectedId];
-        targetDefer = review.defer;
-        labelBasis = 'human';
-      } else if (r.actualAction?.selectedId && ids.includes(r.actualAction.selectedId)) {
-        targetSelected = [r.actualAction.selectedId];
-        targetDefer = false;
-        labelBasis = 'observed_action';
-      } else if (r.predictionStatus === 'ready' && r.prediction?.selectedId && ids.includes(r.prediction.selectedId)) {
-        targetSelected = r.prediction.defer ? [] : [r.prediction.selectedId];
-        targetDefer = r.prediction.defer;
-        labelBasis = 'model_prediction';
-      } else {
-        continue;
+        target = {
+          selected: review.defer || !review.selectedId ? [] : [review.selectedId],
+          defer: review.defer,
+        };
       }
 
-      const item = {
+      const item: Record<string, unknown> = {
         id: r.id,
         schema_version: 1,
         decision: {
@@ -399,23 +388,31 @@ export class DecisionStatsManager {
           },
         },
         candidates: r.candidates.map((c) => ({ id: c.id, text: c.text })),
-        target: {
-          selected: targetSelected,
-          defer: targetDefer,
-        },
         source: {
           type: isHuman ? 'online_shadow_human_review' : 'online_shadow_trajectory',
-          label_basis: labelBasis,
+          label_basis: isHuman ? 'human' : 'unlabeled_observation',
           reviewed_at: review?.reviewedAt,
         },
         split_group: `online:${r.turnId}`,
         metadata: {
           timestamp: r.timestamp,
+          sessionId: r.sessionId,
           model_version: r.prediction?.modelVersion,
           observed_action: r.actualAction?.selectedId,
           observed_outcome: r.outcome?.status,
         },
       };
+
+      // 仅人工审核过的样本才允许写入监督训练目标 target，严防未审核实际动作/模型预测自污染
+      if (target) {
+        item.target = target;
+      } else {
+        item.observed = {
+          action: r.actualAction,
+          outcome: r.outcome,
+          prediction: r.prediction,
+        };
+      }
 
       lines.push(JSON.stringify(item));
     }

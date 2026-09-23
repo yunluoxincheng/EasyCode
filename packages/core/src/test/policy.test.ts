@@ -73,5 +73,5 @@ test('runAgentLoop 容忍 policy 内部抛出异常，主循环平滑执行', as
 
   assert.equal(res.reason, 'completed');
   assert.equal(messages.length, 2);
-  assert.equal(policyCalls, 2, '推理档位与信息充分性旁路异常均不阻断主循环');
+  assert.equal(policyCalls, 2, '推理档位与前置工具路由旁路异常均不阻断主循环');
 });

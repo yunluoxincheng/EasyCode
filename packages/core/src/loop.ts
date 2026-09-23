@@ -107,13 +107,14 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
         });
       }
 
-      // 决策点 5：信息充分性判断旁路（TODOS #40 information_sufficiency）
-      let infoObservation: DecisionObservation | undefined;
+      // 决策点 2：工具路由前瞻预测旁路（TODOS #40 tool_routing）
+      // 必须在调用 provider.stream 之前执行，绝不泄漏模型已生成的工具调用结果！
+      let toolRoutingObs: DecisionObservation | undefined;
       if (policy) {
         const lastUser = [...messages].reverse().find((m) => m.role === 'user');
-        infoObservation = startDecisionObservation(policy, {
-          taskFamily: 'information_sufficiency',
-          instruction: 'Assess whether the current context information is sufficient to proceed.',
+        toolRoutingObs = startDecisionObservation(policy, {
+          taskFamily: 'tool_routing',
+          instruction: 'Predict the most appropriate tool family for the current step.',
           state: {
             summary:
               typeof lastUser?.content === 'string'
@@ -122,10 +123,12 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
             history: messages.slice(-3).map((m) => m.role),
           },
           candidates: [
-            { id: 'proceed', text: 'PROCEED: Information is sufficient, proceed with action' },
-            { id: 'read_more', text: 'READ_MORE: Need to inspect more files or details' },
-            { id: 'search', text: 'SEARCH: Need to search codebase for missing context' },
-            { id: 'ask_user', text: 'ASK_USER: Requirement is ambiguous, need user clarification' },
+            { id: 'read_inspect', text: 'READ_INSPECT: Read file content or list directory' },
+            { id: 'edit_write', text: 'EDIT_WRITE: Edit existing code or write files' },
+            { id: 'search_explore', text: 'SEARCH_EXPLORE: Search symbols or regex in project' },
+            { id: 'run_command', text: 'RUN_COMMAND: Run shell command or execute tests' },
+            { id: 'git_vcs', text: 'GIT_VCS: Check git status or diff changes' },
+            { id: 'stop_respond', text: 'STOP_RESPOND: Stop tool calling and respond directly to user' },
           ],
           metadata: { step },
         });
@@ -180,61 +183,26 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
         pendingRecoveries = [];
       }
 
-      if (infoObservation) {
-        let actualInfo = 'proceed';
-        if (calls.length > 0) {
-          const fn = calls[0].name;
-          if (fn === 'read_file' || fn === 'list_dir') actualInfo = 'read_more';
-          else if (fn === 'search_files') actualInfo = 'search';
-          else actualInfo = 'proceed';
+      if (toolRoutingObs) {
+        if (calls.length === 0) {
+          toolRoutingObs.actual({
+            selectedId: 'stop_respond',
+            description: 'Agent responded directly without calling any tools',
+          });
         } else {
-          const text = turn.blocks.filter((b): b is { type: 'text'; text: string } => b.type === 'text').map((b) => b.text).join(' ');
-          actualInfo = /[?？]/.test(text) ? 'ask_user' : 'proceed';
+          const actualToolName = calls[0]?.name;
+          let mappedRoutingId: string | undefined;
+          if (actualToolName === 'read_file' || actualToolName === 'list_dir') mappedRoutingId = 'read_inspect';
+          else if (actualToolName === 'write_file' || actualToolName === 'edit_file') mappedRoutingId = 'edit_write';
+          else if (actualToolName === 'search_files') mappedRoutingId = 'search_explore';
+          else if (actualToolName === 'run_command') mappedRoutingId = 'run_command';
+          else if (actualToolName === 'git_status' || actualToolName === 'git_diff') mappedRoutingId = 'git_vcs';
+
+          toolRoutingObs.actual({
+            selectedId: mappedRoutingId,
+            description: `Agent chose tool: ${actualToolName}`,
+          });
         }
-        infoObservation.actual({
-          selectedId: actualInfo,
-          description: calls.length > 0 ? `Agent invoked ${calls[0].name}` : `Agent replied (${actualInfo})`,
-        });
-      }
-
-      // 决策点 8：工具路由预测旁路（TODOS #40 tool_routing）
-      if (policy && calls.length > 0) {
-        const textParts = turn.blocks
-          .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
-          .map((b) => b.text)
-          .join(' ');
-        const toolObs = startDecisionObservation(policy, {
-          taskFamily: 'tool_routing',
-          instruction: 'Predict the most appropriate tool family for the current step.',
-          state: {
-            summary:
-              textParts.slice(0, 300) ||
-              `Planned tools: ${calls.map((c) => c.name).join(', ')}`,
-            history: calls.map((c) => c.name),
-          },
-          candidates: [
-            { id: 'read_inspect', text: 'READ_INSPECT: Read file content or list directory' },
-            { id: 'edit_write', text: 'EDIT_WRITE: Edit existing code or write files' },
-            { id: 'search_explore', text: 'SEARCH_EXPLORE: Search symbols or regex in project' },
-            { id: 'run_command', text: 'RUN_COMMAND: Run shell command or execute tests' },
-            { id: 'git_vcs', text: 'GIT_VCS: Check git status or diff changes' },
-            { id: 'stop_respond', text: 'STOP_RESPOND: Stop tool calling and respond to user' },
-          ],
-          metadata: { actualTool: calls[0]?.name, totalCalls: calls.length },
-        });
-
-        const actualToolName = calls[0]?.name;
-        let mappedRoutingId: string | undefined;
-        if (actualToolName === 'read_file' || actualToolName === 'list_dir') mappedRoutingId = 'read_inspect';
-        else if (actualToolName === 'write_file' || actualToolName === 'edit_file') mappedRoutingId = 'edit_write';
-        else if (actualToolName === 'search_files') mappedRoutingId = 'search_explore';
-        else if (actualToolName === 'run_command') mappedRoutingId = 'run_command';
-        else if (actualToolName === 'git_status' || actualToolName === 'git_diff') mappedRoutingId = 'git_vcs';
-
-        toolObs?.actual({
-          selectedId: mappedRoutingId,
-          description: `First tool call: ${actualToolName}`,
-        });
       }
 
       if (calls.length === 0) {
@@ -277,36 +245,6 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
               metadata: { toolName: call.name, content: execution.content },
             });
           if (observation) pendingRecoveries.push({ observation, name: call.name, input: call.input });
-        }
-
-        // 决策点 6：代码变更验证手段旁路（TODOS #40 verification）
-        if (
-          !execution.isError &&
-          (call.name === 'edit_file' || call.name === 'write_file') &&
-          policy
-        ) {
-          const verifyObs = startDecisionObservation(policy, {
-            taskFamily: 'verification',
-            instruction:
-              'Choose the most effective verification method for the recent code changes.',
-            state: {
-              summary: `Modified file via '${call.name}'. Workspace: ${workspace}`,
-              history: [call.name],
-            },
-            candidates: [
-              { id: 'run_test', text: 'RUN_TEST: Run automated unit/integration tests' },
-              { id: 'run_build', text: 'RUN_BUILD: Run project build or compile check' },
-              { id: 'inspect_diff', text: 'INSPECT_DIFF: Inspect git diff of modified lines' },
-              {
-                id: 'no_verify',
-                text: 'NO_VERIFY: Pure documentation or minor tweak, skip verification',
-              },
-            ],
-            metadata: { toolName: call.name, input: call.input },
-          });
-          verifyObs?.actual({
-            description: `File modified via ${call.name}; observe follow-up verification`,
-          });
         }
 
         emit({

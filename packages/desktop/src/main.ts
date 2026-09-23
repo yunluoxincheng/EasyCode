@@ -127,7 +127,7 @@ class ElectronBridgeDecisionPolicy implements DecisionPolicy {
       const timer = setTimeout(() => {
         this.pending.delete(reqId);
         resolve(new NoopDecisionPolicy().decide(req));
-      }, 5000);
+      }, 30000);
 
       this.pending.set(reqId, (res) => {
         clearTimeout(timer);

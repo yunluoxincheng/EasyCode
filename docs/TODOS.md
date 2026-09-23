@@ -217,14 +217,13 @@ EasyCode 作为开放、可扩展的桌面 Coding Agent，目前仅提供内置�
    }
    ```
 
-2. **预留首批落地关键决策介入点（已全量接入 7 大决策任务族）**：
+2. **预留首批落地关键决策介入点（收敛至 5 大高确定性任务族）**：
    - **决策点 1：推理深度动态分配 (`reasoning_effort`)**：根据用户输入意图与工作区复杂度，决策 `fast` / `medium` / `high`；
-   - **决策点 2：工具执行错误恢复 (`recovery`)**：工具报错时，快速决策是 `retry_same` / `modify_input` / `search_dir` / `ask_user` / `stop`；
-   - **决策点 3：上下文修剪决策 (`context_management`)**：根据当前历史密度，决策是否提前做工具输出修剪或消息合并，而非仅靠 0.85 静态阈值；
-   - **决策点 4：敏感命令审批建议 (`safety`)**：旁路预测语义风险；当前审批仍按既有模式执行，审批模式不充当风险真值；
-   - **决策点 5：信息充分性判断 (`information_sufficiency`)**：评估当前上下文是否充足，决策是 `proceed` / `read_more` / `search` / `ask_user`；
-   - **决策点 6：代码变更验证手段 (`verification`)**：代码写入后，决策最优验证手段 `run_test` / `run_build` / `inspect_diff` / `no_verify`；
-   - **决策点 7：工具路由预测 (`tool_routing`)**：预测下一步工具家族（读检查/写修改/搜索探索/命令执行/Git版本控制/直接回复）。
+   - **决策点 2：工具路由前瞻预测 (`tool_routing`)**：在调用模型生成前无泄漏地预测下一步工具家族（读检查/写修改/搜索探索/命令执行/Git版本控制/直接回复），生成后 1:1 对比实际工具；
+   - **决策点 3：工具执行错误恢复 (`recovery`)**：工具报错时，快速决策是 `retry_same` / `modify_input` / `search_dir` / `ask_user` / `stop`；
+   - **决策点 4：上下文修剪决策 (`context_management`)**：根据当前历史密度，决策是否提前做工具输出修剪或消息合并，而非仅靠 0.85 静态阈值；
+   - **决策点 5：敏感命令审批建议 (`safety`)**：旁路预测语义风险，辅助识别破坏性操作；审批模式不充当风险真值。
+   - *(注：信息充分性与代码跨回合验证因真值模糊、启发式误报率高，暂缓接入，避免伪标签污染。)*
 
 3. **四阶段渐进式接管与安全网（Stage-gated Rollout）**：
    - **Stage A: Shadow Mode（当前集成第一目标）**：
@@ -270,15 +269,11 @@ EasyCode 作为开放、可扩展的桌面 Coding Agent，目前仅提供内置�
        - 候选概率条形图：动态横向柱状图渲染候选分布（Softmax 分布）；
        - 上下文抽屉：点击展开查看完整 `instruction`、`state.summary`、`state.goal` 与上下文历史。
 
-7. **微调数据集导出（双轨模式：支持全量轨迹与人工审核样本）**：
-   - 基于 UI 现有成熟的 `downloadFile` 工具，提供多维度导出能力：
-     - 单会话导出：`Reflex-Session-[SessionTitle]-[Timestamp].jsonl`
-     - 单项目导出：`Reflex-Project-[ProjectName]-[Timestamp].jsonl`
-     - 全局一键导出：`Reflex-AllProjects-Finetune-[Timestamp].jsonl`；
-   - **双轨导出机制**：
-     - **全量轨迹集（默认可用）**：直接导出 Agent 真实运行轨迹，自动将可观测的 Agent 动作记录为 `observed_action` 参照目标，方便开发者即时离线分析；
-     - **人工审核样本集（高精度闭环）**：在 Reflex 看板中经人工确认正确候选或标记 DEFER 的样本，以 `label_basis: 'human'` 导出，杜绝模型自标注漂移；
-   - **格式完全对齐**：导出结构 100% 遵循 Reflex V1 JSONL 规范（`id`, `schema_version: 1`, `decision`, `state`, `candidates`, `target`, `source`, `split_group`），同一 Agent 回合共享 `split_group`，避免训练与评测跨集合泄漏，可直接无缝投喂给 Reflex 训练管线。
+7. **微调数据集导出（严格隔离：观测轨迹导出 vs 人工审核微调集）**：
+   - 基于 UI 现有成熟的 `downloadFile` 工具，提供清晰隔离的导出能力：
+     - **原始观测轨迹导出（随时可用）**：导出 Agent 运行过程中的全部决策观察记录（含实际动作与执行结果），**不包含监督训练 target 字段**（或标记为未标注观察），供离线复盘与分析，杜绝未经审核的动作被误当成监督真值投喂训练；
+     - **已审核微调集导出（闭环可用）**：在 Reflex 看板中经人工确认正确候选或标记 DEFER 的样本，导出为包含完整 `target`（`selected: [id]` 或 `defer: true`）与 `source.label_basis: 'human'` 的黄金训练样本；
+   - **格式对齐与防污染**：导出结构遵循 Reflex V1 JSONL 规范（`id`, `schema_version: 1`, `decision`, `state`, `candidates`, `source`, `split_group`），同一 Agent 回合共享 `split_group`，避免训练与评测跨集合泄漏；无 target 的原始轨迹即使丢入训练器也会被安全拒绝，杜绝模型自训练污染。
 
 **涉及改动**：
 - `packages/core/src/policy.ts`：新增 `DecisionPolicy` / `DecisionRequest` / `DecisionResult` / `DecisionRecord` 接口与 `NoopPolicy`；

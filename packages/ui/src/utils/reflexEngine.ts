@@ -7,6 +7,20 @@ export class ReflexWebPolicy implements DecisionPolicy {
   private initializing: Promise<boolean> | null = null;
   private isReady = false;
 
+  constructor() {
+    // 空闲时后台预热，避免首轮决策产生冷启动耗时
+    if (typeof window !== 'undefined') {
+      const startPreload = () => {
+        void this.init().catch(() => {});
+      };
+      if ('requestIdleCallback' in window) {
+        (window as any).requestIdleCallback(startPreload);
+      } else {
+        setTimeout(startPreload, 1500);
+      }
+    }
+  }
+
   private async init(): Promise<boolean> {
     if (this.isReady) return true;
     if (this.initializing) return this.initializing;
