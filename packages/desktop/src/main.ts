@@ -5,6 +5,7 @@
  */
 import { app, BrowserWindow, dialog, ipcMain, Menu, Notification, shell, Tray } from 'electron';
 import cp from 'node:child_process';
+import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
@@ -163,6 +164,28 @@ const handlers: Record<string, Handler> = {
   'get-decision-stats': (args) => server.getDecisionStats(args),
   'get-decision-tree': () => server.getDecisionTree(),
   'export-decision-dataset': (args) => server.exportDecisionDataset(args),
+  'detect-shells': () => {
+    const isWin = process.platform === 'win32';
+    if (!isWin) return [];
+    const check = (cmd: string) => {
+      try {
+        const out = cp.execFileSync('cmd', ['/C', 'where', cmd], { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+        return out.split(/\r?\n/)[0] || '';
+      } catch {
+        return '';
+      }
+    };
+    const gitBash = fs.existsSync('C:\\Program Files\\Git\\bin\\bash.exe') ? 'C:\\Program Files\\Git\\bin\\bash.exe' : check('bash');
+    const pwsh = check('pwsh');
+    const powershell = check('powershell') || 'powershell.exe';
+    const cmd = check('cmd') || 'cmd.exe';
+    return [
+      { id: 'pwsh', name: 'PowerShell 7', path: pwsh, available: !!pwsh },
+      { id: 'git-bash', name: 'Git Bash', path: gitBash, available: !!gitBash },
+      { id: 'powershell', name: 'Windows PowerShell', path: powershell, available: !!powershell },
+      { id: 'cmd', name: 'Command Prompt', path: cmd, available: !!cmd },
+    ];
+  },
   'pick-workspace': async () => {
     if (!mainWindow) return null;
     const result = await dialog.showOpenDialog(mainWindow, {
