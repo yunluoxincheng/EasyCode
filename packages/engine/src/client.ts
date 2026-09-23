@@ -1,4 +1,11 @@
-import type { AgentEvent, SessionData, SessionMeta, ApprovalMode } from '@easycode/core';
+import type {
+  AgentEvent,
+  SessionData,
+  SessionMeta,
+  ApprovalMode,
+  DecisionStats,
+  ProjectDecisionTree,
+} from '@easycode/core';
 import type { ModelTestResult, ProviderModelInfo, Settings, ShellInfo } from './settings.js';
 import type {
   ProjectRuleInfo,
@@ -81,5 +88,11 @@ export interface AgentClient {
   /** 放弃修改 (git checkout / git clean)（TODOS #34） */
   discardGitChanges(id: string, paths: string[]): Promise<{ ok: boolean; error?: string }>;
   pickWorkspace(): Promise<string | null>;
+  /** 获取 Reflex 决策统计指标（TODOS #40） */
+  getDecisionStats?(filter?: { workspaceRoot?: string; sessionId?: string }): Promise<DecisionStats>;
+  /** 获取 Reflex 项目->会话两级决策树（TODOS #40） */
+  getDecisionTree?(): Promise<ProjectDecisionTree[]>;
+  /** 导出微调数据集 JSONL（TODOS #40） */
+  exportDecisionDataset?(filter?: { workspaceRoot?: string; sessionId?: string }): Promise<string>;
   onEvent(listener: (payload: { sessionId: string; event: AgentEvent }) => void): () => void;
 }

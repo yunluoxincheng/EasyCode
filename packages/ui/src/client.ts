@@ -4,6 +4,8 @@ import {
   type ApprovalMode,
   type SessionData,
   type SessionMeta,
+  type DecisionStats,
+  type ProjectDecisionTree,
 } from '@easycode/core';
 import { AgentServer, type AgentClient, type ProviderEntry, type Settings } from '@easycode/engine';
 import type {
@@ -143,6 +145,15 @@ export class IpcAgentClient implements AgentClient {
   discardGitChanges(id: string, paths: string[]) {
     return this.invoke<{ ok: boolean; error?: string }>('discard-git-changes', { id, paths });
   }
+  getDecisionStats(filter?: { workspaceRoot?: string; sessionId?: string }) {
+    return this.invoke<DecisionStats>('get-decision-stats', filter);
+  }
+  getDecisionTree() {
+    return this.invoke<ProjectDecisionTree[]>('get-decision-tree');
+  }
+  exportDecisionDataset(filter?: { workspaceRoot?: string; sessionId?: string }) {
+    return this.invoke<string>('export-decision-dataset', filter);
+  }
   onEvent(listener: (payload: { sessionId: string; event: AgentEvent }) => void) {
     this.bridge.onEvent(listener);
     return () => this.bridge.offEvent(listener);
@@ -268,6 +279,9 @@ export function createDemoClient(): AgentClient {
       { id: 'powershell', name: 'Windows PowerShell', path: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe', available: true },
       { id: 'cmd', name: 'Command Prompt', path: 'C:\\Windows\\System32\\cmd.exe', available: true },
     ],
+    getDecisionStats: (f) => wrap(() => server.getDecisionStats(f)),
+    getDecisionTree: () => wrap(() => server.getDecisionTree()),
+    exportDecisionDataset: (f) => wrap(() => server.exportDecisionDataset(f)),
     onEvent: (listener) => server.onEvent(listener),
   };
 }

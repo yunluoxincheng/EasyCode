@@ -1,6 +1,7 @@
 import type { Host } from '../host.js';
 import { validateToolInput, type JsonSchema } from '../jsonschema.js';
 import type { ApprovalManager } from '../approval.js';
+import type { DecisionPolicy } from '../policy.js';
 import { readFileTool, writeFileTool, editFileTool, listDirTool } from './fs.js';
 import { searchFilesTool } from './search.js';
 import { runCommandTool } from './shell.js';
@@ -48,6 +49,8 @@ export interface ToolContext {
   shell?: string;
   /** 工作区并发互斥锁（TODOS #29）：同工作区多会话并发时，敏感工具（写文件/终端命令）排队执行 */
   workspaceLock?: { withLock<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> };
+  /** 决策小模型策略接口（TODOS #40）：用于敏感风控评估或影子记录 */
+  policy?: DecisionPolicy;
 }
 
 export interface Tool {
@@ -160,6 +163,22 @@ export async function executeTool(
       isError: true,
       durationMs: 0,
     };
+  }
+  // 敏感操作语义安全风险评估旁路（TODOS #40 Safety）
+  if (registry.isSensitive(name) && ctx.policy) {
+    void ctx.policy.decide({
+      taskFamily: 'safety',
+      instruction: 'Assess the semantic risk of executing this action.',
+      state: {
+        summary: `Tool '${name}' requested with parameters: ${JSON.stringify(validated.value).slice(0, 300)}`,
+      },
+      candidates: [
+        { id: 'allow', text: 'ALLOW: Safe operation' },
+        { id: 'ask_approval', text: 'ASK_APPROVAL: Potentially destructive action requiring confirmation' },
+        { id: 'block', text: 'BLOCK: Hazardous command, reject immediately' },
+      ],
+      metadata: { toolName: name, input: validated.value },
+    }).catch(() => {});
   }
   // 仅敏感工具（写文件/执行命令）在 ask 模式下需要审批，只读工具直接放行
   const approved = registry.isSensitive(name)

@@ -28,12 +28,17 @@ import {
   type GitFileChange,
   type GitDiffResult,
   type GitDiffOptions,
+  NoopDecisionPolicy,
+  type DecisionStats,
+  type ProjectDecisionTree,
 } from '@easycode/core';
 import { Settings, DEFAULT_SETTINGS, PROVIDER_PRESETS } from './settings.js';
 import type { ModelTestResult, ProviderEntry, ProviderModel, ProviderModelInfo } from './settings.js';
 import { loadModelDirectory, resolveModelMeta } from './model-catalog.js';
 import { buildSystemPrompt } from './prompts.js';
 import { WorkspaceLockManager } from './workspace-lock.js';
+import { DecisionStatsManager } from './stats.js';
+import { ShadowDecisionPolicy } from './shadow.js';
 
 export interface CreateSessionOptions {
   /** 可选：不填则创建纯对话会话，之后可随时绑定 */
@@ -82,10 +87,13 @@ export class AgentServer {
   private sessions = new Map<string, SessionRuntime>();
   private readonly events = new Emitter<SessionEventPayload>();
   private readonly workspaceLocks = new WorkspaceLockManager();
+  private readonly decisionStats: DecisionStatsManager;
   private settings: Settings = structuredClone(DEFAULT_SETTINGS);
   private settingsLoaded = false;
 
-  constructor(private readonly host: Host) {}
+  constructor(private readonly host: Host) {
+    this.decisionStats = new DecisionStatsManager(host);
+  }
 
   /* -------------------- 事件订阅 -------------------- */
 
@@ -298,6 +306,7 @@ export class AgentServer {
     this.sessions.delete(id);
     try {
       await this.host.fs.unlink?.(this.sessionFile(id));
+      await this.decisionStats.deleteSessionRecords(id);
     } catch {
       // 忽略
     }
@@ -407,6 +416,18 @@ export class AgentServer {
         caps.includes('system') || !systemPrompt
           ? rt.data.messages
           : mergeSystemIntoUser(rt.data.messages, systemPrompt);
+
+      // 装配微型决策策略（TODOS #40：Shadow Mode 旁路观测）
+      const policy = new ShadowDecisionPolicy(
+        new NoopDecisionPolicy(),
+        this.decisionStats,
+        {
+          sessionId: rt.data.meta.id,
+          sessionTitle: rt.data.meta.title,
+          workspaceRoot: rt.data.meta.workspaceRoot,
+        },
+      );
+
       const result = await runAgentLoop({
         provider,
         tools: builtinTools,
@@ -416,6 +437,7 @@ export class AgentServer {
         messages: wireMessages,
         signal: rt.controller.signal,
         approval: rt.approval,
+        policy,
         emit: (event) => {
           if (event.type === 'step_end') {
             // 累计会话用量并随事件下发（持久化在会话文件中）
@@ -1080,6 +1102,23 @@ export class AgentServer {
     const root = session?.data.meta.workspaceRoot;
     if (!root) return { ok: false, error: '未绑定工作区' };
     return discardGitChanges(this.host, root, paths);
+  }
+
+  /* -------------------- Reflex 微模型决策与统计 (TODOS #40) -------------------- */
+
+  /** 获取微模型决策统计指标 */
+  async getDecisionStats(filter?: { workspaceRoot?: string; sessionId?: string }): Promise<DecisionStats> {
+    return this.decisionStats.getStats(filter);
+  }
+
+  /** 获取项目->会话分级决策树 */
+  async getDecisionTree(): Promise<ProjectDecisionTree[]> {
+    return this.decisionStats.getDecisionTree();
+  }
+
+  /** 导出完全兼容 Reflex V1 训练集规范的微调数据集 JSONL */
+  async exportDecisionDataset(filter?: { workspaceRoot?: string; sessionId?: string }): Promise<string> {
+    return this.decisionStats.exportDataset(filter);
   }
 }
 

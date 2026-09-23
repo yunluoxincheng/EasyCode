@@ -3,6 +3,7 @@ import { useStore } from '../useStore.js';
 import { updater } from '../updater.js';
 import { TerminalSelect } from './TerminalSelect.js';
 import { ModelConfigDialog } from './ModelConfigDialog.js';
+import { ReflexDashboard } from './ReflexDashboard.js';
 import { PROVIDER_PRESETS, providerLabel, validWebSearchBackend } from '@easycode/engine';
 import type {
   ModelTestResult,
@@ -44,6 +45,7 @@ const NAV: Array<{ id: SettingsSection; label: string; group: string }> = [
   { id: 'models', label: '模型服务', group: '配置' },
   { id: 'websearch', label: '联网搜索', group: '配置' },
   { id: 'general', label: '常规', group: '配置' },
+  { id: 'reflex', label: '微模型决策 (Reflex)', group: '模型与分析' },
   { id: 'about', label: '关于', group: '信息' },
 ];
 
@@ -997,6 +999,13 @@ export function SettingsPage() {
                 API Key 保存在本机设置文件中，不会上传。接入 Ollama / LM Studio 等本地服务可完全离线使用。
               </p>
             </div>
+          </>
+        )}
+
+        {section === 'reflex' && (
+          <>
+            <h1 className="page-title">微模型决策 (Reflex)</h1>
+            <ReflexDashboard />
           </>
         )}
 

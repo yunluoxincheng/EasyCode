@@ -1,6 +1,7 @@
 // 类型与协议
 export * from './types.js';
 export * from './events.js';
+export * from './policy.js';
 // 宿主
 export * from './host.js';
 // 审批

@@ -160,6 +160,9 @@ const handlers: Record<string, Handler> = {
   'get-git-diff': (args) => server.getGitDiff(args.id as string, args.options),
   'stage-git-files': (args) => server.stageGitFiles(args.id as string, args.paths as string[] | undefined),
   'discard-git-changes': (args) => server.discardGitChanges(args.id as string, args.paths as string[]),
+  'get-decision-stats': (args) => server.getDecisionStats(args),
+  'get-decision-tree': () => server.getDecisionTree(),
+  'export-decision-dataset': (args) => server.exportDecisionDataset(args),
   'pick-workspace': async () => {
     if (!mainWindow) return null;
     const result = await dialog.showOpenDialog(mainWindow, {

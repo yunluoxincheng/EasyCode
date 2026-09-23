@@ -6,6 +6,7 @@ import { extractToolCalls } from './providers/index.js';
 import { ApprovalManager } from './approval.js';
 import { executeTool, ToolRegistry } from './tools/index.js';
 import { compactHistoryMessages, pruneHistoricalToolResults } from './compaction.js';
+import type { DecisionPolicy } from './policy.js';
 
 export interface LoopOptions {
   provider: Provider;
@@ -29,6 +30,8 @@ export interface LoopOptions {
   autoCompactThreshold?: number;
   /** 工作区并发互斥锁（TODOS #29） */
   workspaceLock?: { withLock<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> };
+  /** 决策小模型策略接口（TODOS #40）：用于影子观测或自适应路由 */
+  policy?: DecisionPolicy;
 }
 
 export interface LoopResult {
@@ -68,12 +71,35 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
     contextWindow,
     autoCompactThreshold = 0.85,
     workspaceLock,
+    policy,
   } = options;
 
   try {
     const readFiles = new Set<string>();
     for (let step = 0; step < maxSteps; step++) {
       if (signal.aborted) return finish('aborted');
+
+      // 决策点 1：推理深度自适应旁路（TODOS #40 reasoning_effort）
+      if (step === 0 && policy) {
+        const lastUser = [...messages].reverse().find((m) => m.role === 'user');
+        void policy
+          .decide({
+            taskFamily: 'reasoning_effort',
+            instruction: 'Choose the appropriate reasoning effort for the current task.',
+            state: {
+              summary:
+                typeof lastUser?.content === 'string'
+                  ? lastUser.content.slice(0, 300)
+                  : 'Task started',
+            },
+            candidates: [
+              { id: 'fast', text: 'FAST: Low computation for simple edits and queries' },
+              { id: 'medium', text: 'MEDIUM: Standard reasoning for typical bugs and features' },
+              { id: 'high', text: 'HIGH: Extended reasoning for complex architecture and deep logic' },
+            ],
+          })
+          .catch(() => {});
+      }
 
       emit({ type: 'assistant_start' });
       const request: StreamRequest = {
@@ -110,7 +136,31 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
           readFiles,
           shell,
           workspaceLock,
+          policy,
         });
+
+        // 决策点 2：工具执行错误恢复旁路（TODOS #40 recovery）
+        if (execution.isError && policy) {
+          void policy
+            .decide({
+              taskFamily: 'recovery',
+              instruction: 'Decide the best recovery strategy after tool execution failure.',
+              state: {
+                summary: `Tool '${call.name}' failed with output: ${execution.content.slice(0, 250)}`,
+                history: [call.name],
+              },
+              candidates: [
+                { id: 'retry_same', text: 'Retry the exact same command or input' },
+                { id: 'modify_input', text: 'Modify arguments or input parameters before retrying' },
+                { id: 'search_dir', text: 'Search directory or read other files to locate missing context' },
+                { id: 'ask_user', text: 'Ask user for clarification or instructions' },
+                { id: 'stop', text: 'Stop execution and report error' },
+              ],
+              metadata: { toolName: call.name, content: execution.content },
+            })
+            .catch(() => {});
+        }
+
         emit({
           type: 'tool_result',
           callId: call.id,
@@ -127,6 +177,27 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
           isError: execution.isError,
         };
         messages.push(stamp(resultMessage));
+      }
+
+      // 决策点 3：上下文压缩前瞻旁路（TODOS #40 context_management）
+      if (contextWindow && turn.usage?.inputTokens && policy) {
+        const ratio = turn.usage.inputTokens / contextWindow;
+        void policy
+          .decide({
+            taskFamily: 'context_management',
+            instruction: 'Decide whether to prune or compact context history.',
+            state: {
+              summary: `Current token usage: ${turn.usage.inputTokens}/${contextWindow} (${Math.round(ratio * 100)}%)`,
+              history: messages.slice(-2).map((m) => m.role),
+            },
+            candidates: [
+              { id: 'keep', text: 'Keep current history as is' },
+              { id: 'prune_tools', text: 'Prune historical tool outputs only' },
+              { id: 'compact_all', text: 'Compact early history messages into summary' },
+            ],
+            metadata: { inputTokens: turn.usage.inputTokens, contextWindow, ratio },
+          })
+          .catch(() => {});
       }
 
       // 上下文超限保护（TODOS #31）：若本轮输入的 Token 超过设定阈值，触发智能阶梯压缩

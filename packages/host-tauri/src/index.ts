@@ -307,6 +307,9 @@ export async function createTauriClient(): Promise<AgentClient> {
     openInVscode: (path: string) => invoke<void>('open_in_vscode', { path }),
     notify: (title: string, body: string) => invoke<void>('send_notification', { title, body }),
     detectShells: () => invoke<ShellInfo[]>('proc_detect_shells'),
+    getDecisionStats: (filter) => server.getDecisionStats(filter),
+    getDecisionTree: () => server.getDecisionTree(),
+    exportDecisionDataset: (filter) => server.exportDecisionDataset(filter),
     onEvent: (listener) => server.onEvent(listener),
   };
 }

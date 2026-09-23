@@ -4,7 +4,7 @@ import type { AgentClient } from './client.js';
 
 export type ViewBlock = { type: 'text' | 'thinking'; text: string };
 export type ViewName = 'chat' | 'settings';
-export type SettingsSection = 'models' | 'websearch' | 'general' | 'about';
+export type SettingsSection = 'models' | 'websearch' | 'general' | 'reflex' | 'about';
 
 export type UserItem = { kind: 'user'; id: string; text: string; ts?: number; msgId?: string };
 export type AssistantItem = { kind: 'assistant'; id: string; blocks: ViewBlock[] };

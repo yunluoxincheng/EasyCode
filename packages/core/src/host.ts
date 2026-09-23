@@ -122,6 +122,9 @@ export class MemoryHost implements Host {
       const data = this.files.get(key) ?? '';
       return { isDirectory: false, size: data.length, mtimeMs: 0 };
     },
+    unlink: async (p: string) => {
+      this.files.delete(this.norm(p));
+    },
   };
 
   readonly process = {
