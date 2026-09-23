@@ -16,12 +16,16 @@ export class ReflexWebPolicy implements DecisionPolicy {
         console.log('[Reflex] Initializing on-device ONNX Web engine...');
         // 1. 动态按需引入 onnxruntime-web
         const ort = await import('onnxruntime-web');
-        ort.env.wasm.wasmPaths = './ort/';
+        // wasmPaths 必须是绝对 URL：ORT 内部用 new URL(filename, prefix) 解析 .mjs/.wasm，
+        // 相对前缀 './ort/' 在 URL 构造器中非法，会回退为相对动态 import，
+        // 被 Vite 解析到 .vite/deps 或产物 assets 下的错误路径，导致后端加载失败。
+        ort.env.wasm.wasmPaths = new URL('./ort/', document.baseURI).href;
         ort.env.wasm.numThreads = 1;
 
         // 2. 动态按需引入分词器
         const { AutoTokenizer, env } = await import('@huggingface/transformers');
         env.allowLocalModels = true;
+        env.allowRemoteModels = false;
 
         // 3. 读取伴生配置
         const configResp = await fetch('./models/reflex/runtime_config.json');
@@ -191,7 +195,8 @@ export class ReflexWebPolicy implements DecisionPolicy {
         confidence: 0,
         defer: true,
         scores: {},
-        latencyMs: Math.round(performance.now() - started),
+        // 推理失败不是有效模型输出：latencyMs 置 0，让影子门禁拒绝落盘，杜绝垃圾数据
+        latencyMs: 0,
       };
     }
   }
