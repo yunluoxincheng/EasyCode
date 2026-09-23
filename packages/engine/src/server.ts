@@ -1135,8 +1135,13 @@ export class AgentServer {
     return this.decisionStats.getDecisionTree();
   }
 
-  /** 导出完全兼容 Reflex V1 训练集规范的微调数据集 JSONL */
-  async exportDecisionDataset(filter?: { workspaceRoot?: string; sessionId?: string; includeUnreviewed?: boolean }): Promise<string> {
+  /** 导出完全兼容 Reflex V1 训练集规范的微调数据集或原始观测轨迹 JSONL */
+  async exportDecisionDataset(filter?: {
+    workspaceRoot?: string;
+    sessionId?: string;
+    kind?: 'finetune' | 'trajectory';
+    includeUnreviewed?: boolean;
+  }): Promise<string> {
     return this.decisionStats.exportDataset(filter);
   }
 

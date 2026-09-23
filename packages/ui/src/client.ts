@@ -151,7 +151,7 @@ export class IpcAgentClient implements AgentClient {
   getDecisionTree() {
     return this.invoke<ProjectDecisionTree[]>('get-decision-tree');
   }
-  exportDecisionDataset(filter?: { workspaceRoot?: string; sessionId?: string; includeUnreviewed?: boolean }) {
+  exportDecisionDataset(filter?: { workspaceRoot?: string; sessionId?: string; kind?: 'finetune' | 'trajectory'; includeUnreviewed?: boolean }) {
     return this.invoke<string>('export-decision-dataset', filter);
   }
   reviewDecision(sessionId: string, recordId: string, label: { selectedId?: string; defer: boolean }) {

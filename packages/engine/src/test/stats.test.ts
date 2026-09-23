@@ -137,6 +137,17 @@ test('DecisionStatsManager 仅比较真实动作，并仅导出人工审核标�
   assert.equal(row2.target.defer, true);
   assert.deepEqual(row2.target.selected, [], 'defer 训练目标不能包含选中候选项');
 
+  // 4.1 独立测试观测轨迹导出：必须严格不含 target 字段，防止污染 Reflex 训练器
+  const trajJsonl = await manager.exportDataset({ sessionId: 'session_1', kind: 'trajectory' });
+  const trajLines = trajJsonl.trim().split('\n');
+  assert.equal(trajLines.length, 2);
+  for (const line of trajLines) {
+    const tRow = JSON.parse(line);
+    assert.equal('target' in tRow, false, '观测轨迹模式下严禁输出 target 训练标签');
+    assert.equal(tRow.record_type, 'observation_trajectory');
+    assert.ok(tRow.observed, '必须包含实际观察对象');
+  }
+
   // 5. 清理
   await manager.deleteSessionRecords('session_1');
   const afterClean = await manager.getStats();

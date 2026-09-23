@@ -1,26 +1,31 @@
 import type { AgentClient } from '@easycode/engine';
 import { downloadFile, sanitizeFilename } from './exportSession.js';
 
-export function getDecisionExportFilename(scope: 'global' | 'project' | 'session', name?: string): string {
+export function getDecisionExportFilename(
+  kind: 'trajectory' | 'finetune',
+  scope: 'global' | 'project' | 'session',
+  name?: string,
+): string {
   const d = new Date();
   const pad = (n: number) => String(n).padStart(2, '0');
   const stamp = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}`;
-  const cleanName = sanitizeFilename(name || 'dataset');
+  const cleanName = sanitizeFilename(name || (scope === 'global' ? 'AllProjects' : 'dataset'));
+  const tag = kind === 'finetune' ? 'Finetune' : 'Trajectory';
   if (scope === 'global') {
-    return `Reflex-AllProjects-Finetune-${stamp}.jsonl`;
+    return `Reflex-${tag}-AllProjects-${stamp}.jsonl`;
   }
   if (scope === 'project') {
-    return `Reflex-Project-${cleanName}-${stamp}.jsonl`;
+    return `Reflex-${tag}-Project-${cleanName}-${stamp}.jsonl`;
   }
-  return `Reflex-Session-${cleanName}-${stamp}.jsonl`;
+  return `Reflex-${tag}-Session-${cleanName}-${stamp}.jsonl`;
 }
 
 /**
- * 从后端拉取微调数据集并在前端触发文件下载
+ * 从后端拉取决策数据集并在前端触发文件下载
  */
 export async function downloadDecisionDataset(
   client: AgentClient,
-  filter?: { workspaceRoot?: string; sessionId?: string; includeUnreviewed?: boolean },
+  filter?: { workspaceRoot?: string; sessionId?: string; kind?: 'trajectory' | 'finetune'; includeUnreviewed?: boolean },
   scopeTitle?: string,
 ): Promise<{ ok: boolean; count: number; error?: string }> {
   try {
@@ -38,7 +43,8 @@ export async function downloadDecisionDataset(
     if (filter?.sessionId) scope = 'session';
     else if (filter?.workspaceRoot) scope = 'project';
 
-    const filename = getDecisionExportFilename(scope, scopeTitle);
+    const kind = filter?.kind ?? (filter?.includeUnreviewed ? 'trajectory' : 'finetune');
+    const filename = getDecisionExportFilename(kind, scope, scopeTitle);
     downloadFile(filename, jsonl, 'application/x-jsonlines');
     return { ok: true, count };
   } catch (err) {

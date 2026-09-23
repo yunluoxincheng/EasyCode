@@ -336,17 +336,20 @@ export class DecisionStatsManager {
   }
 
   /**
-   * 导出符合 Reflex V1 结构的微调数据集。
-   * 默认严格模式：仅导出人工审核通过的样本（basis: 'human'），避免自标注污染。
-   * 若指定 includeUnreviewed: true，则允许导出带 Agent 实际观察动作的完整轨迹数据（用于离线分析与对照）。
+   * 导出决策数据集。
+   * 支持两种严格隔离的协议模式：
+   * 1. kind === 'finetune'（默认）：严格的 Reflex V1 监督微调数据集，仅包含人工审核通过的样本，每条必须带 target，杜绝模型伪自标注污染；
+   * 2. kind === 'trajectory'：纯粹的 Agent 在线观测轨迹，记录输入、候选、预测及真实动作，严格不输出 target 字段，防止被意外作为训练集投喂。
    */
   async exportDataset(filter?: {
     workspaceRoot?: string;
     sessionId?: string;
+    kind?: 'finetune' | 'trajectory';
     includeUnreviewed?: boolean;
   }): Promise<string> {
     const records = await this.loadRecords(filter);
     const lines: string[] = [];
+    const isTrajectoryMode = filter?.kind === 'trajectory' || (filter?.includeUnreviewed && filter?.kind !== 'finetune');
 
     for (const r of records) {
       if (!r.turnId) continue;
@@ -358,22 +361,58 @@ export class DecisionStatsManager {
       const review = r.review;
       const isHuman = review?.basis === 'human';
 
-      if (!isHuman && !filter?.includeUnreviewed) continue;
-
-      let target: { selected: string[]; defer: boolean } | undefined;
-
-      if (isHuman) {
+      // 模式 1：微调数据集（finetune）模式 —— 必须有人工审核标签
+      if (!isTrajectoryMode) {
+        if (!isHuman) continue;
         if (!review.defer && (!review.selectedId || !ids.includes(review.selectedId))) continue;
         if (review.defer && review.selectedId) continue;
-        target = {
+
+        const target = {
           selected: review.defer || !review.selectedId ? [] : [review.selectedId],
           defer: review.defer,
         };
+
+        const item = {
+          id: r.id,
+          schema_version: 1,
+          decision: {
+            instruction: r.instruction,
+            mode: 'select_one',
+          },
+          state: {
+            goal: r.state.goal || 'Advance the agent task efficiently and reliably.',
+            summary: r.state.summary,
+            history: r.state.history || [],
+            metadata: {
+              domain: 'coding',
+              task_family: r.taskFamily,
+            },
+          },
+          candidates: r.candidates.map((c) => ({ id: c.id, text: c.text })),
+          target,
+          source: {
+            type: 'online_shadow_human_review',
+            label_basis: 'human',
+            reviewed_at: review.reviewedAt,
+          },
+          split_group: `online:${r.turnId}`,
+          metadata: {
+            timestamp: r.timestamp,
+            sessionId: r.sessionId,
+            model_version: r.prediction?.modelVersion,
+            observed_action: r.actualAction?.selectedId,
+            observed_outcome: r.outcome?.status,
+          },
+        };
+        lines.push(JSON.stringify(item));
+        continue;
       }
 
-      const item: Record<string, unknown> = {
+      // 模式 2：观测轨迹（trajectory）模式 —— 严格不输出 target 字段，防止被意外当成训练集投喂
+      const trajectoryItem = {
         id: r.id,
         schema_version: 1,
+        record_type: 'observation_trajectory',
         decision: {
           instruction: r.instruction,
           mode: 'select_one',
@@ -389,32 +428,23 @@ export class DecisionStatsManager {
         },
         candidates: r.candidates.map((c) => ({ id: c.id, text: c.text })),
         source: {
-          type: isHuman ? 'online_shadow_human_review' : 'online_shadow_trajectory',
-          label_basis: isHuman ? 'human' : 'unlabeled_observation',
-          reviewed_at: review?.reviewedAt,
+          type: 'online_shadow_trajectory',
+          label_basis: 'unlabeled_observation',
         },
         split_group: `online:${r.turnId}`,
+        observed: {
+          action: r.actualAction,
+          outcome: r.outcome,
+          prediction: r.prediction,
+          review: r.review,
+        },
         metadata: {
           timestamp: r.timestamp,
           sessionId: r.sessionId,
           model_version: r.prediction?.modelVersion,
-          observed_action: r.actualAction?.selectedId,
-          observed_outcome: r.outcome?.status,
         },
       };
-
-      // 仅人工审核过的样本才允许写入监督训练目标 target，严防未审核实际动作/模型预测自污染
-      if (target) {
-        item.target = target;
-      } else {
-        item.observed = {
-          action: r.actualAction,
-          outcome: r.outcome,
-          prediction: r.prediction,
-        };
-      }
-
-      lines.push(JSON.stringify(item));
+      lines.push(JSON.stringify(trajectoryItem));
     }
 
     return lines.join('\n');

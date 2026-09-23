@@ -50,6 +50,26 @@ function stamp(
   };
 }
 
+/** 从历史消息中提取已完成的实际操作轨迹（Action Trace），为工具路由提供随 Step 演进的上下文且绝不发生未来答案泄漏 */
+function extractRecentActionTrace(messages: ChatMessage[], maxItems = 4): string[] {
+  const trace: string[] = [];
+  for (const m of messages) {
+    if (m.role === 'assistant') {
+      for (const b of m.blocks) {
+        if (b.type === 'tool_call') {
+          const input = b.input as Record<string, unknown> | undefined;
+          const target = input?.path ?? input?.command ?? input?.query ?? '';
+          const targetStr = typeof target === 'string' && target ? `(${target.slice(0, 40)})` : '';
+          trace.push(`call: ${b.name}${targetStr}`);
+        }
+      }
+    } else if (m.role === 'tool_result') {
+      trace.push(`result: ${m.toolName} (${m.isError ? 'error' : 'ok'})`);
+    }
+  }
+  return trace.slice(-maxItems);
+}
+
 /**
  * Agent 主循环：流式生成 → 执行工具 → 结果回传，直至模型不再调用工具。
  * 单一轮次入口，由上层（engine 的会话服务）驱动。
@@ -112,15 +132,15 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
       let toolRoutingObs: DecisionObservation | undefined;
       if (policy) {
         const lastUser = [...messages].reverse().find((m) => m.role === 'user');
+        const userPrompt = typeof lastUser?.content === 'string' ? lastUser.content.slice(0, 250) : 'Task in progress';
+        const actionTrace = extractRecentActionTrace(messages);
+        const lastAction = actionTrace.length > 0 ? actionTrace[actionTrace.length - 1] : 'Task initiated';
         toolRoutingObs = startDecisionObservation(policy, {
           taskFamily: 'tool_routing',
           instruction: 'Predict the most appropriate tool family for the current step.',
           state: {
-            summary:
-              typeof lastUser?.content === 'string'
-                ? lastUser.content.slice(0, 300)
-                : 'Task in progress',
-            history: messages.slice(-3).map((m) => m.role),
+            summary: `Step ${step + 1}: ${userPrompt}. Last progress: ${lastAction}`,
+            history: actionTrace,
           },
           candidates: [
             { id: 'read_inspect', text: 'READ_INSPECT: Read file content or list directory' },
@@ -130,7 +150,7 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
             { id: 'git_vcs', text: 'GIT_VCS: Check git status or diff changes' },
             { id: 'stop_respond', text: 'STOP_RESPOND: Stop tool calling and respond directly to user' },
           ],
-          metadata: { step },
+          metadata: { step, completedActionCount: actionTrace.length },
         });
       }
 

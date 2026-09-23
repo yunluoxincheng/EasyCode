@@ -368,4 +368,14 @@ test('AgentServer: 影子模式开关开启时执行 policy 并记录，开关�
   const statsOn = await server.getDecisionStats();
   assert.ok(statsOn.totalDecisions > 0, '开启开关后成功落盘审计日志');
   assert.ok(statsOn.avgLatencyMs > 0, '包含真实推理耗时');
+  assert.ok(statsOn.taskFamilyDistribution.tool_routing! > 0, '必须包含无泄漏的前置工具路由预测');
+
+  // 验证导出的观测轨迹无 target 字段
+  const traj = await server.exportDecisionDataset({ sessionId: session.id, kind: 'trajectory' });
+  assert.ok(traj.length > 0);
+  for (const line of traj.trim().split('\n')) {
+    const parsed = JSON.parse(line);
+    assert.equal('target' in parsed, false, '观测轨迹模式下严禁输出 target 训练标签');
+    assert.equal(parsed.record_type, 'observation_trajectory');
+  }
 });
