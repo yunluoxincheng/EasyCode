@@ -171,7 +171,7 @@ EasyCode 作为开放、可扩展的桌面 Coding Agent，目前仅提供内置�
 
 ### 40. AgentRuntime 决策与路由挂载接口（Reflex 决策小模型 / DecisionPolicy 挂载与 Shadow Mode 旁路）
 
-**状态**：🟡 Stage A 工程实现完成，待真实会话验收（2026-09-24）——已接入四个可观测决策点、事件日志、统计看板与人工审核后导出；尚未积累和评估真实审核样本，也未启用模型接管。
+**状态**：🟡 Stage A 工程实现完成，可采集并导出 Silver 弱监督样本，真实会话数据质量与训练收益待验收（2026-09-24）——已接入五个可观测决策点、事件日志、统计看板与免人工审核的单一微调集导出；尚未启用模型接管。
 
 **背景**：
 在现有的 Agent 核心循环中，意图识别、推理档位分配（Reasoning Effort）、敏感操作审批、工具报错恢复以及上下文压缩时机等所有控制流决策，要么完全依赖主会话的大模型（LLM）进行全量高延迟生成，要么依赖硬编码的朴素阈值（如敏感布尔值、0.85 上下文压缩硬触发、报错直接回传模型自行思考）。这种模式增加了单次回合的延迟与 Token 消耗，且缺乏端侧自适应调控能力。
@@ -230,7 +230,7 @@ EasyCode 作为开放、可扩展的桌面 Coding Agent，目前仅提供内置�
      - 完全不改变 EasyCode 现有的任何主逻辑与执行动作；
      - 关键决策点异步旁路触发 `policy.decide()`，主循环零阻塞；
      - 按决策事件落盘记录实际送入模型的脱敏 `State`、`Candidates`、预测状态、Agent 或既有规则的实际动作及可观测执行结果；无法映射候选时留空，不猜测动作或成功率；
-     - 一致率只统计有效预测与可映射实际动作的交集；人工审核标签是训练目标的唯一来源。真实会话数据质量验收仍待完成；
+     - 一致率只统计有效预测与可映射实际动作的交集，不能解释为正确率；执行证据筛选的 Silver 标签可导出，无需逐条人工审核，真实会话标签质量与训练收益仍待验证；
    - **Stage B: Advisory Mode（建议模式）**：
      - 在开发者日志或 UI 旁路轻量展示微模型建议（如“Reflex 建议当前任务可使用 fast 推理档位”）；
    - **Stage C: Low-risk Control（低风险接管）**：
@@ -254,7 +254,7 @@ EasyCode 作为开放、可扩展的桌面 Coding Agent，目前仅提供内置�
      - `deferRate`：模型主动降级/转交主大模型的比例；
      - `agreementRate`：有效预测与可映射实际动作的吻合率，不能解释为正确率；
      - `validPredictions` / `comparableDecisions` / `reviewedSamples` / `writeFailures`：分别标明预测、对照、人工标签和当前进程写入失败的数量；
-     - `taskFamilyDistribution`：四大任务族的触发频度占比；
+     - `taskFamilyDistribution`：五大任务族的触发频度占比；
      - `confidenceBuckets`：置信度区间分布统计（健康度阶梯）。
 
 6. **设置界面可视化决策历史：项目 $\to$ 会话分级展开 (`SettingsPage`)**：
@@ -269,22 +269,22 @@ EasyCode 作为开放、可扩展的桌面 Coding Agent，目前仅提供内置�
        - 候选概率条形图：动态横向柱状图渲染候选分布（Softmax 分布）；
        - 上下文抽屉：点击展开查看完整 `instruction`、`state.summary`、`state.goal` 与上下文历史。
 
-7. **单一、无需人工审核的合格微调集导出（证据驱动弱监督标注）**：
+7. **单一、无需人工审核的 Silver 弱监督微调集导出（证据驱动筛选）**：
    - 基于 UI 现有成熟的 `downloadFile` 工具，提供单一、纯净的微调集导出能力：
      - 单会话导出：`Reflex-Finetune-Session-[SessionTitle]-[Timestamp].jsonl`
      - 单项目导出：`Reflex-Finetune-Project-[ProjectName]-[Timestamp].jsonl`
      - 全局一键导出：`Reflex-Finetune-AllProjects-[Timestamp].jsonl`；
    - **本地审计隐私与深度脱敏**：
-     - 本地落盘前，对请求文本、状态描述、历史命令及 `metadata` 中的敏感字段（`password`, `token`, `key`, `secret`, `credential`）进行递归打码清洗，绝不在本地磁盘留存未脱敏明文密钥；
+     - 旁路记录不接收敏感工具的原始参数与完整报错；落盘前对请求文本、状态描述、会话标题等字段执行已知凭证格式脱敏，并对白名单 `metadata` 字段校验标量类型。脱敏规则不构成对任意未知凭证格式的保证；
    - **证据驱动弱监督自动筛选（Silver 标签，免用户逐条审核）**：
      - 内部完整保留请求、端侧预测、Agent 实际动作与最终执行结果（Outcome），以此作为自动筛选合格标签的因果证据；
-     - **客观属性定性**：导出品明确标记为 `source.type: 'online_shadow_weak_supervision'` 与 `quality: 'silver'`。这属于基于真实运行事实的弱监督信号，供离线复盘与蒸馏；进入正式模型训练前，建议先在 Reflex 评测基准（3188 盲测与 310 反事实用例）上验证增益；
+     - **客观属性定性**：导出品明确标记为 `source.type: 'online_shadow_weak_supervision'` 与 `quality: 'silver'`。这属于基于真实运行事实的弱监督信号，可用于离线训练实验；格式可加载不代表模型会改善，合流至正式模型前需与现有基线在相同配置下比较训练前后表现，并在 Reflex 的 3,188 条盲测与 310 对反事实基准上检查整体和分任务族的增益与退化；
      - **排除明确失败及不可靠记录**：绝不直接把 Reflex 预测、Agent 动作、用户推理档位配置或审批模式当做 target。每类任务族均具备严密的证据与排除规则：
        - `tool_routing`：仅当工具执行事实证明成功（`outcome.status === 'success'`，命令退出码 0）时，该工具族方可作为 target 正例；工具失败或被拒绝时严格排除；
        - `recovery`：仅当自愈动作事实证明成功推进任务时入选，继续报错者严格排除；
        - `context_management`：仅在安全水位（<=0.50）确认 `keep` 或达到阈值（>=0.85）确认 `compact_all` 时入选，模糊状态排除；
        - `reasoning_effort`：依据整轮实际执行的客观复杂度（无错误前提下的总步数）判定，不采纳用户的静态配置；
-       - `safety`：审批模式不充当安全真值，缺乏静态沙箱证明时严格排除。
+       - `safety`：审批模式不充当安全真值，缺乏独立验证时不导出监督标签；当前操作类别只提供首个已识别动词或文件扩展名等粗粒度事实，复合命令可能无法完整表达风险，不可作为审批或放行依据。
      - 若当前没有合格样本，界面清晰显示 0 条并禁用导出，绝不凑数；
    - **格式完全合规**：导出的每一行均带有合法 `target`（`selected` 必须位于 `candidates` 列表内，或 `defer: true` 对应空列表），同一 Agent 回合共享 `split_group`，100% 格式合规且直接通过 Reflex 数据校验器与 PyTorch 数据加载器。
 
