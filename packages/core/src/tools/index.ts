@@ -135,6 +135,26 @@ export interface ToolExecution {
   durationMs: number;
 }
 
+/** 从敏感操作输入中提取纯净的结构化操作类别事实，绝不暴露具体参数、路径或命令内容 */
+export function extractStructuredOperationFact(name: string, rawInput: unknown): { operationCategory: string; targetExt?: string } {
+  const input = typeof rawInput === 'object' && rawInput !== null ? (rawInput as Record<string, unknown>) : {};
+  if (name === 'run_command') {
+    const cmd = typeof input.command === 'string' ? input.command.trim() : '';
+    // 只取第一个词的字母作为根动词，如 git, pnpm, rm, curl, node
+    const verbMatch = /^[a-zA-Z0-9_-]+/.exec(cmd);
+    const rootVerb = verbMatch ? verbMatch[0].toLowerCase().slice(0, 20) : 'unknown';
+    return { operationCategory: `shell_${rootVerb}` };
+  }
+  if (name === 'write_file' || name === 'edit_file') {
+    const p = typeof input.path === 'string' ? input.path : '';
+    const extMatch = /\.[a-zA-Z0-9]+$/.exec(p);
+    const ext = extMatch ? extMatch[0].toLowerCase().slice(0, 10) : 'none';
+    const isConfig = /(?:config|rc|json|ya?ml|toml|env|lock)$/i.test(p);
+    return { operationCategory: `fs_${name}_${ext}${isConfig ? '_cfg' : ''}`, targetExt: ext };
+  }
+  return { operationCategory: `tool_${name}` };
+}
+
 /** 只判断工具调用本身的可观测结果，不推断整个 Agent 任务是否成功。 */
 export function getToolExecutionOutcome(name: string, execution: ToolExecution): DecisionOutcome {
   if (!execution.approved) return { status: 'unknown', evidence: 'Tool was not executed' };
@@ -180,20 +200,25 @@ export async function executeTool(
     };
   }
   // 敏感操作语义安全风险评估旁路（TODOS #40 Safety）
-  // 严格从源头物理隔离任何命令或文件参数，metadata 仅保留工具名称白名单，绝不在日志中暴露敏感参数
-  const safetyObservation = registry.isSensitive(name) && ctx.policy
+  // 提取纯净结构化事实（如 shell_git, shell_rm, fs_write_file_ts），绝不在日志中暴露具体参数明文
+  const opFact = registry.isSensitive(name) ? extractStructuredOperationFact(name, validated.value) : undefined;
+  const safetyObservation = registry.isSensitive(name) && ctx.policy && opFact
     ? startDecisionObservation(ctx.policy, {
       taskFamily: 'safety',
       instruction: 'Assess the semantic risk of executing this action.',
       state: {
-        summary: `Sensitive tool '${name}' requested in workspace`,
+        summary: `Operation category: '${opFact.operationCategory}' requested in workspace`,
       },
       candidates: [
         { id: 'allow', text: 'ALLOW: Safe operation' },
         { id: 'ask_approval', text: 'ASK_APPROVAL: Potentially destructive action requiring confirmation' },
         { id: 'block', text: 'BLOCK: Hazardous command, reject immediately' },
       ],
-      metadata: { toolName: name },
+      metadata: {
+        toolName: name,
+        operationCategory: opFact.operationCategory,
+        targetExt: opFact.targetExt,
+      },
     }) : undefined;
   // 仅敏感工具（写文件/执行命令）在 ask 模式下需要审批，只读工具直接放行
   const approved = registry.isSensitive(name)

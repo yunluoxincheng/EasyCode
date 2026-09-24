@@ -79,6 +79,44 @@ function extractRecentActionTrace(messages: ChatMessage[], maxItems = 4): string
   return trace.slice(-maxItems);
 }
 
+/** 提炼纯净的结构化错误事实分类，绝不泄露原始报错日志、环境变量或文件明文 */
+export function extractStructuredErrorFact(
+  toolName: string,
+  content: string,
+): { errorCategory: string; exitCode?: number } {
+  if (toolName === 'run_command') {
+    const exitMatch = /^退出码: (\d+|signal)/.exec(content);
+    const code = exitMatch ? (exitMatch[1] === 'signal' ? 137 : parseInt(exitMatch[1], 10)) : undefined;
+    if (code === 127 || /command not found|不是内部或外部命令/i.test(content)) {
+      return { errorCategory: 'command_not_found', exitCode: code };
+    }
+    if (/timed? ?out|超时/i.test(content)) {
+      return { errorCategory: 'command_timeout', exitCode: code };
+    }
+    if (/permission denied|拒绝访问|EACCES/i.test(content)) {
+      return { errorCategory: 'permission_denied', exitCode: code };
+    }
+    if (code !== undefined) {
+      return { errorCategory: `non_zero_exit_${code}`, exitCode: code };
+    }
+    return { errorCategory: 'command_execution_failure' };
+  }
+
+  if (/ENOENT|no such file|不存在|not found/i.test(content)) {
+    return { errorCategory: 'file_or_dir_not_found' };
+  }
+  if (/EACCES|permission denied|拒绝访问/i.test(content)) {
+    return { errorCategory: 'permission_denied' };
+  }
+  if (/EEXIST|already exists|已存在/i.test(content)) {
+    return { errorCategory: 'target_already_exists' };
+  }
+  if (/parse error|syntax error|语法错误/i.test(content)) {
+    return { errorCategory: 'content_syntax_error' };
+  }
+  return { errorCategory: 'tool_execution_exception' };
+}
+
 /**
  * Agent 主循环：流式生成 → 执行工具 → 结果回传，直至模型不再调用工具。
  * 单一轮次入口，由上层（engine 的会话服务）驱动。
@@ -266,13 +304,14 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
         }
 
         // 决策点 2：工具执行错误恢复旁路（TODOS #40 recovery）
-        // 严格物理隔离工具原始输出内容，绝不在 state 摘要或 metadata 中留存可能包含环境变量或未脱敏文本的内容
+        // 提炼纯净的结构化错误事实分类，为模型自愈提供区分度，同时物理隔离原始日志防止泄密
         if (execution.isError && policy) {
+          const errFact = extractStructuredErrorFact(call.name, execution.content);
           const observation = startDecisionObservation(policy, {
               taskFamily: 'recovery',
               instruction: 'Decide the best recovery strategy after tool execution failure.',
               state: {
-                summary: `Tool '${call.name}' execution failed with non-zero status or error`,
+                summary: `Tool '${call.name}' failed: ${errFact.errorCategory}`,
                 history: [call.name],
               },
               candidates: [
@@ -284,6 +323,8 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
               ],
               metadata: {
                 toolName: call.name,
+                errorCategory: errFact.errorCategory,
+                exitCode: errFact.exitCode,
               },
             });
           if (observation) pendingRecoveries.push({ observation, name: call.name, input: call.input });

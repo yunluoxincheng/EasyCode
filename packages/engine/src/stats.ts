@@ -31,7 +31,7 @@ export interface AutoLabelResult {
  * 有证据的自动标注规则引擎：
  * 绝不能直接拿 Reflex 预测、Agent 动作、推理档位配置或审批模式直接当作 target！
  * 必须结合任务族语义、可观测动作事实、后续执行结果以及整次回合状态多重证据进行判定。
- * 无法形成可验证因果证据的，返回 null（严格排除，不导出伪标签）。
+ * 无法形成可验证因果证据的，返回 null（严格排除不予标注导出）。
  */
 export function deriveGroundTruthTarget(r: DecisionRecord): AutoLabelResult | null {
   if (!r.turnId) return null;
@@ -164,7 +164,7 @@ export function deriveGroundTruthTarget(r: DecisionRecord): AutoLabelResult | nu
 
   // 5. 任务族：safety（敏感操作安全风控）
   // 排除条件：在没有代码 AST 沙箱安全证明的情况下，审批模式（ask/yolo）不能作为安全真值。
-  // 为杜绝伪标签，未经验证的 safety 记录严格排除！
+  // 未经沙箱独立验证的 safety 记录严格排除不予标注！
   if (r.taskFamily === 'safety') {
     return null;
   }
@@ -192,22 +192,34 @@ const METADATA_WHITELIST_KEYS = new Set([
   'contextWindow',
   'turnSteps',
   'completedActionCount',
+  'errorCategory',
+  'exitCode',
+  'operationCategory',
+  'targetExt',
 ]);
 
 /** 在写入文件前的统一白名单与深度脱敏关口 */
 export function sanitizeEventForLogging(event: DecisionLogEvent): DecisionLogEvent {
   const deepSanitizeRecord = (r: DecisionRecord): DecisionRecord => {
     let cleanMetadata: Record<string, unknown> | undefined;
-    if (r.metadata && typeof r.metadata === 'object') {
+    if (r.metadata && typeof r.metadata === 'object' && r.metadata !== null) {
       cleanMetadata = {};
       for (const [k, v] of Object.entries(r.metadata)) {
         if (METADATA_WHITELIST_KEYS.has(k)) {
-          cleanMetadata[k] = typeof v === 'string' ? deepSanitizeText(v).slice(0, 100) : v;
+          // 严格基础标量类型校验：仅允许有限数字、布尔值及深度脱敏的纯文本，严禁任意对象/数组落盘
+          if (typeof v === 'number' && Number.isFinite(v)) {
+            cleanMetadata[k] = v;
+          } else if (typeof v === 'boolean') {
+            cleanMetadata[k] = v;
+          } else if (typeof v === 'string') {
+            cleanMetadata[k] = deepSanitizeText(v).slice(0, 100);
+          }
         }
       }
     }
     return {
       ...r,
+      sessionTitle: deepSanitizeText(r.sessionTitle || '').slice(0, 100),
       instruction: deepSanitizeText(r.instruction).slice(0, 300),
       state: {
         summary: deepSanitizeText(r.state?.summary || '').slice(0, 400),
@@ -578,8 +590,8 @@ export class DecisionStatsManager {
   }
 
   /**
-   * 导出完全兼容 Reflex V1 训练集规范的合格微调数据集。
-   * 基于严格的客观证据链自动标注与筛选，无法可靠判定的记录不导出，绝不生成伪标签。
+   * 导出完全兼容 Reflex V1 训练集规范的弱监督微调数据集（Silver 标签）。
+   * 基于客观证据链自动标注与筛选，已排除明确失败及不可靠记录，标签质量仍需离线基准评估。
    */
   async exportDataset(filter?: {
     workspaceRoot?: string;
