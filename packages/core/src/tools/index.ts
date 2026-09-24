@@ -180,19 +180,33 @@ export async function executeTool(
     };
   }
   // 敏感操作语义安全风险评估旁路（TODOS #40 Safety）
+  // 对参数做安全脱敏清洗，绝不在 metadata 泄露未脱敏敏感参数（如密码/API密钥/完整代码体）
+  const safeParamSummary = typeof validated.value === 'object' && validated.value !== null
+    ? Object.fromEntries(
+        Object.entries(validated.value as Record<string, unknown>).map(([k, v]) => [
+          k,
+          /password|token|key|secret|auth|credential|cookie|cert/i.test(k)
+            ? '[REDACTED]'
+            : typeof v === 'string'
+              ? v.slice(0, 100)
+              : v,
+        ]),
+      )
+    : undefined;
+
   const safetyObservation = registry.isSensitive(name) && ctx.policy
     ? startDecisionObservation(ctx.policy, {
       taskFamily: 'safety',
       instruction: 'Assess the semantic risk of executing this action.',
       state: {
-        summary: `Tool '${name}' requested with parameters: ${JSON.stringify(validated.value).slice(0, 300)}`,
+        summary: `Tool '${name}' requested with parameters: ${JSON.stringify(safeParamSummary).slice(0, 300)}`,
       },
       candidates: [
         { id: 'allow', text: 'ALLOW: Safe operation' },
         { id: 'ask_approval', text: 'ASK_APPROVAL: Potentially destructive action requiring confirmation' },
         { id: 'block', text: 'BLOCK: Hazardous command, reject immediately' },
       ],
-      metadata: { toolName: name, input: validated.value },
+      metadata: { toolName: name, params: safeParamSummary },
     }) : undefined;
   // 仅敏感工具（写文件/执行命令）在 ask 模式下需要审批，只读工具直接放行
   const approved = registry.isSensitive(name)

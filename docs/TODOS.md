@@ -269,13 +269,16 @@ EasyCode 作为开放、可扩展的桌面 Coding Agent，目前仅提供内置�
        - 候选概率条形图：动态横向柱状图渲染候选分布（Softmax 分布）；
        - 上下文抽屉：点击展开查看完整 `instruction`、`state.summary`、`state.goal` 与上下文历史。
 
-7. **单一、无需人工审核的合格微调集导出（证据驱动自动标注）**：
+7. **单一、无需人工审核的合格微调集导出（证据驱动弱监督标注）**：
    - 基于 UI 现有成熟的 `downloadFile` 工具，提供单一、纯净的微调集导出能力：
      - 单会话导出：`Reflex-Finetune-Session-[SessionTitle]-[Timestamp].jsonl`
      - 单项目导出：`Reflex-Finetune-Project-[ProjectName]-[Timestamp].jsonl`
      - 全局一键导出：`Reflex-Finetune-AllProjects-[Timestamp].jsonl`；
-   - **证据驱动自动标注引擎（无需用户逐条审核）**：
+   - **本地审计隐私与深度脱敏**：
+     - 本地落盘前，对请求文本、状态描述、历史命令及 `metadata` 中的敏感字段（`password`, `token`, `key`, `secret`, `credential`）进行递归打码清洗，绝不在本地磁盘留存未脱敏明文密钥；
+   - **证据驱动弱监督自动筛选（Silver 标签，免用户逐条审核）**：
      - 内部完整保留请求、端侧预测、Agent 实际动作与最终执行结果（Outcome），以此作为自动筛选合格标签的因果证据；
+     - **客观属性定性**：导出品明确标记为 `source.type: 'online_shadow_weak_supervision'` 与 `quality: 'silver'`。这属于基于真实运行事实的弱监督信号，供离线复盘与蒸馏；进入正式模型训练前，建议先在 Reflex 评测基准（3188 盲测与 310 反事实用例）上验证增益；
      - **严格排除与零伪标签**：绝不直接把 Reflex 预测、Agent 动作、用户推理档位配置或审批模式当做 target。每类任务族均具备严密的证据与排除规则：
        - `tool_routing`：仅当工具执行事实证明成功（`outcome.status === 'success'`，命令退出码 0）时，该工具族方可作为 target 正例；工具失败或被拒绝时严格排除；
        - `recovery`：仅当自愈动作事实证明成功推进任务时入选，继续报错者严格排除；

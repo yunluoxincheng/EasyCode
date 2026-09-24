@@ -24,6 +24,26 @@ function redact(text: string, maxLength: number): string {
     .slice(0, maxLength);
 }
 
+/** 深度递归脱敏对象，过滤密码、Token、私钥等任何敏感键值，杜绝落盘泄露 */
+function redactObject(val: unknown, depth = 0): unknown {
+  if (depth > 4) return '[TRUNCATED]';
+  if (typeof val === 'string') return redact(val, 300);
+  if (typeof val === 'number' || typeof val === 'boolean' || val === null || val === undefined) return val;
+  if (Array.isArray(val)) return val.slice(0, 10).map((item) => redactObject(item, depth + 1));
+  if (typeof val === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(val as Record<string, unknown>)) {
+      if (/password|token|key|secret|auth|credential|cookie|cert/i.test(k)) {
+        out[k] = '[REDACTED]';
+      } else {
+        out[k] = redactObject(v, depth + 1);
+      }
+    }
+    return out;
+  }
+  return String(val).slice(0, 100);
+}
+
 /**
  * 影子模式决策策略 (ShadowDecisionPolicy)
  * 职责：
@@ -68,7 +88,7 @@ export class ShadowDecisionPolicy implements DecisionPolicy {
       state: safeReq.state,
       candidates: safeReq.candidates,
       predictionStatus: 'pending',
-      metadata: req.metadata,
+      metadata: req.metadata ? (redactObject(req.metadata) as Record<string, unknown>) : undefined,
     };
     void this.statsManager.appendEvent(this.ctx.sessionId, { kind: 'requested', record }).catch(() => {});
 

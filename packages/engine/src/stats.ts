@@ -525,7 +525,8 @@ export class DecisionStatsManager {
         candidates: r.candidates.map((c) => ({ id: c.id, text: c.text })),
         target: autoLabel.target,
         source: {
-          type: 'online_shadow_auto_label',
+          type: 'online_shadow_weak_supervision',
+          quality: 'silver',
           label_basis: autoLabel.labelBasis,
         },
         split_group: `online:${r.turnId}`,

@@ -310,6 +310,11 @@ test('Shadow 预测与实际动作按 ID 关联，推理失败不伪造一致率
       history: ['h'.repeat(120)],
     },
     candidates: [{ id: 'fast', text: 'Fast' }, { id: 'high', text: 'High' }],
+    metadata: {
+      password: 'mypassword123',
+      apiKey: 'sk-1234567890abcdef',
+      rawText: 'Authorization: Bearer secret-auth-token-xyz',
+    },
   });
   observation.actual({ selectedId: 'high', description: 'Provider effort: high' });
   observation.outcome({ status: 'unknown', evidence: 'No quality assessment' });
@@ -324,6 +329,13 @@ test('Shadow 预测与实际动作按 ID 关联，推理失败不伪造一致率
   assert.doesNotMatch(records[0].state.summary, /sk-abcdefghijklmnopqrst/);
   assert.doesNotMatch(records[0].state.goal ?? '', /secret-token-value/);
   assert.equal(records[0].state.history?.[0].length, 100);
+
+  // 验证 metadata 敏感凭证彻底脱敏，绝不落盘明文私密信息
+  assert.equal(records[0].metadata?.password, '[REDACTED]');
+  assert.equal(records[0].metadata?.apiKey, '[REDACTED]');
+  assert.match(String(records[0].metadata?.rawText), /\[REDACTED\]/);
+  assert.doesNotMatch(String(records[0].metadata?.rawText), /secret-auth-token-xyz/);
+
   assert.equal(await manager.exportDataset(), '', '真实行为仍需独立审核才可训练');
 
   const failed = new ShadowDecisionPolicy({

@@ -281,7 +281,10 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
                 { id: 'ask_user', text: 'Ask user for clarification or instructions' },
                 { id: 'stop', text: 'Stop execution and report error' },
               ],
-              metadata: { toolName: call.name, content: execution.content },
+              metadata: {
+                toolName: call.name,
+                contentSummary: execution.content.slice(0, 150).replace(/(?:Bearer\s+|sk-|ghp_)\S+/gi, '[REDACTED]'),
+              },
             });
           if (observation) pendingRecoveries.push({ observation, name: call.name, input: call.input });
         }
