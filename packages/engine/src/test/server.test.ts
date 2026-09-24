@@ -370,12 +370,74 @@ test('AgentServer: 影子模式开关开启时执行 policy 并记录，开关�
   assert.ok(statsOn.avgLatencyMs > 0, '包含真实推理耗时');
   assert.ok(statsOn.taskFamilyDistribution.tool_routing! > 0, '必须包含无泄漏的前置工具路由预测');
 
-  // 验证导出的观测轨迹无 target 字段
-  const traj = await server.exportDecisionDataset({ sessionId: session.id, kind: 'trajectory' });
-  assert.ok(traj.length > 0);
-  for (const line of traj.trim().split('\n')) {
-    const parsed = JSON.parse(line);
-    assert.equal('target' in parsed, false, '观测轨迹模式下严禁输出 target 训练标签');
-    assert.equal(parsed.record_type, 'observation_trajectory');
+  // 验证导出的微调集：只导出证据充足的合格样本，每一行都有合法 target
+  const finetuneJsonl = await server.exportDecisionDataset({ sessionId: session.id });
+  if (finetuneJsonl.trim()) {
+    for (const line of finetuneJsonl.trim().split('\n')) {
+      const parsed = JSON.parse(line);
+      assert.equal(parsed.schema_version, 1);
+      assert.ok(parsed.target, '导出的微调样本必须具备 target');
+      assert.equal(typeof parsed.target.defer, 'boolean');
+      assert.ok(Array.isArray(parsed.target.selected));
+      assert.ok(parsed.split_group.startsWith('online:'));
+    }
   }
+});
+
+test('多回合任务与 Action Trace 边界：上一任务的操作绝不泄漏进新任务的前置路由中', async () => {
+  const host = new MemoryHost({
+    '/ws/file.txt': 'initial text',
+  });
+  const server = new AgentServer(host);
+
+  const capturedRoutingStates: any[] = [];
+  const mockPolicy = {
+    async decide(req: any) {
+      if (req.taskFamily === 'tool_routing') {
+        capturedRoutingStates.push(JSON.parse(JSON.stringify(req.state)));
+      }
+      return {
+        selectedId: req.candidates[0].id,
+        selectedText: req.candidates[0].text,
+        confidence: 0.9,
+        defer: false,
+        scores: Object.fromEntries(req.candidates.map((c: { id: string }, i: number) => [
+          c.id, i === 0 ? 0.9 : 0.1 / (req.candidates.length - 1),
+        ])),
+        latencyMs: 10,
+      };
+    },
+  };
+  server.setReflexPolicy(mockPolicy);
+
+  await server.updateSettings({
+    providers: {
+      mock: {
+        kind: 'mock',
+        baseURL: '',
+        name: 'Mock',
+        enabled: true,
+        models: [{ name: 'mock-model', enabled: true }],
+      },
+    },
+    defaultProvider: 'mock',
+    reflexShadowMode: true,
+  });
+
+  const session = await server.createSession({ workspaceRoot: '/ws', providerId: 'mock', title: '多回合会话' });
+  await server.setApprovalMode(session.id, 'yolo');
+
+  // 第 1 个回合任务
+  await server.sendMessage(session.id, '任务一：请列出当前目录');
+  const task1RoutingCount = capturedRoutingStates.length;
+  assert.ok(task1RoutingCount > 0);
+
+  // 第 2 个回合任务：起始第一步的 Action Trace 必须为空（以当前用户回合为边界）
+  capturedRoutingStates.length = 0;
+  await server.sendMessage(session.id, '任务二：请总结当前项目');
+  assert.ok(capturedRoutingStates.length > 0);
+  const task2FirstStepState = capturedRoutingStates[0];
+  // 必须只反映任务二的用户意图，历史动作绝不混入任务一的工具调用
+  assert.match(task2FirstStepState.summary, /任务二/);
+  assert.deepEqual(task2FirstStepState.history, [], '新任务起始步的 Action Trace 必须为空，绝不混入上一任务');
 });

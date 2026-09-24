@@ -68,6 +68,7 @@ export class ShadowDecisionPolicy implements DecisionPolicy {
       state: safeReq.state,
       candidates: safeReq.candidates,
       predictionStatus: 'pending',
+      metadata: req.metadata,
     };
     void this.statsManager.appendEvent(this.ctx.sessionId, { kind: 'requested', record }).catch(() => {});
 

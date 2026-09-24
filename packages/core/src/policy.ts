@@ -85,6 +85,7 @@ export interface DecisionRecord {
   agreement?: boolean;
   outcome?: DecisionOutcome;
   review?: DecisionReview;
+  metadata?: Record<string, unknown>;
 }
 
 /** 决策统计摘要指标 */
@@ -95,6 +96,8 @@ export interface DecisionStats {
   agreementRate: number;
   validPredictions?: number;
   comparableDecisions?: number;
+  /** 基于无可辩驳证据链自动筛选出的合格训练样本数 */
+  qualifiedSamples?: number;
   reviewedSamples?: number;
   unresolvedDecisions?: number;
   writeFailures?: number;
@@ -114,6 +117,7 @@ export interface SessionDecisionSummary {
   totalDecisions: number;
   agreementRate: number;
   comparableDecisions?: number;
+  qualifiedSamples?: number;
   reviewedSamples?: number;
   lastTimestamp: string;
   records: DecisionRecord[];

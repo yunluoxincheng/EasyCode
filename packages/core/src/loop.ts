@@ -50,10 +50,18 @@ function stamp(
   };
 }
 
-/** 从历史消息中提取已完成的实际操作轨迹（Action Trace），为工具路由提供随 Step 演进的上下文且绝不发生未来答案泄漏 */
+/** 从历史消息中提取已完成的实际操作轨迹（Action Trace），以当前用户回合为边界，绝不混入上一任务且无未来答案泄漏 */
 function extractRecentActionTrace(messages: ChatMessage[], maxItems = 4): string[] {
+  let lastUserIdx = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === 'user') {
+      lastUserIdx = i;
+      break;
+    }
+  }
+  const turnMessages = lastUserIdx >= 0 ? messages.slice(lastUserIdx + 1) : messages;
   const trace: string[] = [];
-  for (const m of messages) {
+  for (const m of turnMessages) {
     if (m.role === 'assistant') {
       for (const b of m.blocks) {
         if (b.type === 'tool_call') {
@@ -64,7 +72,8 @@ function extractRecentActionTrace(messages: ChatMessage[], maxItems = 4): string
         }
       }
     } else if (m.role === 'tool_result') {
-      trace.push(`result: ${m.toolName} (${m.isError ? 'error' : 'ok'})`);
+      const isFailed = m.isError || (m.toolName === 'run_command' && /^退出码: (?!0(?:\n|$))/.test(m.content));
+      trace.push(`result: ${m.toolName} (${isFailed ? 'error' : 'ok'})`);
     }
   }
   return trace.slice(-maxItems);
@@ -95,35 +104,35 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
   } = options;
 
   let pendingRecoveries: Array<{ observation: DecisionObservation; name: string; input: unknown }> = [];
+  let reasoningObs: DecisionObservation | undefined;
+  let lastCompletedStep = 0;
   try {
     const readFiles = new Set<string>();
     for (let step = 0; step < maxSteps; step++) {
+      lastCompletedStep = step;
       if (signal.aborted) return finish('aborted');
 
       // 决策点 1：推理深度自适应旁路（TODOS #40 reasoning_effort）
       if (step === 0 && policy) {
         const lastUser = [...messages].reverse().find((m) => m.role === 'user');
-        const observation = startDecisionObservation(policy, {
-            taskFamily: 'reasoning_effort',
-            instruction: 'Choose the appropriate reasoning effort for the current task.',
-            state: {
-              summary:
-                typeof lastUser?.content === 'string'
-                  ? lastUser.content.slice(0, 300)
-                  : 'Task started',
-            },
-            candidates: [
-              { id: 'fast', text: 'FAST: Low computation for simple edits and queries' },
-              { id: 'medium', text: 'MEDIUM: Standard reasoning for typical bugs and features' },
-              { id: 'high', text: 'HIGH: Extended reasoning for complex architecture and deep logic' },
-            ],
-          });
-        const selectedId = reasoningEffort === 'low' || reasoningEffort === 'fast'
-          ? 'fast' : reasoningEffort === 'medium' ? 'medium'
-          : reasoningEffort === 'high' ? 'high' : undefined;
-        observation?.actual({
-          selectedId,
-          description: selectedId ? `Configured request effort: ${reasoningEffort}` : 'Provider default or unsupported effort',
+        reasoningObs = startDecisionObservation(policy, {
+          taskFamily: 'reasoning_effort',
+          instruction: 'Choose the appropriate reasoning effort for the current task.',
+          state: {
+            summary:
+              typeof lastUser?.content === 'string'
+                ? lastUser.content.slice(0, 300)
+                : 'Task started',
+          },
+          candidates: [
+            { id: 'fast', text: 'FAST: Low computation for simple edits and queries' },
+            { id: 'medium', text: 'MEDIUM: Standard reasoning for typical bugs and features' },
+            { id: 'high', text: 'HIGH: Extended reasoning for complex architecture and deep logic' },
+          ],
+        });
+        // 绝不直接把用户配置当做 target！实际动作仅记录事实配置供审计参考，真实标签依据整轮复杂度证据判定
+        reasoningObs?.actual({
+          description: `User configured effort: ${reasoningEffort || 'default'}`,
         });
       }
 
@@ -203,11 +212,16 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
         pendingRecoveries = [];
       }
 
+      let toolRoutingFollowup: DecisionObservation | undefined;
       if (toolRoutingObs) {
         if (calls.length === 0) {
           toolRoutingObs.actual({
             selectedId: 'stop_respond',
             description: 'Agent responded directly without calling any tools',
+          });
+          toolRoutingObs.outcome({
+            status: 'success',
+            evidence: 'Turn completed without tools',
           });
         } else {
           const actualToolName = calls[0]?.name;
@@ -222,6 +236,7 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
             selectedId: mappedRoutingId,
             description: `Agent chose tool: ${actualToolName}`,
           });
+          toolRoutingFollowup = toolRoutingObs;
         }
       }
 
@@ -242,8 +257,12 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
           workspaceLock,
           policy,
         });
+        const toolOutcome = getToolExecutionOutcome(call.name, execution);
+        if (toolRoutingFollowup && call === calls[0]) {
+          toolRoutingFollowup.outcome(toolOutcome);
+        }
         if (recoveryFollowup && call === calls[0]) {
-          recoveryFollowup.outcome(getToolExecutionOutcome(call.name, execution));
+          recoveryFollowup.outcome(toolOutcome);
         }
 
         // 决策点 2：工具执行错误恢复旁路（TODOS #40 recovery）
@@ -351,6 +370,12 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
   }
 
   function finish(reason: LoopResult['reason'], errorMessage?: string): LoopResult {
+    if (reasoningObs) {
+      reasoningObs.outcome({
+        status: reason === 'completed' ? 'success' : 'failure',
+        evidence: `turnSteps:${lastCompletedStep + 1};reason:${reason}`,
+      });
+    }
     for (const pending of pendingRecoveries) {
       pending.observation.actual({ description: `No follow-up action: ${reason}` });
       pending.observation.outcome({ status: 'unknown', evidence: 'Agent turn ended before recovery' });

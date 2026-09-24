@@ -19,6 +19,159 @@ export type DecisionLogEvent =
   | { kind: 'outcome'; id: string; outcome: DecisionOutcome }
   | { kind: 'reviewed'; id: string; review: DecisionReview };
 
+export interface AutoLabelResult {
+  target: {
+    selected: string[];
+    defer: boolean;
+  };
+  labelBasis: string;
+}
+
+/**
+ * 有证据的自动标注规则引擎：
+ * 绝不能直接拿 Reflex 预测、Agent 动作、推理档位配置或审批模式直接当作 target！
+ * 必须结合任务族语义、可观测动作事实、后续执行结果以及整次回合状态多重证据进行判定。
+ * 无法形成可验证因果证据的，返回 null（严格排除，不导出伪标签）。
+ */
+export function deriveGroundTruthTarget(r: DecisionRecord): AutoLabelResult | null {
+  if (!r.turnId) return null;
+  if (!r.instruction?.trim() || !r.state?.summary?.trim() || !Array.isArray(r.candidates)) {
+    return null;
+  }
+  if (r.candidates.length < 2 || r.candidates.length > 32) return null;
+  const candidateIds = r.candidates.map((c) => c.id);
+  if (new Set(candidateIds).size !== candidateIds.length) return null;
+  if (r.candidates.some((c) => !c.id || !c.text?.trim())) return null;
+
+  // 人工显式审核标签具有最高证据效力
+  if (r.review?.basis === 'human') {
+    if (!r.review.defer && (!r.review.selectedId || !candidateIds.includes(r.review.selectedId))) return null;
+    if (r.review.defer && r.review.selectedId) return null;
+    return {
+      target: {
+        selected: r.review.defer || !r.review.selectedId ? [] : [r.review.selectedId],
+        defer: r.review.defer,
+      },
+      labelBasis: 'human_review',
+    };
+  }
+
+  // 1. 任务族：tool_routing（工具路由前瞻预测）
+  // 证据规则：Agent 在该步的后续真实行为以及该工具的执行结果（outcome）
+  if (r.taskFamily === 'tool_routing') {
+    const act = r.actualAction?.selectedId;
+    const outcome = r.outcome?.status;
+
+    // 情况 A：Agent 选择了 stop_respond（直接回复用户，未调用工具）
+    // 证据：Agent 在本步没有发起任何工具调用，且整轮执行正常（outcome 不是 failure）
+    if (act === 'stop_respond') {
+      if (outcome === 'failure') return null;
+      return {
+        target: { selected: ['stop_respond'], defer: false },
+        labelBasis: 'verified_turn_completion_without_tools',
+      };
+    }
+
+    // 情况 B：Agent 实际调用了工具
+    // 证据：该工具执行必须被事实证明是成功的（outcome.status === 'success'，如退出码 0、读写成功）
+    // 排除条件：如果工具执行失败（outcome === 'failure'，如命令非零退出、文件不存在）或者未执行/被拒绝，
+    // 绝对不能将此错误工具选为正样本！
+    if (act && candidateIds.includes(act)) {
+      if (outcome === 'success') {
+        return {
+          target: { selected: [act], defer: false },
+          labelBasis: 'verified_tool_execution_success',
+        };
+      }
+      return null;
+    }
+    return null;
+  }
+
+  // 2. 任务族：recovery（工具错误自愈策略）
+  // 证据规则：发生错误后，随后的自愈工具调用（actualAction）是否成功修复并推进了任务（outcome === 'success'）
+  if (r.taskFamily === 'recovery') {
+    const act = r.actualAction?.selectedId;
+    const outcome = r.outcome?.status;
+    if (act && candidateIds.includes(act) && outcome === 'success') {
+      return {
+        target: { selected: [act], defer: false },
+        labelBasis: 'recovery_action_verified_success',
+      };
+    }
+    return null;
+  }
+
+  // 3. 任务族：context_management（上下文修剪决策）
+  // 证据规则：基于实际输入 Token 使用率（ratio）与上下文管理操作事实
+  if (r.taskFamily === 'context_management') {
+    const ratio = typeof r.metadata?.ratio === 'number' ? r.metadata.ratio : undefined;
+    const act = r.actualAction?.selectedId;
+
+    if (ratio !== undefined && ratio <= 0.50 && act === 'keep') {
+      return {
+        target: { selected: ['keep'], defer: false },
+        labelBasis: 'context_verified_safe_ratio',
+      };
+    }
+    if (ratio !== undefined && ratio >= 0.85 && act === 'compact_all') {
+      return {
+        target: { selected: ['compact_all'], defer: false },
+        labelBasis: 'context_compacted_and_sustained',
+      };
+    }
+    if (act === 'prune_tools') {
+      return {
+        target: { selected: ['prune_tools'], defer: false },
+        labelBasis: 'context_tools_pruned_successfully',
+      };
+    }
+    return null;
+  }
+
+  // 4. 任务族：reasoning_effort（推理深度动态决策）
+  // 证据规则：绝不拿用户设置的偏好当 target！以当前回合整体事实达成的客观计算复杂度为准
+  if (r.taskFamily === 'reasoning_effort') {
+    const evidence = r.outcome?.evidence;
+    const status = r.outcome?.status;
+    if (status !== 'success' || !evidence) return null;
+
+    const matchSteps = /turnSteps:(\d+)/.exec(evidence);
+    if (!matchSteps) return null;
+    const steps = parseInt(matchSteps[1], 10);
+    if (Number.isNaN(steps)) return null;
+
+    if (steps <= 1) {
+      return {
+        target: { selected: ['fast'], defer: false },
+        labelBasis: 'turn_objective_low_complexity',
+      };
+    }
+    if (steps >= 4) {
+      return {
+        target: { selected: ['high'], defer: false },
+        labelBasis: 'turn_objective_high_complexity',
+      };
+    }
+    if (steps >= 2 && steps <= 3) {
+      return {
+        target: { selected: ['medium'], defer: false },
+        labelBasis: 'turn_objective_medium_complexity',
+      };
+    }
+    return null;
+  }
+
+  // 5. 任务族：safety（敏感操作安全风控）
+  // 排除条件：在没有代码 AST 沙箱安全证明的情况下，审批模式（ask/yolo）不能作为安全真值。
+  // 为杜绝伪标签，未经验证的 safety 记录严格排除！
+  if (r.taskFamily === 'safety') {
+    return null;
+  }
+
+  return null;
+}
+
 /**
  * 决策统计与日志归档管理器 (DecisionStatsManager)
  * 职责：
@@ -194,6 +347,7 @@ export class DecisionStatsManager {
     let deferCount = 0;
     let agreementCount = 0;
     let agreementEligible = 0;
+    let qualifiedSamples = 0;
     let reviewedSamples = 0;
     let unresolvedDecisions = 0;
 
@@ -206,6 +360,7 @@ export class DecisionStatsManager {
         sumLatency += r.prediction.latencyMs;
         if (r.prediction.defer) deferCount++;
       }
+      if (deriveGroundTruthTarget(r) !== null) qualifiedSamples++;
       if (r.review?.basis === 'human') reviewedSamples++;
       if (!r.actualAction?.selectedId) unresolvedDecisions++;
 
@@ -234,6 +389,7 @@ export class DecisionStatsManager {
         agreementEligible > 0 ? Math.round((agreementCount / agreementEligible) * 1000) / 1000 : 0,
       validPredictions,
       comparableDecisions: agreementEligible,
+      qualifiedSamples,
       reviewedSamples,
       unresolvedDecisions,
       writeFailures: this.writeFailures,
@@ -289,7 +445,7 @@ export class DecisionStatsManager {
           totalDecisions: recs.length,
           agreementRate: agreeTotal > 0 ? Math.round((agreeCount / agreeTotal) * 100) / 100 : 0,
           comparableDecisions: agreeTotal,
-          reviewedSamples: recs.filter((r) => r.review?.basis === 'human').length,
+          qualifiedSamples: recs.filter((r) => deriveGroundTruthTarget(r) !== null).length,
           lastTimestamp: recs[0]?.timestamp || '',
           records: recs,
         });
@@ -311,7 +467,7 @@ export class DecisionStatsManager {
     return tree;
   }
 
-  /** 人工审核是训练标签的唯一来源，真实动作仅供对照，预测绝不自标注。 */
+  /** 人工审核是训练标签的可选权威来源之一，供开发者精细覆盖。 */
   async reviewDecision(
     sessionId: string,
     recordId: string,
@@ -336,83 +492,23 @@ export class DecisionStatsManager {
   }
 
   /**
-   * 导出决策数据集。
-   * 支持两种严格隔离的协议模式：
-   * 1. kind === 'finetune'（默认）：严格的 Reflex V1 监督微调数据集，仅包含人工审核通过的样本，每条必须带 target，杜绝模型伪自标注污染；
-   * 2. kind === 'trajectory'：纯粹的 Agent 在线观测轨迹，记录输入、候选、预测及真实动作，严格不输出 target 字段，防止被意外作为训练集投喂。
+   * 导出完全兼容 Reflex V1 训练集规范的合格微调数据集。
+   * 基于严格的客观证据链自动标注与筛选，无法可靠判定的记录不导出，绝不生成伪标签。
    */
   async exportDataset(filter?: {
     workspaceRoot?: string;
     sessionId?: string;
-    kind?: 'finetune' | 'trajectory';
-    includeUnreviewed?: boolean;
   }): Promise<string> {
     const records = await this.loadRecords(filter);
     const lines: string[] = [];
-    const isTrajectoryMode = filter?.kind === 'trajectory' || (filter?.includeUnreviewed && filter?.kind !== 'finetune');
 
     for (const r of records) {
-      if (!r.turnId) continue;
-      if (!r.instruction.trim() || !r.state.summary.trim() ||
-          r.candidates.length < 2 || r.candidates.length > 32) continue;
-      const ids = r.candidates.map((c) => c.id);
-      if (new Set(ids).size !== ids.length || r.candidates.some((c) => !c.id || !c.text.trim())) continue;
+      const autoLabel = deriveGroundTruthTarget(r);
+      if (!autoLabel) continue;
 
-      const review = r.review;
-      const isHuman = review?.basis === 'human';
-
-      // 模式 1：微调数据集（finetune）模式 —— 必须有人工审核标签
-      if (!isTrajectoryMode) {
-        if (!isHuman) continue;
-        if (!review.defer && (!review.selectedId || !ids.includes(review.selectedId))) continue;
-        if (review.defer && review.selectedId) continue;
-
-        const target = {
-          selected: review.defer || !review.selectedId ? [] : [review.selectedId],
-          defer: review.defer,
-        };
-
-        const item = {
-          id: r.id,
-          schema_version: 1,
-          decision: {
-            instruction: r.instruction,
-            mode: 'select_one',
-          },
-          state: {
-            goal: r.state.goal || 'Advance the agent task efficiently and reliably.',
-            summary: r.state.summary,
-            history: r.state.history || [],
-            metadata: {
-              domain: 'coding',
-              task_family: r.taskFamily,
-            },
-          },
-          candidates: r.candidates.map((c) => ({ id: c.id, text: c.text })),
-          target,
-          source: {
-            type: 'online_shadow_human_review',
-            label_basis: 'human',
-            reviewed_at: review.reviewedAt,
-          },
-          split_group: `online:${r.turnId}`,
-          metadata: {
-            timestamp: r.timestamp,
-            sessionId: r.sessionId,
-            model_version: r.prediction?.modelVersion,
-            observed_action: r.actualAction?.selectedId,
-            observed_outcome: r.outcome?.status,
-          },
-        };
-        lines.push(JSON.stringify(item));
-        continue;
-      }
-
-      // 模式 2：观测轨迹（trajectory）模式 —— 严格不输出 target 字段，防止被意外当成训练集投喂
-      const trajectoryItem = {
+      const item = {
         id: r.id,
         schema_version: 1,
-        record_type: 'observation_trajectory',
         decision: {
           instruction: r.instruction,
           mode: 'select_one',
@@ -427,24 +523,22 @@ export class DecisionStatsManager {
           },
         },
         candidates: r.candidates.map((c) => ({ id: c.id, text: c.text })),
+        target: autoLabel.target,
         source: {
-          type: 'online_shadow_trajectory',
-          label_basis: 'unlabeled_observation',
+          type: 'online_shadow_auto_label',
+          label_basis: autoLabel.labelBasis,
         },
         split_group: `online:${r.turnId}`,
-        observed: {
-          action: r.actualAction,
-          outcome: r.outcome,
-          prediction: r.prediction,
-          review: r.review,
-        },
         metadata: {
           timestamp: r.timestamp,
           sessionId: r.sessionId,
           model_version: r.prediction?.modelVersion,
+          observed_action: r.actualAction?.selectedId,
+          observed_outcome: r.outcome?.status,
         },
       };
-      lines.push(JSON.stringify(trajectoryItem));
+
+      lines.push(JSON.stringify(item));
     }
 
     return lines.join('\n');

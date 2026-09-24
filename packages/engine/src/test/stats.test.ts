@@ -97,7 +97,9 @@ test('DecisionStatsManager 仅比较真实动作，并仅导出人工审核标�
   assert.equal(globalStats.agreementRate, 1.0);
   assert.equal(globalStats.comparableDecisions, 1, '没有实际动作的记录不参与一致率');
   assert.equal(globalStats.unresolvedDecisions, 2);
-  assert.equal(await manager.exportDataset(), '', '未审核记录不允许自标注导出');
+  // safety 没有可验证因果证据，r1/r2 缺少执行步数证据，此时自动筛选结果应为 0
+  assert.equal(globalStats.qualifiedSamples, 0);
+  assert.equal(await manager.exportDataset(), '', '无无可辩驳证据的记录绝不生成伪标签凑数');
   assert.equal(globalStats.taskFamilyDistribution.reasoning_effort, 1);
   assert.equal(globalStats.taskFamilyDistribution.recovery, 1);
   assert.equal(globalStats.taskFamilyDistribution.safety, 1);
@@ -119,7 +121,7 @@ test('DecisionStatsManager 仅比较真实动作，并仅导出人工审核标�
   assert.equal(alphaNode.sessions[0].sessionId, 'session_1');
   assert.equal(alphaNode.sessions[0].records.length, 2);
 
-  // 4. 独立人工审核后导出；模型 defer 与人工目标互不混淆。
+  // 4. 人工审核可覆盖并生成合法样本；模型 defer 与人工目标互不混淆。
   await manager.reviewDecision('session_1', 'dec_1', { selectedId: 'fast', defer: false });
   await manager.reviewDecision('session_1', 'dec_2', { defer: true });
   const jsonl = await manager.exportDataset({ sessionId: 'session_1' });
@@ -130,28 +132,136 @@ test('DecisionStatsManager 仅比较真实动作，并仅导出人工审核标�
   assert.equal(row1.target.selected[0], 'fast', 'fast 对应选中项');
   assert.equal(row1.target.defer, false);
   assert.equal(row1.split_group, 'online:turn_1');
-  assert.equal(row1.source.label_basis, 'human');
   assert.equal(row1.candidates[0].id, 'fast');
   assert.equal(row1.candidates.length, 2);
   const row2 = JSON.parse(lines[1]);
   assert.equal(row2.target.defer, true);
   assert.deepEqual(row2.target.selected, [], 'defer 训练目标不能包含选中候选项');
 
-  // 4.1 独立测试观测轨迹导出：必须严格不含 target 字段，防止污染 Reflex 训练器
-  const trajJsonl = await manager.exportDataset({ sessionId: 'session_1', kind: 'trajectory' });
-  const trajLines = trajJsonl.trim().split('\n');
-  assert.equal(trajLines.length, 2);
-  for (const line of trajLines) {
-    const tRow = JSON.parse(line);
-    assert.equal('target' in tRow, false, '观测轨迹模式下严禁输出 target 训练标签');
-    assert.equal(tRow.record_type, 'observation_trajectory');
-    assert.ok(tRow.observed, '必须包含实际观察对象');
-  }
-
   // 5. 清理
   await manager.deleteSessionRecords('session_1');
   const afterClean = await manager.getStats();
   assert.equal(afterClean.totalDecisions, 1, '只剩 session_2');
+});
+
+test('自动标注筛选规则：工具成功执行自动入选，非零退出码失败排除，直接回复正常完成入选', async () => {
+  const manager = new DecisionStatsManager(new MemoryHost());
+
+  // 样本 A: tool_routing，命令执行失败（退出码 1）
+  await manager.recordDecision({
+    id: 'dec_fail_cmd',
+    turnId: 'turn_fail',
+    timestamp: '2026-09-24T10:00:00.000Z',
+    workspaceRoot: '/workspace',
+    sessionId: 's_auto',
+    sessionTitle: '失败命令',
+    taskFamily: 'tool_routing',
+    instruction: 'Predict tool',
+    state: { summary: 'Running test command' },
+    candidates: [
+      { id: 'run_command', text: 'RUN' },
+      { id: 'stop_respond', text: 'STOP' },
+    ],
+    actualAction: { selectedId: 'run_command', description: 'Agent chose run_command' },
+    outcome: { status: 'failure', evidence: 'Command exit code: 1' },
+  });
+
+  // 样本 B: tool_routing，工具执行成功（退出码 0）
+  await manager.recordDecision({
+    id: 'dec_success_cmd',
+    turnId: 'turn_succ',
+    timestamp: '2026-09-24T10:01:00.000Z',
+    workspaceRoot: '/workspace',
+    sessionId: 's_auto',
+    sessionTitle: '成功命令',
+    taskFamily: 'tool_routing',
+    instruction: 'Predict tool',
+    state: { summary: 'Running build command' },
+    candidates: [
+      { id: 'run_command', text: 'RUN' },
+      { id: 'stop_respond', text: 'STOP' },
+    ],
+    actualAction: { selectedId: 'run_command', description: 'Agent chose run_command' },
+    outcome: { status: 'success', evidence: 'Command exit code: 0' },
+  });
+
+  // 样本 C: tool_routing，无需工具直接回复用户且正常完成
+  await manager.recordDecision({
+    id: 'dec_stop_succ',
+    turnId: 'turn_stop',
+    timestamp: '2026-09-24T10:02:00.000Z',
+    workspaceRoot: '/workspace',
+    sessionId: 's_auto',
+    sessionTitle: '直接回复',
+    taskFamily: 'tool_routing',
+    instruction: 'Predict tool',
+    state: { summary: 'User said thanks' },
+    candidates: [
+      { id: 'run_command', text: 'RUN' },
+      { id: 'stop_respond', text: 'STOP' },
+    ],
+    actualAction: { selectedId: 'stop_respond', description: 'Responded directly' },
+    outcome: { status: 'success', evidence: 'Turn completed without tools' },
+  });
+
+  // 样本 D: recovery，自愈动作成功执行
+  await manager.recordDecision({
+    id: 'dec_rec_succ',
+    turnId: 'turn_rec',
+    timestamp: '2026-09-24T10:03:00.000Z',
+    workspaceRoot: '/workspace',
+    sessionId: 's_auto',
+    sessionTitle: '自愈成功',
+    taskFamily: 'recovery',
+    instruction: 'Recover from error',
+    state: { summary: 'Tool failed with file not found' },
+    candidates: [
+      { id: 'search_dir', text: 'SEARCH' },
+      { id: 'stop', text: 'STOP' },
+    ],
+    actualAction: { selectedId: 'search_dir', description: 'Searched directory' },
+    outcome: { status: 'success', evidence: 'Tool executed successfully' },
+  });
+
+  // 样本 E: safety，缺乏沙箱证据，必须被排除
+  await manager.recordDecision({
+    id: 'dec_safety_unverified',
+    turnId: 'turn_safe',
+    timestamp: '2026-09-24T10:04:00.000Z',
+    workspaceRoot: '/workspace',
+    sessionId: 's_auto',
+    sessionTitle: '安全操作',
+    taskFamily: 'safety',
+    instruction: 'Check safety',
+    state: { summary: 'rm some file' },
+    candidates: [
+      { id: 'allow', text: 'ALLOW' },
+      { id: 'block', text: 'BLOCK' },
+    ],
+    actualAction: { description: 'YOLO mode allowed' },
+  });
+
+  const stats = await manager.getStats();
+  assert.equal(stats.totalDecisions, 5);
+  // 合格的应该只有 B(成功命令), C(直接回复), D(自愈成功) = 3 条
+  // A(命令失败) 和 E(safety未验证) 被严格排除
+  assert.equal(stats.qualifiedSamples, 3);
+
+  const exported = await manager.exportDataset({ sessionId: 's_auto' });
+  const lines = exported.trim().split('\n');
+  assert.equal(lines.length, 3, '只有 3 条证据充足的样本被导出');
+
+  for (const line of lines) {
+    const item = JSON.parse(line);
+    assert.ok(item.target, '导出的每一行必须带有合法 target');
+    assert.equal(typeof item.target.defer, 'boolean');
+    assert.ok(Array.isArray(item.target.selected));
+    if (!item.target.defer) {
+      assert.equal(item.target.selected.length, 1);
+      assert.ok(item.candidates.some((c: { id: string }) => c.id === item.target.selected[0]));
+    }
+    assert.ok(item.split_group.startsWith('online:'));
+  }
 });
 
 test('同一会话并发追加事件不会覆盖先前记录', async () => {

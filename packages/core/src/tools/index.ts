@@ -220,7 +220,14 @@ export async function executeTool(
       registry.isSensitive(name) && ctx.workspaceLock
         ? await ctx.workspaceLock.withLock(run, ctx.signal)
         : await run();
-    const execution = { content, approved: true, isError: false, durationMs: Date.now() - started };
+    // run_command 退出码非零（或收到 signal 中断）必须视为执行失败
+    const isCommandFailure = name === 'run_command' && /^退出码: (?!0(?:\n|$))/.test(content);
+    const execution: ToolExecution = {
+      content,
+      approved: true,
+      isError: isCommandFailure,
+      durationMs: Date.now() - started,
+    };
     safetyObservation?.outcome(getToolExecutionOutcome(name, execution));
     return execution;
   } catch (err) {

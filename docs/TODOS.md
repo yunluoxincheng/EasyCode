@@ -269,11 +269,21 @@ EasyCode 作为开放、可扩展的桌面 Coding Agent，目前仅提供内置�
        - 候选概率条形图：动态横向柱状图渲染候选分布（Softmax 分布）；
        - 上下文抽屉：点击展开查看完整 `instruction`、`state.summary`、`state.goal` 与上下文历史。
 
-7. **微调数据集导出（严格隔离：观测轨迹导出 vs 人工审核微调集）**：
-   - 基于 UI 现有成熟的 `downloadFile` 工具，提供清晰隔离的导出能力：
-     - **原始观测轨迹导出（随时可用）**：导出 Agent 运行过程中的全部决策观察记录（含实际动作与执行结果），**不包含监督训练 target 字段**（或标记为未标注观察），供离线复盘与分析，杜绝未经审核的动作被误当成监督真值投喂训练；
-     - **已审核微调集导出（闭环可用）**：在 Reflex 看板中经人工确认正确候选或标记 DEFER 的样本，导出为包含完整 `target`（`selected: [id]` 或 `defer: true`）与 `source.label_basis: 'human'` 的黄金训练样本；
-   - **格式对齐与防污染**：导出结构遵循 Reflex V1 JSONL 规范（`id`, `schema_version: 1`, `decision`, `state`, `candidates`, `source`, `split_group`），同一 Agent 回合共享 `split_group`，避免训练与评测跨集合泄漏；无 target 的原始轨迹即使丢入训练器也会被安全拒绝，杜绝模型自训练污染。
+7. **单一、无需人工审核的合格微调集导出（证据驱动自动标注）**：
+   - 基于 UI 现有成熟的 `downloadFile` 工具，提供单一、纯净的微调集导出能力：
+     - 单会话导出：`Reflex-Finetune-Session-[SessionTitle]-[Timestamp].jsonl`
+     - 单项目导出：`Reflex-Finetune-Project-[ProjectName]-[Timestamp].jsonl`
+     - 全局一键导出：`Reflex-Finetune-AllProjects-[Timestamp].jsonl`；
+   - **证据驱动自动标注引擎（无需用户逐条审核）**：
+     - 内部完整保留请求、端侧预测、Agent 实际动作与最终执行结果（Outcome），以此作为自动筛选合格标签的因果证据；
+     - **严格排除与零伪标签**：绝不直接把 Reflex 预测、Agent 动作、用户推理档位配置或审批模式当做 target。每类任务族均具备严密的证据与排除规则：
+       - `tool_routing`：仅当工具执行事实证明成功（`outcome.status === 'success'`，命令退出码 0）时，该工具族方可作为 target 正例；工具失败或被拒绝时严格排除；
+       - `recovery`：仅当自愈动作事实证明成功推进任务时入选，继续报错者严格排除；
+       - `context_management`：仅在安全水位（<=0.50）确认 `keep` 或达到阈值（>=0.85）确认 `compact_all` 时入选，模糊状态排除；
+       - `reasoning_effort`：依据整轮实际执行的客观复杂度（无错误前提下的总步数）判定，不采纳用户的静态配置；
+       - `safety`：审批模式不充当安全真值，缺乏静态沙箱证明时严格排除。
+     - 若当前没有合格样本，界面清晰显示 0 条并禁用导出，绝不凑数；
+   - **格式完全合规**：导出的每一行均带有合法 `target`（`selected` 必须位于 `candidates` 列表内，或 `defer: true` 对应空列表），同一 Agent 回合共享 `split_group`，100% 格式合规且直接通过 Reflex 数据校验器与 PyTorch 数据加载器。
 
 **涉及改动**：
 - `packages/core/src/policy.ts`：新增 `DecisionPolicy` / `DecisionRequest` / `DecisionResult` / `DecisionRecord` 接口与 `NoopPolicy`；

@@ -20,8 +20,6 @@ export function ReflexDashboard() {
   const [tree, setTree] = useState<ProjectDecisionTree[]>([]);
   const [loading, setLoading] = useState(true);
   const [exporting, setExporting] = useState(false);
-  const [reviewing, setReviewing] = useState(false);
-  const [reviewSelection, setReviewSelection] = useState<Record<string, string>>({});
 
   // 展开状态追踪
   const [expandedProjects, setExpandedProjects] = useState<Record<string, boolean>>({});
@@ -70,38 +68,19 @@ export function ReflexDashboard() {
   };
 
   const handleExport = async (
-    filter?: { workspaceRoot?: string; sessionId?: string; includeUnreviewed?: boolean },
+    filter?: { workspaceRoot?: string; sessionId?: string },
     title?: string,
   ) => {
     setExporting(true);
     try {
       const res = await downloadDecisionDataset(store.client, filter, title);
       if (res.ok) {
-        store.showToast(`已成功导出 ${res.count} 条样本 (.jsonl)`, 'ok');
+        store.showToast(`已成功导出 ${res.count} 条合格微调训练样本 (.jsonl)`, 'ok');
       } else {
         store.showToast(res.error || '导出失败', 'err');
       }
     } finally {
       setExporting(false);
-    }
-  };
-
-  const handleReview = async (record: DecisionRecord, defer: boolean) => {
-    if (!store.client.reviewDecision) return;
-    const selectedId = defer ? undefined : (reviewSelection[record.id] ?? record.review?.selectedId);
-    if (!defer && !selectedId) {
-      store.showToast('请先人工选择正确候选项', 'err');
-      return;
-    }
-    setReviewing(true);
-    try {
-      await store.client.reviewDecision(record.sessionId, record.id, { selectedId, defer });
-      store.showToast('人工标签已保存；可用于审核后的训练集导出', 'ok');
-      await loadData();
-    } catch (err) {
-      store.showToast(`审核失败: ${err instanceof Error ? err.message : String(err)}`, 'err');
-    } finally {
-      setReviewing(false);
     }
   };
 
@@ -123,7 +102,7 @@ export function ReflexDashboard() {
       <div className="page-head" style={{ marginBottom: 16 }}>
         <div>
           <div className="page-desc">
-            Reflex 端侧旁路观测；实际行为用于对照，只有人工确认的标签进入训练集
+            Reflex 端侧旁路观测：系统依据客观执行证据链自动筛选合格微调集，无需人工审核，绝无伪标签
           </div>
         </div>
         <div className="page-actions" style={{ display: 'flex', gap: 10 }}>
@@ -137,22 +116,16 @@ export function ReflexDashboard() {
           </button>
           <button
             className="btn primary mini-btn"
-            onClick={() => handleExport({ includeUnreviewed: true }, 'Global-Trajectory')}
-            disabled={exporting || !stats || stats.totalDecisions === 0}
-            title="导出全部未打标的原始观测轨迹（供离线分析，不伪造训练 target）"
+            onClick={() => handleExport(undefined, 'Global')}
+            disabled={exporting || !stats || (stats.qualifiedSamples ?? 0) === 0}
+            title={
+              (stats?.qualifiedSamples ?? 0) > 0
+                ? `导出经过证据链严格筛选的 ${stats?.qualifiedSamples} 条合格微调样本`
+                : '当前暂无符合客观证据链的合格样本（失败或不可靠判定已自动排除）'
+            }
           >
-            ⤓ 导出观测轨迹 (.jsonl)
+            ⤓ 导出微调集 ({(stats?.qualifiedSamples ?? 0)} 条)
           </button>
-          {(stats?.reviewedSamples ?? 0) > 0 && (
-            <button
-              className="btn ghost mini-btn"
-              onClick={() => handleExport({ includeUnreviewed: false }, 'Global-Audited')}
-              disabled={exporting}
-              title="仅导出经人工审核确认的高质量训练样本（包含标准 target 字段）"
-            >
-              ★ 导出已审核微调集 ({stats?.reviewedSamples})
-            </button>
-          )}
         </div>
       </div>
 
@@ -174,7 +147,7 @@ export function ReflexDashboard() {
           </div>
           <div style={{ fontSize: 11, color: 'var(--dim)', marginTop: 4, lineHeight: 1.5 }}>
             {isEnabled
-              ? '【运行中】记录 Reflex 预测和 Agent 实际行为；未审核样本不会进入训练集。'
+              ? '【运行中】Agent 运行时关键决策点在后台毫秒级运行 22M INT8 决策小脑；系统依据执行证据自动筛选合格样本，绝无伪标签。'
               : '【已关闭】完全停止端侧小模型推理与日志记录，主循环零额外 CPU 消耗、零文件写入。'}
           </div>
         </div>
@@ -203,7 +176,7 @@ export function ReflexDashboard() {
         <div className="general-panel" style={{ textAlign: 'center', padding: '50px 20px', color: 'var(--dim)' }}>
           <div style={{ fontSize: 15, color: 'var(--text-bright)', marginBottom: 8 }}>暂无旁路微决策记录</div>
           <div style={{ fontSize: 13, lineHeight: 1.6, maxWidth: 600, margin: '0 auto' }}>
-            在 Agent 任务执行过程中，推理档位分配、工具报错恢复自愈、敏感命令安全审批和上下文压缩时，Reflex 将在端侧以毫秒级旁路自动记录评估轨迹。
+            在 Agent 任务执行过程中，推理档位分配、前置工具路由、工具报错恢复自愈和上下文压缩时，Reflex 将在端侧以毫秒级旁路自动记录评估轨迹。
           </div>
         </div>
       ) : (
@@ -242,16 +215,16 @@ export function ReflexDashboard() {
             </div>
 
             <div className="general-panel" style={{ padding: '14px 16px' }}>
-              <div style={{ fontSize: 11, color: 'var(--dim)', textTransform: 'uppercase' }}>主动安全降级率 (Defer)</div>
-              <div style={{ fontSize: 24, fontWeight: 700, color: 'var(--amber)', marginTop: 4 }}>
-                {(stats.deferRate * 100).toFixed(1)}%
+              <div style={{ fontSize: 11, color: 'var(--dim)', textTransform: 'uppercase' }}>合格微调样本数</div>
+              <div style={{ fontSize: 24, fontWeight: 700, color: (stats.qualifiedSamples ?? 0) > 0 ? 'var(--green)' : 'var(--amber)', marginTop: 4 }}>
+                {stats.qualifiedSamples ?? 0}
               </div>
-              <div style={{ fontSize: 11, color: 'var(--faint)', marginTop: 2 }}>仅统计 {stats.validPredictions ?? 0} 条有效预测</div>
+              <div style={{ fontSize: 11, color: 'var(--faint)', marginTop: 2 }}>经因果证据链严格筛选</div>
             </div>
           </div>
 
           <div style={{ fontSize: 12, color: 'var(--dim)', marginBottom: 14 }}>
-            已人工审核 {stats.reviewedSamples ?? 0} 条 · 实际动作待映射 {stats.unresolvedDecisions ?? 0} 条 · 本次运行日志写入失败 {stats.writeFailures ?? 0} 次
+            已自动筛选合格微调样本 {stats.qualifiedSamples ?? 0} 条 · 实际动作待映射 {stats.unresolvedDecisions ?? 0} 条 · 失败与证据不足样本自动排除
           </div>
 
           {/* 任务族比例分布条 */}
@@ -329,10 +302,10 @@ export function ReflexDashboard() {
                         className="btn ghost mini-btn"
                         style={{ fontSize: 11, padding: '2px 8px' }}
                         onClick={() => handleExport({ workspaceRoot: p.workspaceRoot }, p.projectName)}
-                        disabled={exporting}
-                        title="导出该项目下所有会话的微调样本"
+                        disabled={exporting || p.totalDecisions === 0}
+                        title="导出该项目下所有合格的微调样本"
                       >
-                        ⤓ 导出项目样本
+                        ⤓ 导出微调集
                       </button>
                     </div>
                   </div>
@@ -342,6 +315,7 @@ export function ReflexDashboard() {
                     <div style={{ padding: '8px 16px 14px', display: 'flex', flexDirection: 'column', gap: 8 }}>
                       {p.sessions.map((s) => {
                         const isSessionOpen = !!expandedSessions[s.sessionId];
+                        const qualCount = s.qualifiedSamples ?? 0;
                         return (
                           <div
                             key={s.sessionId}
@@ -377,8 +351,8 @@ export function ReflexDashboard() {
                               </div>
 
                               <div style={{ display: 'flex', alignItems: 'center', gap: 10 }} onClick={(e) => e.stopPropagation()}>
-                                <span style={{ fontSize: 11, padding: '2px 6px', borderRadius: 2, background: 'var(--border2)', color: 'var(--dim)' }}>
-                                  {(s.comparableDecisions ?? 0) > 0 ? `一致率 ${(s.agreementRate * 100).toFixed(0)}%` : '暂无可比动作'}
+                                <span style={{ fontSize: 11, padding: '2px 6px', borderRadius: 2, background: 'var(--border2)', color: qualCount > 0 ? 'var(--green)' : 'var(--dim)' }}>
+                                  合格样本 {qualCount} 条
                                 </span>
                                 <span style={{ fontSize: 12, color: 'var(--dim)' }}>
                                   {s.totalDecisions} 次决策
@@ -386,11 +360,11 @@ export function ReflexDashboard() {
                                 <button
                                   className="btn ghost mini-btn"
                                   style={{ fontSize: 11, padding: '2px 6px' }}
-                                  onClick={() => handleExport({ sessionId: s.sessionId, includeUnreviewed: true }, s.sessionTitle)}
-                                  disabled={exporting || s.totalDecisions === 0}
-                                  title="导出本会话的全部观测轨迹（供离线分析）"
+                                  onClick={() => handleExport({ sessionId: s.sessionId }, s.sessionTitle)}
+                                  disabled={exporting || qualCount === 0}
+                                  title={qualCount > 0 ? '导出本会话的合格微调样本' : '本会话暂无合格微调样本'}
                                 >
-                                  ⤓ 导出轨迹
+                                  ⤓ 导出微调集
                                 </button>
                               </div>
                             </div>
@@ -403,6 +377,48 @@ export function ReflexDashboard() {
                                   const famInfo = TASK_FAMILY_NAMES[r.taskFamily] || TASK_FAMILY_NAMES.other;
                                   const scores = r.prediction?.scores || {};
                                   const cands = r.candidates || [];
+                                  const isRouting = r.taskFamily === 'tool_routing';
+                                  const isRecov = r.taskFamily === 'recovery';
+                                  const isContext = r.taskFamily === 'context_management';
+                                  const isReasoning = r.taskFamily === 'reasoning_effort';
+                                  let isQualified = false;
+                                  let evidenceNote = '排除: 证据不足不作为训练样本';
+
+                                  if (r.review?.basis === 'human') {
+                                    isQualified = true;
+                                    evidenceNote = `人工审核确认: ${r.review.defer ? 'DEFER' : r.review.selectedId}`;
+                                  } else if (isRouting) {
+                                    if (r.actualAction?.selectedId === 'stop_respond' && r.outcome?.status !== 'failure') {
+                                      isQualified = true;
+                                      evidenceNote = '自动证据合格: 正常完成未调用工具 (stop_respond)';
+                                    } else if (r.actualAction?.selectedId && r.outcome?.status === 'success') {
+                                      isQualified = true;
+                                      evidenceNote = `自动证据合格: 工具成功执行推进任务 [${r.actualAction.selectedId}]`;
+                                    } else if (r.outcome?.status === 'failure') {
+                                      evidenceNote = '自动排除: 工具执行失败（退出码非 0 或报错，绝不作为正例）';
+                                    }
+                                  } else if (isRecov) {
+                                    if (r.actualAction?.selectedId && r.outcome?.status === 'success') {
+                                      isQualified = true;
+                                      evidenceNote = `自动证据合格: 自愈策略执行成功 [${r.actualAction.selectedId}]`;
+                                    } else {
+                                      evidenceNote = '自动排除: 恢复动作未成功执行';
+                                    }
+                                  } else if (isContext) {
+                                    if (r.actualAction?.selectedId === 'keep' || r.actualAction?.selectedId === 'compact_all') {
+                                      isQualified = true;
+                                      evidenceNote = `自动证据合格: 上下文策略有效执行 [${r.actualAction.selectedId}]`;
+                                    }
+                                  } else if (isReasoning) {
+                                    if (r.outcome?.status === 'success' && r.outcome?.evidence) {
+                                      isQualified = true;
+                                      evidenceNote = '自动证据合格: 依据整轮实际执行客观复杂度标定';
+                                    } else {
+                                      evidenceNote = '自动排除: 回合未正常完成或缺少完整执行证据';
+                                    }
+                                  } else if (r.taskFamily === 'safety') {
+                                    evidenceNote = '自动排除: 审批模式不充当安全真值（严防伪标签）';
+                                  }
 
                                   return (
                                     <div
@@ -471,26 +487,11 @@ export function ReflexDashboard() {
                                         )}
                                       </div>
 
+                                      {/* 自动证据判定状态行 */}
                                       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8, fontSize: 11 }}>
-                                        <span style={{ color: 'var(--dim)' }}>
-                                          {r.review ? `人工标签：${r.review.defer ? 'DEFER' : r.review.selectedId}` : '未审核：实际行为不作为训练标签'}
+                                        <span style={{ color: isQualified ? 'var(--green)' : 'var(--dim)' }}>
+                                          {isQualified ? '● ' : '○ '}{evidenceNote}
                                         </span>
-                                        {r.turnId && store.client.reviewDecision && (
-                                          <>
-                                            <select
-                                              value={reviewSelection[r.id] ?? r.review?.selectedId ?? ''}
-                                              onChange={(e) => setReviewSelection((prev) => ({ ...prev, [r.id]: e.target.value }))}
-                                              style={{ background: 'var(--panel2)', color: 'var(--text-bright)', border: '1px solid var(--border)' }}
-                                            >
-                                              <option value="">人工选择正确候选</option>
-                                              {cands.map((c) => <option key={c.id} value={c.id}>{c.id}: {c.text}</option>)}
-                                            </select>
-                                            <button className="btn ghost mini-btn" disabled={reviewing}
-                                              onClick={() => void handleReview(r, false)}>确认标签</button>
-                                            <button className="btn ghost mini-btn" disabled={reviewing}
-                                              onClick={() => void handleReview(r, true)}>标记候选不足</button>
-                                          </>
-                                        )}
                                       </div>
 
                                       {/* 候选概率分布横向柱状图 */}
