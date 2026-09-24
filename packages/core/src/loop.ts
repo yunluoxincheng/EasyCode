@@ -266,12 +266,13 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
         }
 
         // 决策点 2：工具执行错误恢复旁路（TODOS #40 recovery）
+        // 严格物理隔离工具原始输出内容，绝不在 state 摘要或 metadata 中留存可能包含环境变量或未脱敏文本的内容
         if (execution.isError && policy) {
           const observation = startDecisionObservation(policy, {
               taskFamily: 'recovery',
               instruction: 'Decide the best recovery strategy after tool execution failure.',
               state: {
-                summary: `Tool '${call.name}' failed with output: ${execution.content.slice(0, 250)}`,
+                summary: `Tool '${call.name}' execution failed with non-zero status or error`,
                 history: [call.name],
               },
               candidates: [
@@ -283,7 +284,6 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
               ],
               metadata: {
                 toolName: call.name,
-                contentSummary: execution.content.slice(0, 150).replace(/(?:Bearer\s+|sk-|ghp_)\S+/gi, '[REDACTED]'),
               },
             });
           if (observation) pendingRecoveries.push({ observation, name: call.name, input: call.input });

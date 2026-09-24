@@ -102,7 +102,7 @@ export function ReflexDashboard() {
       <div className="page-head" style={{ marginBottom: 16 }}>
         <div>
           <div className="page-desc">
-            Reflex 端侧旁路观测：系统依据客观执行证据链自动筛选合格微调集，无需人工审核，绝无伪标签
+            Reflex 端侧旁路观测：依据执行结果自动筛选弱监督样本（Silver 标签），已排除失败及证据不足记录，标签质量仍需离线基准评估
           </div>
         </div>
         <div className="page-actions" style={{ display: 'flex', gap: 10 }}>
@@ -120,11 +120,11 @@ export function ReflexDashboard() {
             disabled={exporting || !stats || (stats.qualifiedSamples ?? 0) === 0}
             title={
               (stats?.qualifiedSamples ?? 0) > 0
-                ? `导出经过证据链严格筛选的 ${stats?.qualifiedSamples} 条合格微调样本`
-                : '当前暂无符合客观证据链的合格样本（失败或不可靠判定已自动排除）'
+                ? `导出基于执行证据筛选的 ${stats?.qualifiedSamples} 条弱监督微调样本（Silver 标签）`
+                : '当前暂无符合客观证据链的弱监督样本（已排除失败及证据不足记录）'
             }
           >
-            ⤓ 导出微调集 ({(stats?.qualifiedSamples ?? 0)} 条)
+            ⤓ 导出微调集 ({(stats?.qualifiedSamples ?? 0)} 条 Silver 样本)
           </button>
         </div>
       </div>
@@ -147,7 +147,7 @@ export function ReflexDashboard() {
           </div>
           <div style={{ fontSize: 11, color: 'var(--dim)', marginTop: 4, lineHeight: 1.5 }}>
             {isEnabled
-              ? '【运行中】Agent 运行时关键决策点在后台毫秒级运行 22M INT8 决策小脑；系统依据执行证据自动筛选合格样本，绝无伪标签。'
+              ? '【运行中】Agent 运行时关键决策点在后台毫秒级运行 22M INT8 决策小脑；系统依据执行证据自动筛选弱监督样本（已排除明确失败及不可靠记录），标签质量需经基准评估。'
               : '【已关闭】完全停止端侧小模型推理与日志记录，主循环零额外 CPU 消耗、零文件写入。'}
           </div>
         </div>
@@ -215,7 +215,7 @@ export function ReflexDashboard() {
             </div>
 
             <div className="general-panel" style={{ padding: '14px 16px' }}>
-              <div style={{ fontSize: 11, color: 'var(--dim)', textTransform: 'uppercase' }}>合格微调样本数</div>
+              <div style={{ fontSize: 11, color: 'var(--dim)', textTransform: 'uppercase' }}>弱监督微调样本 (Silver)</div>
               <div style={{ fontSize: 24, fontWeight: 700, color: (stats.qualifiedSamples ?? 0) > 0 ? 'var(--green)' : 'var(--amber)', marginTop: 4 }}>
                 {stats.qualifiedSamples ?? 0}
               </div>
@@ -224,7 +224,7 @@ export function ReflexDashboard() {
           </div>
 
           <div style={{ fontSize: 12, color: 'var(--dim)', marginBottom: 14 }}>
-            已自动筛选合格微调样本 {stats.qualifiedSamples ?? 0} 条 · 实际动作待映射 {stats.unresolvedDecisions ?? 0} 条 · 失败与证据不足样本自动排除
+            已通过执行证据筛选 {stats.qualifiedSamples ?? 0} 条弱监督候选（Silver 标签） · 已排除执行失败与不可靠记录，标签质量仍需离线基准评估
           </div>
 
           {/* 任务族比例分布条 */}
@@ -417,7 +417,7 @@ export function ReflexDashboard() {
                                       evidenceNote = '自动排除: 回合未正常完成或缺少完整执行证据';
                                     }
                                   } else if (r.taskFamily === 'safety') {
-                                    evidenceNote = '自动排除: 审批模式不充当安全真值（严防伪标签）';
+                                    evidenceNote = '自动排除: 审批模式不充当安全真值（无沙箱验证不予标定）';
                                   }
 
                                   return (

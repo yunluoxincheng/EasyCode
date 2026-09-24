@@ -330,11 +330,10 @@ test('Shadow 预测与实际动作按 ID 关联，推理失败不伪造一致率
   assert.doesNotMatch(records[0].state.goal ?? '', /secret-token-value/);
   assert.equal(records[0].state.history?.[0].length, 100);
 
-  // 验证 metadata 敏感凭证彻底脱敏，绝不落盘明文私密信息
-  assert.equal(records[0].metadata?.password, '[REDACTED]');
-  assert.equal(records[0].metadata?.apiKey, '[REDACTED]');
-  assert.match(String(records[0].metadata?.rawText), /\[REDACTED\]/);
-  assert.doesNotMatch(String(records[0].metadata?.rawText), /secret-auth-token-xyz/);
+  // 验证 metadata 严格白名单过滤：非白名单凭证字段直接丢弃，绝不落盘
+  assert.equal(records[0].metadata?.password, undefined);
+  assert.equal(records[0].metadata?.apiKey, undefined);
+  assert.equal(records[0].metadata?.rawText, undefined);
 
   assert.equal(await manager.exportDataset(), '', '真实行为仍需独立审核才可训练');
 
@@ -383,4 +382,78 @@ test('旧版单行日志只展示历史，不作为有效预测或训练样本',
   assert.equal(records[0].agreement, undefined);
   assert.equal((await manager.getStats()).validPredictions, 0);
   assert.equal(await manager.exportDataset(), '');
+});
+
+test('统一脱敏关口：私钥、URL密码、API凭证及非白名单metadata均无法穿透落盘', async () => {
+  const host = new MemoryHost();
+  const manager = new DecisionStatsManager(host);
+
+  const leakPayload = {
+    urlWithPass: 'postgres://superuser:p@ssw0rd123@db.example.com:5432/prod',
+    privateKey: '-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAA\n-----END OPENSSH PRIVATE KEY-----',
+    ghToken: 'ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456',
+    secretPair: 'api_key="super-confidential-secret-999"',
+    authBearer: 'Authorization: Bearer my-custom-bearer-jwt-token-val',
+  };
+
+  await manager.appendEvent('session_pen_test', {
+    kind: 'requested',
+    record: {
+      id: 'dec_pen_1',
+      turnId: 'turn_pen',
+      timestamp: new Date().toISOString(),
+      workspaceRoot: '/workspace',
+      sessionId: 'session_pen_test',
+      sessionTitle: 'Penetration Test',
+      taskFamily: 'tool_routing',
+      instruction: `Run ${leakPayload.urlWithPass} and check ${leakPayload.ghToken}`,
+      state: {
+        summary: `Executing with ${leakPayload.secretPair} and ${leakPayload.authBearer}`,
+        goal: leakPayload.privateKey,
+        history: [`curl ${leakPayload.urlWithPass}`],
+      },
+      candidates: [
+        { id: 'run_command', text: `Execute with ${leakPayload.ghToken}` },
+        { id: 'stop_respond', text: 'Stop' },
+      ],
+      // 故意传入非白名单的脏对象和敏感参数
+      metadata: {
+        toolName: 'run_command', // 白名单项
+        step: 1, // 白名单项
+        arbitrary_untrusted_command: 'rm -rf / --token=secret-token-inside-untrusted-key',
+        nested_credentials: {
+          client_secret: 'top-secret-val',
+        },
+      },
+    },
+  });
+
+  await manager.flush('session_pen_test');
+
+  // 直接读取底层磁盘落盘的原始 JSONL 文本
+  const rawDiskText = await host.fs.readFile(host.paths.join(host.env.dataDir(), 'reflex_decisions/session_pen_test.jsonl'));
+
+  // 1. 验证所有真实敏感凭证完全不存在于磁盘文件中
+  assert.doesNotMatch(rawDiskText, /p@ssw0rd123/);
+  assert.doesNotMatch(rawDiskText, /ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456/);
+  assert.doesNotMatch(rawDiskText, /super-confidential-secret-999/);
+  assert.doesNotMatch(rawDiskText, /my-custom-bearer-jwt-token-val/);
+  assert.doesNotMatch(rawDiskText, /b3BlbnNzaC1rZXktdjEAAAA/);
+
+  // 2. 验证非白名单 metadata 属性被彻底阻断，根本没有写入文件
+  assert.doesNotMatch(rawDiskText, /arbitrary_untrusted_command/);
+  assert.doesNotMatch(rawDiskText, /secret-token-inside-untrusted-key/);
+  assert.doesNotMatch(rawDiskText, /nested_credentials/);
+  assert.doesNotMatch(rawDiskText, /top-secret-val/);
+
+  // 3. 验证白名单字段安全保留
+  assert.match(rawDiskText, /"toolName":"run_command"/);
+  assert.match(rawDiskText, /"step":1/);
+
+  // 4. 读取解析后的对象，确认结构合规
+  const records = await manager.loadRecords({ sessionId: 'session_pen_test' });
+  assert.equal(records.length, 1);
+  assert.equal(records[0].metadata?.toolName, 'run_command');
+  assert.equal(records[0].metadata?.step, 1);
+  assert.equal('arbitrary_untrusted_command' in (records[0].metadata || {}), false);
 });

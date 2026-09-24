@@ -172,6 +172,91 @@ export function deriveGroundTruthTarget(r: DecisionRecord): AutoLabelResult | nu
   return null;
 }
 
+/** 统一深度凭证脱敏器，覆盖常见 Token、密码、Bearer、私钥与连接串 */
+export function deepSanitizeText(text: string): string {
+  if (!text) return '';
+  return text
+    .replace(/\b(?:Bearer|Token)\s+[A-Za-z0-9._~+/-]+\b/gi, 'Bearer [REDACTED]')
+    .replace(/\b(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]{12,}|glpat-[A-Za-z0-9_-]{16,}|xox[baprs]-[A-Za-z0-9_-]{10,}|npm_[A-Za-z0-9]{20,}|hf_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16})\b/g, '[REDACTED]')
+    .replace(/((?:api[_-]?key|token|password|passwd|pwd|secret|credential|access_key|private_key|auth)\s*[:=]\s*["']?)(?:[^\s"',;]+)(["']?)/gi, '$1[REDACTED]$2')
+    .replace(/(:\/\/[^:\s]+:)(?:[^@\s]+)(@)/g, '$1[REDACTED]$2')
+    .replace(/-----BEGIN [A-Z ]+ PRIVATE KEY-----[\s\S]*?-----END [A-Z ]+ PRIVATE KEY-----/g, '[REDACTED_PRIVATE_KEY]');
+}
+
+/** 允许落盘的 metadata 白名单字段 */
+const METADATA_WHITELIST_KEYS = new Set([
+  'toolName',
+  'step',
+  'ratio',
+  'inputTokens',
+  'contextWindow',
+  'turnSteps',
+  'completedActionCount',
+]);
+
+/** 在写入文件前的统一白名单与深度脱敏关口 */
+export function sanitizeEventForLogging(event: DecisionLogEvent): DecisionLogEvent {
+  const deepSanitizeRecord = (r: DecisionRecord): DecisionRecord => {
+    let cleanMetadata: Record<string, unknown> | undefined;
+    if (r.metadata && typeof r.metadata === 'object') {
+      cleanMetadata = {};
+      for (const [k, v] of Object.entries(r.metadata)) {
+        if (METADATA_WHITELIST_KEYS.has(k)) {
+          cleanMetadata[k] = typeof v === 'string' ? deepSanitizeText(v).slice(0, 100) : v;
+        }
+      }
+    }
+    return {
+      ...r,
+      instruction: deepSanitizeText(r.instruction).slice(0, 300),
+      state: {
+        summary: deepSanitizeText(r.state?.summary || '').slice(0, 400),
+        goal: r.state?.goal ? deepSanitizeText(r.state.goal).slice(0, 200) : undefined,
+        history: r.state?.history?.slice(-5).map((h) => deepSanitizeText(h).slice(0, 100)),
+      },
+      candidates: r.candidates?.map((c) => ({
+        id: c.id,
+        text: deepSanitizeText(c.text).slice(0, 300),
+      })),
+      actualAction: r.actualAction ? {
+        selectedId: r.actualAction.selectedId,
+        description: deepSanitizeText(r.actualAction.description).slice(0, 200),
+      } : undefined,
+      outcome: r.outcome ? {
+        status: r.outcome.status,
+        evidence: deepSanitizeText(r.outcome.evidence).slice(0, 200),
+      } : undefined,
+      metadata: cleanMetadata,
+    };
+  };
+
+  if (event.kind === 'requested' || event.kind === 'snapshot') {
+    return {
+      ...event,
+      record: deepSanitizeRecord(event.record),
+    };
+  }
+  if (event.kind === 'actual') {
+    return {
+      ...event,
+      action: {
+        selectedId: event.action.selectedId,
+        description: deepSanitizeText(event.action.description).slice(0, 200),
+      },
+    };
+  }
+  if (event.kind === 'outcome') {
+    return {
+      ...event,
+      outcome: {
+        status: event.outcome.status,
+        evidence: deepSanitizeText(event.outcome.evidence).slice(0, 200),
+      },
+    };
+  }
+  return event;
+}
+
 /**
  * 决策统计与日志归档管理器 (DecisionStatsManager)
  * 职责：
@@ -196,13 +281,14 @@ export class DecisionStatsManager {
     return this.host.paths.join(this.dir(), `${sessionId}.jsonl`);
   }
 
-  /** 每个会话串行追加事件；失败可统计，不能覆盖先前日志。 */
+  /** 每个会话串行追加事件；统一经由白名单与深度脱敏关口处理，失败可统计，不能覆盖先前日志。 */
   appendEvent(sessionId: string, event: DecisionLogEvent): Promise<void> {
     if (this.deletedSessions.has(sessionId)) return Promise.resolve();
+    const sanitized = sanitizeEventForLogging(event);
     const previous = this.writeQueues.get(sessionId) ?? Promise.resolve();
     const next = previous.catch(() => {}).then(async () => {
       await this.host.fs.mkdir(this.dir(), { recursive: true });
-      await this.host.fs.appendFile(this.sessionFile(sessionId), JSON.stringify(event) + '\n');
+      await this.host.fs.appendFile(this.sessionFile(sessionId), JSON.stringify(sanitized) + '\n');
     });
     this.writeQueues.set(sessionId, next);
     void next.catch(() => { this.writeFailures++; });
