@@ -394,6 +394,7 @@ test('统一脱敏关口：私钥、URL密码、API凭证及非白名单metadata
     ghToken: 'ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456',
     secretPair: 'api_key="super-confidential-secret-999"',
     authBearer: 'Authorization: Bearer my-custom-bearer-jwt-token-val',
+    titleSecret: 'Check Authorization: Bearer secret-title-jwt-token and sk-ant-1234567890abcdef',
   };
 
   await manager.appendEvent('session_pen_test', {
@@ -404,7 +405,7 @@ test('统一脱敏关口：私钥、URL密码、API凭证及非白名单metadata
       timestamp: new Date().toISOString(),
       workspaceRoot: '/workspace',
       sessionId: 'session_pen_test',
-      sessionTitle: 'Penetration Test',
+      sessionTitle: leakPayload.titleSecret,
       taskFamily: 'tool_routing',
       instruction: `Run ${leakPayload.urlWithPass} and check ${leakPayload.ghToken}`,
       state: {
@@ -416,10 +417,11 @@ test('统一脱敏关口：私钥、URL密码、API凭证及非白名单metadata
         { id: 'run_command', text: `Execute with ${leakPayload.ghToken}` },
         { id: 'stop_respond', text: 'Stop' },
       ],
-      // 故意传入非白名单的脏对象和敏感参数
+      // 故意传入非白名单的脏对象以及用白名单键名承载非法嵌套对象/数组
       metadata: {
-        toolName: 'run_command', // 白名单项
-        step: 1, // 白名单项
+        toolName: { dangerous_nested_obj: 'bypass_attempt' } as any, // 白名单键名，但承载了非法嵌套对象
+        ratio: [0.1, 0.2] as any, // 白名单键名，但承载了非法数组
+        step: 1, // 合法安全标量
         arbitrary_untrusted_command: 'rm -rf / --token=secret-token-inside-untrusted-key',
         nested_credentials: {
           client_secret: 'top-secret-val',
@@ -433,27 +435,32 @@ test('统一脱敏关口：私钥、URL密码、API凭证及非白名单metadata
   // 直接读取底层磁盘落盘的原始 JSONL 文本
   const rawDiskText = await host.fs.readFile(host.paths.join(host.env.dataDir(), 'reflex_decisions/session_pen_test.jsonl'));
 
-  // 1. 验证所有真实敏感凭证完全不存在于磁盘文件中
+  // 1. 验证所有真实敏感凭证（包含 sessionTitle 中的凭证）完全不存在于磁盘文件中
+  assert.doesNotMatch(rawDiskText, /secret-title-jwt-token/);
+  assert.doesNotMatch(rawDiskText, /sk-ant-1234567890abcdef/);
   assert.doesNotMatch(rawDiskText, /p@ssw0rd123/);
   assert.doesNotMatch(rawDiskText, /ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456/);
   assert.doesNotMatch(rawDiskText, /super-confidential-secret-999/);
   assert.doesNotMatch(rawDiskText, /my-custom-bearer-jwt-token-val/);
   assert.doesNotMatch(rawDiskText, /b3BlbnNzaC1rZXktdjEAAAA/);
 
-  // 2. 验证非白名单 metadata 属性被彻底阻断，根本没有写入文件
+  // 2. 验证非白名单 metadata 属性以及承载嵌套对象的伪装键被彻底阻断，根本没有写入文件
   assert.doesNotMatch(rawDiskText, /arbitrary_untrusted_command/);
   assert.doesNotMatch(rawDiskText, /secret-token-inside-untrusted-key/);
   assert.doesNotMatch(rawDiskText, /nested_credentials/);
   assert.doesNotMatch(rawDiskText, /top-secret-val/);
+  assert.doesNotMatch(rawDiskText, /dangerous_nested_obj/);
 
-  // 3. 验证白名单字段安全保留
-  assert.match(rawDiskText, /"toolName":"run_command"/);
+  // 3. 验证真正合法的安全标量字段正常保留
   assert.match(rawDiskText, /"step":1/);
 
   // 4. 读取解析后的对象，确认结构合规
   const records = await manager.loadRecords({ sessionId: 'session_pen_test' });
   assert.equal(records.length, 1);
-  assert.equal(records[0].metadata?.toolName, 'run_command');
+  assert.match(records[0].sessionTitle, /Bearer \[REDACTED\]/);
+  assert.doesNotMatch(records[0].sessionTitle, /secret-title-jwt-token/);
   assert.equal(records[0].metadata?.step, 1);
+  assert.equal(records[0].metadata?.toolName, undefined, '白名单键承载非标量对象必须被安全丢弃');
+  assert.equal(records[0].metadata?.ratio, undefined, '白名单键承载数组必须被安全丢弃');
   assert.equal('arbitrary_untrusted_command' in (records[0].metadata || {}), false);
 });

@@ -135,20 +135,45 @@ export interface ToolExecution {
   durationMs: number;
 }
 
+/** 固定安全 Shell 动词白名单，未识别动词一律收敛至 shell_other，绝不透传私有文本 */
+const KNOWN_SHELL_VERBS = new Set([
+  'git', 'npm', 'pnpm', 'yarn', 'npx', 'cargo', 'rustc', 'go', 'python', 'python3', 'pip',
+  'node', 'deno', 'bun', 'tsc', 'make', 'cmake', 'docker', 'kubectl',
+  'cat', 'head', 'tail', 'less', 'ls', 'dir', 'echo', 'grep', 'find', 'curl', 'wget',
+  'rm', 'del', 'erase', 'mkdir', 'rmdir', 'cp', 'copy', 'mv', 'move', 'chmod', 'chown',
+  'kill', 'pkill', 'taskkill', 'ps', 'tar', 'zip', 'unzip', 'sed', 'awk',
+]);
+
+/** 常见文本与代码扩展名白名单 */
+const KNOWN_FILE_EXTS = new Set([
+  'ts', 'js', 'tsx', 'jsx', 'json', 'md', 'css', 'html', 'py', 'rs', 'go',
+  'java', 'c', 'cpp', 'h', 'hpp', 'toml', 'yaml', 'yml', 'sh', 'bash', 'txt', 'xml', 'sql',
+]);
+
 /** 从敏感操作输入中提取纯净的结构化操作类别事实，绝不暴露具体参数、路径或命令内容 */
 export function extractStructuredOperationFact(name: string, rawInput: unknown): { operationCategory: string; targetExt?: string } {
   const input = typeof rawInput === 'object' && rawInput !== null ? (rawInput as Record<string, unknown>) : {};
   if (name === 'run_command') {
-    const cmd = typeof input.command === 'string' ? input.command.trim() : '';
-    // 只取第一个词的字母作为根动词，如 git, pnpm, rm, curl, node
+    let cmd = typeof input.command === 'string' ? input.command.trim() : '';
+    // 1. 剥离环境变量前缀 (如 FOO=bar BAZ=123 cmd)
+    cmd = cmd.replace(/^(?:[a-zA-Z_][a-zA-Z0-9_]*=\S*\s+)+/, '').trim();
+    // 2. 解包常见的 Shell 包装命令 (如 powershell/pwsh -c "...", cmd /c "...")
+    const wrapperMatch = /^(?:powershell(?:\.exe)?|pwsh(?:\.exe)?|cmd(?:\.exe)?|bash|sh)\s+(?:-[a-zA-Z0-9]+\s+|(?:\/c|\/k)\s+)*["']?([^"']+)["']?/i.exec(cmd);
+    if (wrapperMatch) {
+      cmd = wrapperMatch[1].trim();
+      cmd = cmd.replace(/^(?:[a-zA-Z_][a-zA-Z0-9_]*=\S*\s+)+/, '').trim();
+    }
+    // 3. 提取首词并严格校验白名单，非白名单一律归为 shell_other
     const verbMatch = /^[a-zA-Z0-9_-]+/.exec(cmd);
-    const rootVerb = verbMatch ? verbMatch[0].toLowerCase().slice(0, 20) : 'unknown';
+    const rawVerb = verbMatch ? verbMatch[0].toLowerCase() : '';
+    const rootVerb = KNOWN_SHELL_VERBS.has(rawVerb) ? rawVerb : 'other';
     return { operationCategory: `shell_${rootVerb}` };
   }
   if (name === 'write_file' || name === 'edit_file') {
-    const p = typeof input.path === 'string' ? input.path : '';
-    const extMatch = /\.[a-zA-Z0-9]+$/.exec(p);
-    const ext = extMatch ? extMatch[0].toLowerCase().slice(0, 10) : 'none';
+    const p = typeof input.path === 'string' ? input.path.trim() : '';
+    const extMatch = /\.([a-zA-Z0-9]+)$/.exec(p);
+    const rawExt = extMatch ? extMatch[1].toLowerCase() : '';
+    const ext = KNOWN_FILE_EXTS.has(rawExt) ? rawExt : 'other';
     const isConfig = /(?:config|rc|json|ya?ml|toml|env|lock)$/i.test(p);
     return { operationCategory: `fs_${name}_${ext}${isConfig ? '_cfg' : ''}`, targetExt: ext };
   }
