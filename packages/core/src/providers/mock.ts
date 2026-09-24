@@ -80,13 +80,15 @@ export class MockProvider implements Provider {
     kind: 'text' | 'thinking',
     text: string,
   ): Promise<void> {
-    // 按小块流出，模拟真实打字机效果，同时验证流式 UI
-    const chunkSize = 6;
+    // 按小块流出，模拟真实模型打字机效果（TODOS #45：加大单块步长并缩短延时，
+    // 保证流式动画流畅的同时贴近真实模型吞吐，不再呈现拖沓的低速打字观感）
+    const chunkSize = 12;
+    const delayMs = 8;
     for (let i = 0; i < text.length; i += chunkSize) {
       if (ctx.signal.aborted) throw new DOMException('Aborted', 'AbortError');
       const delta = text.slice(i, i + chunkSize);
       ctx.emit(kind === 'text' ? { type: 'text_delta', delta } : { type: 'reasoning_delta', delta });
-      await sleep(12);
+      if (i + chunkSize < text.length) await sleep(delayMs);
     }
   }
 }

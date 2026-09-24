@@ -42,6 +42,9 @@ function getHighlightedCode(lang: string, text: string): string {
   return highlighted;
 }
 
+// 流式轻量渲染开关（TODOS #45）：marked.parse 为同步调用，解析期间置位即可全局生效
+let streamingParse = false;
+
 // 禁止模型输出中的原始 HTML 直接注入（防 XSS），链接在新窗口打开
 const renderer = new Renderer();
 renderer.html = (token) => escapeHtml(typeof token === 'string' ? token : token.text ?? '');
@@ -56,7 +59,9 @@ renderer.code = (token: Tokens.Code | { text: string; lang?: string }) => {
   const text = token.text ?? '';
   const rawLang = (token.lang ?? '').trim();
   const lang = rawLang.split(/\s+/)[0] || '';
-  const highlighted = getHighlightedCode(lang, text);
+  // 流式期间未定型的代码块跳过昂贵的 hljs 多层正则分词，仅作转义纯文本呈现；
+  // 待代码块闭合或回合结束后以完整模式重渲一次并持久化写入高亮缓存
+  const highlighted = streamingParse ? escapeHtml(text) : getHighlightedCode(lang, text);
 
   const displayLang = lang ? `// ${lang}` : '// text';
   const langClass = lang ? ` language-${escapeHtml(lang)}` : '';
@@ -75,9 +80,21 @@ marked.use({ renderer, breaks: true, gfm: true });
 const MD_CACHE_CAP = 200;
 const mdCache = new Map<string, string>();
 
-/** 渲染 Markdown 为 HTML 字符串，内嵌 LRU 缓存彻底避免对已定型长文本的重复解析与 AST 遍历 */
-export function renderMarkdown(text: string): string {
+/**
+ * 渲染 Markdown 为 HTML 字符串，内嵌 LRU 缓存彻底避免对已定型长文本的重复解析与 AST 遍历。
+ * `streaming=true` 时启用流式轻量模式（TODOS #45）：跳过代码高亮正则分词且不写入缓存——
+ * 流式文本每帧都在增长，缓存命中率恒为 0，反而会持续挤占定型内容的 LRU 空间。
+ */
+export function renderMarkdown(text: string, streaming = false): string {
   if (!text) return '';
+  if (streaming) {
+    streamingParse = true;
+    try {
+      return marked.parse(text, { async: false }) as string;
+    } finally {
+      streamingParse = false;
+    }
+  }
   const cached = mdCache.get(text);
   if (cached !== undefined) {
     mdCache.delete(text);

@@ -14,9 +14,9 @@ import type {
   ViewBlock,
 } from '../store.js';
 
-/** Markdown 渲染（含代码块样式钩子 + React.memo 浅比对优化） */
-const Md = memo(function Md({ text }: { text: string }) {
-  return <div className="md" dangerouslySetInnerHTML={{ __html: renderMarkdown(text) }} />;
+/** Markdown 渲染（含代码块样式钩子 + React.memo 浅比对优化）；streaming 时走轻量渲染跳过代码高亮正则（TODOS #45） */
+const Md = memo(function Md({ text, streaming = false }: { text: string; streaming?: boolean }) {
+  return <div className="md" dangerouslySetInnerHTML={{ __html: renderMarkdown(text, streaming) }} />;
 });
 
 /** 思考过程折叠卡片：统一终端极客风、支持吸顶、一键复制与字符统计 */
@@ -374,7 +374,13 @@ function TodoCard({ item }: { item: ToolItem }) {
   );
 }
 
-function ItemView({ item }: { item: AssistantItem | ToolItem | ApprovalItem | ErrorItem }) {
+function ItemView({
+  item,
+  streaming = false,
+}: {
+  item: AssistantItem | ToolItem | ApprovalItem | ErrorItem;
+  streaming?: boolean;
+}) {
   switch (item.kind) {
     case 'assistant': {
       // 思考过程已统一汇聚在回合顶部单一呈现，此处仅渲染助手实际回复的正文文本；无文本时不渲染空外框
@@ -384,7 +390,7 @@ function ItemView({ item }: { item: AssistantItem | ToolItem | ApprovalItem | Er
         <div className="msg assistant">
           <div className="msg-content">
             {textBlocks.map((b: ViewBlock, idx: number) => (
-              <Md key={idx} text={b.text} />
+              <Md key={idx} text={b.text} streaming={streaming && b.type === 'text'} />
             ))}
           </div>
         </div>
@@ -683,6 +689,14 @@ function TurnView({ turn }: { turn: TurnItem }) {
     el.scrollTop = el.scrollHeight;
   }, [turn.items.length, store.version, live, expanded]);
 
+  // 「↓ 回到底部」双层视口联动（TODOS #46）：重新锁定局部贴底跟随并同步内部视窗至最底
+  useEffect(() => {
+    if (!live) return;
+    localAtBottomRef.current = true;
+    const el = bodyRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [store.jumpTick, live]);
+
   const onBodyScroll = () => {
     const el = bodyRef.current;
     if (!el) return;
@@ -696,6 +710,14 @@ function TurnView({ turn }: { turn: TurnItem }) {
       localAtBottomRef.current = false;
     }
   };
+
+  // 流式中的助手条目（TODOS #45）：回合 live 时持续接收文本增量的助手总位于条目末尾，
+  // 对其走轻量渲染（跳过代码高亮正则）；其余已定型条目走完整渲染并命中缓存
+  const streamingAssistantId = (() => {
+    if (!live) return null;
+    const last = turn.items.at(-1);
+    return last && last.kind === 'assistant' ? last.id : null;
+  })();
 
   const latestTodoTool = turn.items
     .slice()
@@ -755,7 +777,7 @@ function TurnView({ turn }: { turn: TurnItem }) {
           {live && <LiveTicker />}
           {allThinking ? <Thinking text={allThinking} live={live} /> : null}
           {turn.items.map((it) => (
-            <ItemView key={it.id} item={it} />
+            <ItemView key={it.id} item={it} streaming={it.id === streamingAssistantId} />
           ))}
         </div>
       )}
@@ -801,6 +823,48 @@ export function Transcript() {
     store.setAtBottom(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [store.scrollTick, store.activeId]);
+
+  // 智能贴底跟随（TODOS #46）：贴底锁定态下内容高度膨胀（新回合创建、工具卡片加入、
+  // 文本增量增长、回合折叠）经 ResizeObserver 捕获后自动无感跟进；
+  // 用户主动上翻即解除锁定（atBottom=false），进入自由阅读模式，绝不被拉回底部
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    let raf = 0;
+    const followIfPinned = (): void => {
+      raf = 0;
+      if (!store.autoScrollOn || !store.atBottom) return;
+      el.scrollTop = el.scrollHeight;
+    };
+    const ro = new ResizeObserver(() => {
+      if (raf) return;
+      raf = requestAnimationFrame(followIfPinned);
+    });
+    const observeChildren = (): void => {
+      for (const child of Array.from(el.children)) ro.observe(child);
+    };
+    observeChildren();
+    const mo = new MutationObserver(observeChildren);
+    mo.observe(el, { childList: true });
+    return () => {
+      if (raf) cancelAnimationFrame(raf);
+      ro.disconnect();
+      mo.disconnect();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [store.activeId]);
+
+  // 回合完结自动对齐（TODOS #46）：运行结束、回合由展开态折叠为最终文本时精准校准视口，
+  // 保证最终结果完整呈现在可视区域内（高度收缩同样会被贴底跟随器捕获，此处为确定性兜底）
+  const wasRunningRef = useRef(false);
+  useEffect(() => {
+    const wasRunning = wasRunningRef.current;
+    wasRunningRef.current = store.running;
+    if (wasRunning && !store.running && store.atBottom && store.autoScrollOn) {
+      const el = scrollRef.current;
+      if (el) el.scrollTop = el.scrollHeight;
+    }
+  });
 
   // 滚动位置 → 贴底状态（贴近底部=跟随；离开=自由阅读）
   useEffect(() => {
@@ -1014,9 +1078,10 @@ export function Transcript() {
           title="回到底部"
           onClick={() => {
             const el = scrollRef.current;
-            if (!el) return;
-            el.scrollTop = el.scrollHeight;
-            store.setAtBottom(true);
+            // 双层视口联动（TODOS #46）：外层主视口贴底的同时，同步恢复活动回合
+            // 内部 .turn-body 的贴底跟随并重新激活全局贴底锁定
+            if (el) el.scrollTop = el.scrollHeight;
+            store.jumpToBottom();
           }}
         >
           ↓

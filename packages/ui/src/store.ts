@@ -71,6 +71,9 @@ export interface ModelSwitchPending {
   currentTokens: number;
 }
 
+/** 自适应追赶阈值（TODOS #45）：距上次渲染累积的待推送字符超过该值时，立即升级为同步刷新一次性追平 */
+const CATCHUP_PENDING_CHARS = 80;
+
 /**
  * 应用状态仓库（框架无关，React 通过 useSyncExternalStore 订阅）。
  * AgentEvent 流是唯一的事实来源：事件驱动地增量更新时间线。
@@ -117,6 +120,8 @@ export class AppStore {
   private rafId: number | null = null;
   private timerId: ReturnType<typeof setTimeout> | null = null;
   private turnItemSet = new WeakSet<object>();
+  /** 距上次实际渲染累积的流式字符数（自适应追赶的堆积深度指标，TODOS #45） */
+  private pendingDeltaChars = 0;
 
   subscribe = (listener: () => void): (() => void) => {
     this.listeners.add(listener);
@@ -135,8 +140,18 @@ export class AppStore {
     });
   }
 
-  /** 调度合并通知：在高频流式 delta 时将多帧合并为单次 RAF / 50ms 刷新，消灭每秒几十次的全树重渲 */
+  /**
+   * 调度合并通知：在高频流式 delta 时将多帧合并为单次 RAF / 50ms 刷新，消灭每秒几十次的全树重渲。
+   * 自适应追赶（TODOS #45）：待渲染字符积压超过阈值说明渲染节奏跟不上模型输出速度，
+   * 立即升级为同步刷新一次性追平最新进度，杜绝「慢速打字机」式滞后；
+   * 窗口隐藏等导致 rAF 长时间不投递的场景同样由此兜底持续推进。
+   */
   scheduleNotify(): void {
+    if (this.pendingDeltaChars >= CATCHUP_PENDING_CHARS) {
+      this.flushPendingNotify();
+      this.notify(false);
+      return;
+    }
     if (this.rafId !== null || this.timerId !== null) return;
     if (typeof requestAnimationFrame === 'function') {
       this.rafId = requestAnimationFrame(() => {
@@ -165,6 +180,7 @@ export class AppStore {
 
   notify(structural = false): void {
     this.flushPendingNotify();
+    this.pendingDeltaChars = 0;
     if (structural) {
       this.structureVersion++;
     }
@@ -717,14 +733,26 @@ export class AppStore {
 
   /** 发送时递增，驱动会话区滚动到底部 */
   scrollTick = 0;
-  /** 贴底跟随：true=位于底部跟随输出；用户上翻后为 false，停止跟随 */
+  /**
+   * 贴底跟随锁定（isPinnedToBottom，TODOS #46）：true=视口贴底跟随最新输出；
+   * 用户主动上翻翻看历史即解除锁定（false），进入自由阅读模式。
+   */
   atBottom = true;
+  /** 「回到底部」联动信号（TODOS #46）：递增驱动活动回合内部视窗同步贴底并恢复跟随 */
+  jumpTick = 0;
 
   setAtBottom(v: boolean): void {
     if (this.atBottom !== v) {
       this.atBottom = v;
       this.notify(false);
     }
+  }
+
+  /** 一键回到底部（TODOS #46）：外层视口贴底 + 联动信号通知活动回合内部视窗同步贴底并重新锁定跟随 */
+  jumpToBottom(): void {
+    this.jumpTick++;
+    this.atBottom = true;
+    this.notify(false);
   }
 
   async send(text: string): Promise<void> {
@@ -789,7 +817,10 @@ export class AppStore {
     state.running = true;
     state.status = 'running';
     this.syncActiveState(state);
-    if (this.autoScrollOn) this.scrollTick++;
+    if (this.autoScrollOn) {
+      this.scrollTick++;
+      this.atBottom = true;
+    }
     this.notify(true);
     try {
       await this.client.editLastUserMessage(id, text);
@@ -1130,6 +1161,7 @@ export class AppStore {
     const last = item.blocks.at(-1);
     if (last && last.type === type) last.text += delta;
     else item.blocks.push({ type, text: delta });
+    this.pendingDeltaChars += delta.length;
     if (state.currentTurn && !state.turnItemSet.has(item)) {
       state.currentTurn.items.push(item);
       state.turnItemSet.add(item);
