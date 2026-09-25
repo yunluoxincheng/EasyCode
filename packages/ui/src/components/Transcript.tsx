@@ -689,9 +689,11 @@ function TurnView({ turn }: { turn: TurnItem }) {
     el.scrollTop = el.scrollHeight;
   }, [turn.items.length, store.version, live, expanded]);
 
-  // 「↓ 回到底部」双层视口联动（TODOS #46）：重新锁定局部贴底跟随并同步内部视窗至最底
+  // 「↓ 回到底部」双层视口联动（TODOS #46）：仅在显式联动信号时重置局部贴底锁定
+  // 并同步内部视窗至最底；挂载与状态切换不做无条件重置，保留用户上翻阅读的意图
+  // （初始贴底由上方的常规跟随 effect 负责）
   useEffect(() => {
-    if (!live) return;
+    if (!store.jumpTick || !live) return;
     localAtBottomRef.current = true;
     const el = bodyRef.current;
     if (el) el.scrollTop = el.scrollHeight;
@@ -700,7 +702,8 @@ function TurnView({ turn }: { turn: TurnItem }) {
   const onBodyScroll = () => {
     const el = bodyRef.current;
     if (!el) return;
-    const isAtBottom = el.scrollTop >= el.scrollHeight - el.clientHeight - 40;
+    // 与外层同理只用极小容差：小幅上滚不得被滚动事件重判回贴底（TODOS #46）
+    const isAtBottom = el.scrollTop >= el.scrollHeight - el.clientHeight - 4;
     localAtBottomRef.current = isAtBottom;
   };
 
@@ -866,13 +869,15 @@ export function Transcript() {
     }
   });
 
-  // 滚动位置 → 贴底状态（贴近底部=跟随；离开=自由阅读）
+  // 滚动位置 → 贴底状态。重新锁定只认「真正滚回最底」（极小容差）：
+  // 若用大容差（如 80px）判定，小幅上滚会被紧随的 scroll 事件误判回贴底，
+  // 再被贴底跟随器拉回底部，用户上翻意图被吞掉（TODOS #46）
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
     const onScroll = (): void => {
       const max = el.scrollHeight - el.clientHeight;
-      store.setAtBottom(el.scrollTop >= max - 80);
+      store.setAtBottom(el.scrollTop >= max - 4);
     };
     // 滚轮向上：立即脱离跟随（避免子容器如 .turn-body 的内部滚动误触发外层脱离跟随）
     const onWheel = (e: WheelEvent): void => {

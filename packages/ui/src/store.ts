@@ -73,6 +73,8 @@ export interface ModelSwitchPending {
 
 /** 自适应追赶阈值（TODOS #45）：距上次渲染累积的待推送字符超过该值时，立即升级为同步刷新一次性追平 */
 const CATCHUP_PENDING_CHARS = 80;
+/** 追赶同步刷新的最小间隔（ms）：封顶在显示帧率量级，保证追赶节奏永远不会比正常 RAF 更频繁 */
+const CATCHUP_FLUSH_MIN_INTERVAL_MS = 16;
 
 /**
  * 应用状态仓库（框架无关，React 通过 useSyncExternalStore 订阅）。
@@ -122,6 +124,8 @@ export class AppStore {
   private turnItemSet = new WeakSet<object>();
   /** 距上次实际渲染累积的流式字符数（自适应追赶的堆积深度指标，TODOS #45） */
   private pendingDeltaChars = 0;
+  /** 上次追赶同步刷新的时间戳（限速用，TODOS #45） */
+  private lastCatchupAt = 0;
 
   subscribe = (listener: () => void): (() => void) => {
     this.listeners.add(listener);
@@ -148,9 +152,15 @@ export class AppStore {
    */
   scheduleNotify(): void {
     if (this.pendingDeltaChars >= CATCHUP_PENDING_CHARS) {
-      this.flushPendingNotify();
-      this.notify(false);
-      return;
+      // 追赶刷新限速：积压严重时立即同步追平，但最小间隔 16ms，
+      // 刷新频率封顶在显示帧率量级，高吞吐下只减滞后、绝不增加渲染负担
+      const now = Date.now();
+      if (now - this.lastCatchupAt >= CATCHUP_FLUSH_MIN_INTERVAL_MS) {
+        this.lastCatchupAt = now;
+        this.flushPendingNotify();
+        this.notify(false);
+        return;
+      }
     }
     if (this.rafId !== null || this.timerId !== null) return;
     if (typeof requestAnimationFrame === 'function') {
