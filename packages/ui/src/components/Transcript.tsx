@@ -14,7 +14,7 @@ import type {
   ViewBlock,
 } from '../store.js';
 
-/** Markdown 渲染（含代码块样式钩子 + React.memo 浅比对优化）；streaming 时走轻量渲染跳过代码高亮正则（TODOS #45） */
+/** Markdown 渲染（含代码块样式钩子 + React.memo 浅比对优化）；streaming 时未闭合代码块跳过高亮分词（TODOS #45） */
 const Md = memo(function Md({ text, streaming = false }: { text: string; streaming?: boolean }) {
   return <div className="md" dangerouslySetInnerHTML={{ __html: renderMarkdown(text, streaming) }} />;
 });
@@ -705,12 +705,16 @@ function TurnView({ turn }: { turn: TurnItem }) {
     // 与外层同理只用极小容差：小幅上滚不得被滚动事件重判回贴底（TODOS #46）
     const isAtBottom = el.scrollTop >= el.scrollHeight - el.clientHeight - 4;
     localAtBottomRef.current = isAtBottom;
+    // 内层视窗贴底状态独立上报（仅 live 回合）：外层贴底但内层上翻时，
+    // 「↓ 回到底部」按钮同样必须可达——这是双层视口闭环的关键（TODOS #46）
+    if (live) store.setTurnAtBottom(isAtBottom);
   };
 
   const onBodyWheel = (e: React.WheelEvent) => {
     e.stopPropagation();
     if (e.deltaY < 0) {
       localAtBottomRef.current = false;
+      if (live) store.setTurnAtBottom(false);
     }
   };
 
@@ -863,9 +867,13 @@ export function Transcript() {
   useEffect(() => {
     const wasRunning = wasRunningRef.current;
     wasRunningRef.current = store.running;
-    if (wasRunning && !store.running && store.atBottom && store.autoScrollOn) {
-      const el = scrollRef.current;
-      if (el) el.scrollTop = el.scrollHeight;
+    if (wasRunning && !store.running) {
+      // 内部视窗随回合折叠消失：内层贴底状态回归默认，避免「↓」按钮滞留误显
+      store.setTurnAtBottom(true);
+      if (store.atBottom && store.autoScrollOn) {
+        const el = scrollRef.current;
+        if (el) el.scrollTop = el.scrollHeight;
+      }
     }
   });
 
@@ -1077,7 +1085,8 @@ export function Transcript() {
           </div>
         )}
       </div>
-      {!store.atBottom && store.items.length > 0 && (
+      {/* 内外视口任一离开底部即显示「↓」：外层上翻，或外层贴底但活动回合内层上翻（TODOS #46 双层闭环） */}
+      {(!store.atBottom || !store.turnAtBottom) && store.items.length > 0 && (
         <button
           className="jump-bottom"
           title="回到底部"

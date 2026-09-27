@@ -71,11 +71,6 @@ export interface ModelSwitchPending {
   currentTokens: number;
 }
 
-/** 自适应追赶阈值（TODOS #45）：距上次渲染累积的待推送字符超过该值时，立即升级为同步刷新一次性追平 */
-const CATCHUP_PENDING_CHARS = 80;
-/** 追赶同步刷新的最小间隔（ms）：封顶在显示帧率量级，保证追赶节奏永远不会比正常 RAF 更频繁 */
-const CATCHUP_FLUSH_MIN_INTERVAL_MS = 16;
-
 /**
  * 应用状态仓库（框架无关，React 通过 useSyncExternalStore 订阅）。
  * AgentEvent 流是唯一的事实来源：事件驱动地增量更新时间线。
@@ -122,10 +117,6 @@ export class AppStore {
   private rafId: number | null = null;
   private timerId: ReturnType<typeof setTimeout> | null = null;
   private turnItemSet = new WeakSet<object>();
-  /** 距上次实际渲染累积的流式字符数（自适应追赶的堆积深度指标，TODOS #45） */
-  private pendingDeltaChars = 0;
-  /** 上次追赶同步刷新的时间戳（限速用，TODOS #45） */
-  private lastCatchupAt = 0;
 
   subscribe = (listener: () => void): (() => void) => {
     this.listeners.add(listener);
@@ -146,22 +137,10 @@ export class AppStore {
 
   /**
    * 调度合并通知：在高频流式 delta 时将多帧合并为单次 RAF / 50ms 刷新，消灭每秒几十次的全树重渲。
-   * 自适应追赶（TODOS #45）：待渲染字符积压超过阈值说明渲染节奏跟不上模型输出速度，
-   * 立即升级为同步刷新一次性追平最新进度，杜绝「慢速打字机」式滞后；
-   * 窗口隐藏等导致 rAF 长时间不投递的场景同样由此兜底持续推进。
+   * delta 在事件回调里即时合入 state，这里只合并「渲染」——不存在待渲染数据积压，
+   * 勿在此添加基于积压的强制同步刷新：主线程饱和或窗口隐藏时只会增加无谓渲染（TODOS #45 审查结论）。
    */
   scheduleNotify(): void {
-    if (this.pendingDeltaChars >= CATCHUP_PENDING_CHARS) {
-      // 追赶刷新限速：积压严重时立即同步追平，但最小间隔 16ms，
-      // 刷新频率封顶在显示帧率量级，高吞吐下只减滞后、绝不增加渲染负担
-      const now = Date.now();
-      if (now - this.lastCatchupAt >= CATCHUP_FLUSH_MIN_INTERVAL_MS) {
-        this.lastCatchupAt = now;
-        this.flushPendingNotify();
-        this.notify(false);
-        return;
-      }
-    }
     if (this.rafId !== null || this.timerId !== null) return;
     if (typeof requestAnimationFrame === 'function') {
       this.rafId = requestAnimationFrame(() => {
@@ -190,7 +169,6 @@ export class AppStore {
 
   notify(structural = false): void {
     this.flushPendingNotify();
-    this.pendingDeltaChars = 0;
     if (structural) {
       this.structureVersion++;
     }
@@ -396,6 +374,8 @@ export class AppStore {
   async selectSession(id: string): Promise<void> {
     const seq = ++this.selectSeq;
     this.flushPendingNotify();
+    // 切换会话即重建视图：内层视窗贴底状态回归默认锁定（新渲染的 live 回合默认贴底跟随）
+    this.turnAtBottom = true;
 
     // 1. 若目标会话已在状态池中，立即切换呈现（0ms 零白屏、切回运行态即时可见）
     let state = this.sessionStates.get(id);
@@ -744,10 +724,16 @@ export class AppStore {
   /** 发送时递增，驱动会话区滚动到底部 */
   scrollTick = 0;
   /**
-   * 贴底跟随锁定（isPinnedToBottom，TODOS #46）：true=视口贴底跟随最新输出；
+   * 外层主视口贴底锁定（TODOS #46）：true=视口贴底跟随最新输出；
    * 用户主动上翻翻看历史即解除锁定（false），进入自由阅读模式。
    */
   atBottom = true;
+  /**
+   * 活动回合内部视窗（.turn-body）贴底锁定（TODOS #46）：与外层状态相互独立——
+   * 用户可能在外层贴底的同时于内层视窗上翻，「↓ 回到底部」按钮需任一视口离开底部即出现。
+   * 仅由 live 回合的内层滚动/滚轮事件驱动；无 live 回合时恒为 true。
+   */
+  turnAtBottom = true;
   /** 「回到底部」联动信号（TODOS #46）：递增驱动活动回合内部视窗同步贴底并恢复跟随 */
   jumpTick = 0;
 
@@ -758,10 +744,18 @@ export class AppStore {
     }
   }
 
+  setTurnAtBottom(v: boolean): void {
+    if (this.turnAtBottom !== v) {
+      this.turnAtBottom = v;
+      this.notify(false);
+    }
+  }
+
   /** 一键回到底部（TODOS #46）：外层视口贴底 + 联动信号通知活动回合内部视窗同步贴底并重新锁定跟随 */
   jumpToBottom(): void {
     this.jumpTick++;
     this.atBottom = true;
+    this.turnAtBottom = true;
     this.notify(false);
   }
 
@@ -783,6 +777,7 @@ export class AppStore {
     state.items.push(turn);
     state.currentTurn = turn;
     this.syncActiveState(state);
+    this.turnAtBottom = true;
     if (this.autoScrollOn) {
       this.scrollTick++;
       this.atBottom = true;
@@ -827,6 +822,7 @@ export class AppStore {
     state.running = true;
     state.status = 'running';
     this.syncActiveState(state);
+    this.turnAtBottom = true;
     if (this.autoScrollOn) {
       this.scrollTick++;
       this.atBottom = true;
@@ -1171,7 +1167,6 @@ export class AppStore {
     const last = item.blocks.at(-1);
     if (last && last.type === type) last.text += delta;
     else item.blocks.push({ type, text: delta });
-    this.pendingDeltaChars += delta.length;
     if (state.currentTurn && !state.turnItemSet.has(item)) {
       state.currentTurn.items.push(item);
       state.turnItemSet.add(item);
