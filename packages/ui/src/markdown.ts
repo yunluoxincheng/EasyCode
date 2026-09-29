@@ -47,20 +47,20 @@ let streamingParse = false;
 
 /**
  * 围栏代码块是否已闭合（遵循 CommonMark 规范）：
- * 1. 开栏行允许 0-3 个前导空格，接着至少 3 个相同围栏字符（` 或 ~），后跟可选 info string；
- * 2. 闭栏行必须使用相同围栏字符，长度至少等于开栏长度，且其后除 0-3 个前导空格与行尾空白外不得带任何字符；
+ * 1. 开栏行允许 0-3 个前导空格（不含 Tab），接着至少 3 个相同围栏字符（` 或 ~），后跟可选 info string；
+ * 2. 闭栏行必须使用相同围栏字符，长度至少等于开栏长度，且其后除 0-3 个前导空格与行尾空白（空格/Tab）外不得带任何字符；
  * 3. 内部包含更短的围栏示例（如 4 个反引号内包含 3 个反引号示例）不能误判为闭合（TODOS #45）。
  */
 function fenceClosed(raw: string): boolean {
   const lines = raw.split('\n');
   if (lines.length < 2) return false;
-  const openMatch = lines[0].match(/^[ \t]{0,3}(`{3,}|~{3,})/);
+  const openMatch = lines[0].match(/^ {0,3}(`{3,}|~{3,})/);
   if (!openMatch) return true; // 缩进代码块无围栏，天然闭合
   const openFence = openMatch[1];
   const char = openFence[0]; // '`' 或 '~'
   const minLength = openFence.length;
-  // closing fence：0-3 个前导空格，至少 minLength 个相同字符，其后除可选空白外无其它字符
-  const closeRegex = new RegExp(`^[ \\t]{0,3}${char}{${minLength},}[ \\t]*$`);
+  // closing fence：0-3 个前导空格（不含 Tab），至少 minLength 个相同字符，其后仅允许可选行尾空白
+  const closeRegex = new RegExp(`^ {0,3}${char}{${minLength},}[ \\t]*$`);
   return lines.slice(1).some((l) => closeRegex.test(l));
 }
 
