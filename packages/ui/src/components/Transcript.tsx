@@ -14,9 +14,9 @@ import type {
   ViewBlock,
 } from '../store.js';
 
-/** Markdown 渲染（含代码块样式钩子 + React.memo 浅比对优化） */
-const Md = memo(function Md({ text }: { text: string }) {
-  return <div className="md" dangerouslySetInnerHTML={{ __html: renderMarkdown(text) }} />;
+/** Markdown 渲染（含代码块样式钩子 + React.memo 浅比对优化）；streaming 时未闭合代码块跳过高亮分词（TODOS #45） */
+const Md = memo(function Md({ text, streaming = false }: { text: string; streaming?: boolean }) {
+  return <div className="md" dangerouslySetInnerHTML={{ __html: renderMarkdown(text, streaming) }} />;
 });
 
 /** 思考过程折叠卡片：统一终端极客风、支持吸顶、一键复制与字符统计 */
@@ -374,7 +374,13 @@ function TodoCard({ item }: { item: ToolItem }) {
   );
 }
 
-function ItemView({ item }: { item: AssistantItem | ToolItem | ApprovalItem | ErrorItem }) {
+function ItemView({
+  item,
+  streaming = false,
+}: {
+  item: AssistantItem | ToolItem | ApprovalItem | ErrorItem;
+  streaming?: boolean;
+}) {
   switch (item.kind) {
     case 'assistant': {
       // 思考过程已统一汇聚在回合顶部单一呈现，此处仅渲染助手实际回复的正文文本；无文本时不渲染空外框
@@ -384,7 +390,7 @@ function ItemView({ item }: { item: AssistantItem | ToolItem | ApprovalItem | Er
         <div className="msg assistant">
           <div className="msg-content">
             {textBlocks.map((b: ViewBlock, idx: number) => (
-              <Md key={idx} text={b.text} />
+              <Md key={idx} text={b.text} streaming={streaming && b.type === 'text'} />
             ))}
           </div>
         </div>
@@ -683,19 +689,42 @@ function TurnView({ turn }: { turn: TurnItem }) {
     el.scrollTop = el.scrollHeight;
   }, [turn.items.length, store.version, live, expanded]);
 
+  // 「↓ 回到底部」双层视口联动（TODOS #46）：仅在显式联动信号时重置局部贴底锁定
+  // 并同步内部视窗至最底；挂载与状态切换不做无条件重置，保留用户上翻阅读的意图
+  // （初始贴底由上方的常规跟随 effect 负责）
+  useEffect(() => {
+    if (!store.jumpTick || !live) return;
+    localAtBottomRef.current = true;
+    const el = bodyRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [store.jumpTick, live]);
+
   const onBodyScroll = () => {
     const el = bodyRef.current;
     if (!el) return;
-    const isAtBottom = el.scrollTop >= el.scrollHeight - el.clientHeight - 40;
+    // 与外层同理只用极小容差：小幅上滚不得被滚动事件重判回贴底（TODOS #46）
+    const isAtBottom = el.scrollTop >= el.scrollHeight - el.clientHeight - 4;
     localAtBottomRef.current = isAtBottom;
+    // 内层视窗贴底状态独立上报（仅 live 回合）：外层贴底但内层上翻时，
+    // 「↓ 回到底部」按钮同样必须可达——这是双层视口闭环的关键（TODOS #46）
+    if (live) store.setTurnAtBottom(isAtBottom);
   };
 
   const onBodyWheel = (e: React.WheelEvent) => {
     e.stopPropagation();
     if (e.deltaY < 0) {
       localAtBottomRef.current = false;
+      if (live) store.setTurnAtBottom(false);
     }
   };
+
+  // 流式中的助手条目（TODOS #45）：回合 live 时持续接收文本增量的助手总位于条目末尾，
+  // 对其走轻量渲染（跳过代码高亮正则）；其余已定型条目走完整渲染并命中缓存
+  const streamingAssistantId = (() => {
+    if (!live) return null;
+    const last = turn.items.at(-1);
+    return last && last.kind === 'assistant' ? last.id : null;
+  })();
 
   const latestTodoTool = turn.items
     .slice()
@@ -755,7 +784,7 @@ function TurnView({ turn }: { turn: TurnItem }) {
           {live && <LiveTicker />}
           {allThinking ? <Thinking text={allThinking} live={live} /> : null}
           {turn.items.map((it) => (
-            <ItemView key={it.id} item={it} />
+            <ItemView key={it.id} item={it} streaming={it.id === streamingAssistantId} />
           ))}
         </div>
       )}
@@ -802,13 +831,60 @@ export function Transcript() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [store.scrollTick, store.activeId]);
 
-  // 滚动位置 → 贴底状态（贴近底部=跟随；离开=自由阅读）
+  // 智能贴底跟随（TODOS #46）：贴底锁定态下内容高度膨胀（新回合创建、工具卡片加入、
+  // 文本增量增长、回合折叠）经 ResizeObserver 捕获后自动无感跟进；
+  // 用户主动上翻即解除锁定（atBottom=false），进入自由阅读模式，绝不被拉回底部
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    let raf = 0;
+    const followIfPinned = (): void => {
+      raf = 0;
+      if (!store.autoScrollOn || !store.atBottom) return;
+      el.scrollTop = el.scrollHeight;
+    };
+    const ro = new ResizeObserver(() => {
+      if (raf) return;
+      raf = requestAnimationFrame(followIfPinned);
+    });
+    const observeChildren = (): void => {
+      for (const child of Array.from(el.children)) ro.observe(child);
+    };
+    observeChildren();
+    const mo = new MutationObserver(observeChildren);
+    mo.observe(el, { childList: true });
+    return () => {
+      if (raf) cancelAnimationFrame(raf);
+      ro.disconnect();
+      mo.disconnect();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [store.activeId]);
+
+  // 回合完结自动对齐（TODOS #46）：运行结束、回合由展开态折叠为最终文本时精准校准视口，
+  // 保证最终结果完整呈现在可视区域内（高度收缩同样会被贴底跟随器捕获，此处为确定性兜底；
+  // 内层 turnAtBottom 状态复位统一由 Store 在生命周期中维护，不受组件挂载/卸载影响）
+  const wasRunningRef = useRef(false);
+  useEffect(() => {
+    const wasRunning = wasRunningRef.current;
+    wasRunningRef.current = store.running;
+    if (wasRunning && !store.running) {
+      if (store.atBottom && store.autoScrollOn) {
+        const el = scrollRef.current;
+        if (el) el.scrollTop = el.scrollHeight;
+      }
+    }
+  });
+
+  // 滚动位置 → 贴底状态。重新锁定只认「真正滚回最底」（极小容差）：
+  // 若用大容差（如 80px）判定，小幅上滚会被紧随的 scroll 事件误判回贴底，
+  // 再被贴底跟随器拉回底部，用户上翻意图被吞掉（TODOS #46）
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
     const onScroll = (): void => {
       const max = el.scrollHeight - el.clientHeight;
-      store.setAtBottom(el.scrollTop >= max - 80);
+      store.setAtBottom(el.scrollTop >= max - 4);
     };
     // 滚轮向上：立即脱离跟随（避免子容器如 .turn-body 的内部滚动误触发外层脱离跟随）
     const onWheel = (e: WheelEvent): void => {
@@ -1008,15 +1084,17 @@ export function Transcript() {
           </div>
         )}
       </div>
-      {!store.atBottom && store.items.length > 0 && (
+      {/* 内外视口任一离开底部即显示「↓」：外层上翻，或外层贴底但活动回合内层上翻（TODOS #46 双层闭环） */}
+      {(!store.atBottom || !store.turnAtBottom) && store.items.length > 0 && (
         <button
           className="jump-bottom"
           title="回到底部"
           onClick={() => {
             const el = scrollRef.current;
-            if (!el) return;
-            el.scrollTop = el.scrollHeight;
-            store.setAtBottom(true);
+            // 双层视口联动（TODOS #46）：外层主视口贴底的同时，同步恢复活动回合
+            // 内部 .turn-body 的贴底跟随并重新激活全局贴底锁定
+            if (el) el.scrollTop = el.scrollHeight;
+            store.jumpToBottom();
           }}
         >
           ↓

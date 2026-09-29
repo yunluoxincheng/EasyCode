@@ -135,7 +135,11 @@ export class AppStore {
     });
   }
 
-  /** 调度合并通知：在高频流式 delta 时将多帧合并为单次 RAF / 50ms 刷新，消灭每秒几十次的全树重渲 */
+  /**
+   * 调度合并通知：在高频流式 delta 时将多帧合并为单次 RAF / 50ms 刷新，消灭每秒几十次的全树重渲。
+   * delta 在事件回调里即时合入 state，这里只合并「渲染」——不存在待渲染数据积压，
+   * 勿在此添加基于积压的强制同步刷新：主线程饱和或窗口隐藏时只会增加无谓渲染（TODOS #45 审查结论）。
+   */
   scheduleNotify(): void {
     if (this.rafId !== null || this.timerId !== null) return;
     if (typeof requestAnimationFrame === 'function') {
@@ -370,6 +374,8 @@ export class AppStore {
   async selectSession(id: string): Promise<void> {
     const seq = ++this.selectSeq;
     this.flushPendingNotify();
+    // 切换会话即重建视图：内层视窗贴底状态回归默认锁定（新渲染的 live 回合默认贴底跟随）
+    this.turnAtBottom = true;
 
     // 1. 若目标会话已在状态池中，立即切换呈现（0ms 零白屏、切回运行态即时可见）
     let state = this.sessionStates.get(id);
@@ -513,6 +519,9 @@ export class AppStore {
 
   openChat(): void {
     this.view = 'chat';
+    if (!this.running) {
+      this.turnAtBottom = true;
+    }
     this.notify();
   }
 
@@ -665,6 +674,7 @@ export class AppStore {
       this.currentTurn = null;
       this.activeTodos = [];
       this.running = false;
+      this.turnAtBottom = true;
       if (this.sessions.length > 0) await this.selectSession(this.sessions[0].id);
     }
     this.notify(true);
@@ -717,14 +727,40 @@ export class AppStore {
 
   /** 发送时递增，驱动会话区滚动到底部 */
   scrollTick = 0;
-  /** 贴底跟随：true=位于底部跟随输出；用户上翻后为 false，停止跟随 */
+  /**
+   * 外层主视口贴底锁定（TODOS #46）：true=视口贴底跟随最新输出；
+   * 用户主动上翻翻看历史即解除锁定（false），进入自由阅读模式。
+   */
   atBottom = true;
+  /**
+   * 活动回合内部视窗（.turn-body）贴底锁定（TODOS #46）：与外层状态相互独立——
+   * 用户可能在外层贴底的同时于内层视窗上翻，「↓ 回到底部」按钮需任一视口离开底部即出现。
+   * 仅由 live 回合的内层滚动/滚轮事件驱动；无 live 回合时恒为 true。
+   */
+  turnAtBottom = true;
+  /** 「回到底部」联动信号（TODOS #46）：递增驱动活动回合内部视窗同步贴底并恢复跟随 */
+  jumpTick = 0;
 
   setAtBottom(v: boolean): void {
     if (this.atBottom !== v) {
       this.atBottom = v;
       this.notify(false);
     }
+  }
+
+  setTurnAtBottom(v: boolean): void {
+    if (this.turnAtBottom !== v) {
+      this.turnAtBottom = v;
+      this.notify(false);
+    }
+  }
+
+  /** 一键回到底部（TODOS #46）：外层视口贴底 + 联动信号通知活动回合内部视窗同步贴底并重新锁定跟随 */
+  jumpToBottom(): void {
+    this.jumpTick++;
+    this.atBottom = true;
+    this.turnAtBottom = true;
+    this.notify(false);
   }
 
   async send(text: string): Promise<void> {
@@ -745,6 +781,7 @@ export class AppStore {
     state.items.push(turn);
     state.currentTurn = turn;
     this.syncActiveState(state);
+    this.turnAtBottom = true;
     if (this.autoScrollOn) {
       this.scrollTick++;
       this.atBottom = true;
@@ -762,7 +799,10 @@ export class AppStore {
       else state.items.push(errorItem);
       state.running = false;
       state.status = 'error';
-      if (this.activeId === id) this.syncActiveState(state);
+      if (this.activeId === id) {
+        this.syncActiveState(state);
+        this.turnAtBottom = true;
+      }
       this.notify(true);
     }
   }
@@ -789,7 +829,11 @@ export class AppStore {
     state.running = true;
     state.status = 'running';
     this.syncActiveState(state);
-    if (this.autoScrollOn) this.scrollTick++;
+    this.turnAtBottom = true;
+    if (this.autoScrollOn) {
+      this.scrollTick++;
+      this.atBottom = true;
+    }
     this.notify(true);
     try {
       await this.client.editLastUserMessage(id, text);
@@ -803,7 +847,10 @@ export class AppStore {
       else state.items.push(errorItem);
       state.running = false;
       state.status = 'error';
-      if (this.activeId === id) this.syncActiveState(state);
+      if (this.activeId === id) {
+        this.syncActiveState(state);
+        this.turnAtBottom = true;
+      }
       this.notify(true);
     }
   }
@@ -825,6 +872,7 @@ export class AppStore {
       state.status = 'idle';
       if (id === this.activeId) {
         this.syncActiveState(state);
+        this.turnAtBottom = true;
       }
     }
     await this.client.abort(id);
@@ -1104,6 +1152,7 @@ export class AppStore {
         }
         if (isActive) {
           this.syncActiveState(state);
+          this.turnAtBottom = true;
           this.notify(true);
         } else {
           const sessionTitle = this.sessions.find((s) => s.id === sessionId)?.title || '后台会话';
