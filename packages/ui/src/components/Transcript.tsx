@@ -862,14 +862,13 @@ export function Transcript() {
   }, [store.activeId]);
 
   // 回合完结自动对齐（TODOS #46）：运行结束、回合由展开态折叠为最终文本时精准校准视口，
-  // 保证最终结果完整呈现在可视区域内（高度收缩同样会被贴底跟随器捕获，此处为确定性兜底）
+  // 保证最终结果完整呈现在可视区域内（高度收缩同样会被贴底跟随器捕获，此处为确定性兜底；
+  // 内层 turnAtBottom 状态复位统一由 Store 在生命周期中维护，不受组件挂载/卸载影响）
   const wasRunningRef = useRef(false);
   useEffect(() => {
     const wasRunning = wasRunningRef.current;
     wasRunningRef.current = store.running;
     if (wasRunning && !store.running) {
-      // 内部视窗随回合折叠消失：内层贴底状态回归默认，避免「↓」按钮滞留误显
-      store.setTurnAtBottom(true);
       if (store.atBottom && store.autoScrollOn) {
         const el = scrollRef.current;
         if (el) el.scrollTop = el.scrollHeight;

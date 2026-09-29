@@ -519,6 +519,9 @@ export class AppStore {
 
   openChat(): void {
     this.view = 'chat';
+    if (!this.running) {
+      this.turnAtBottom = true;
+    }
     this.notify();
   }
 
@@ -671,6 +674,7 @@ export class AppStore {
       this.currentTurn = null;
       this.activeTodos = [];
       this.running = false;
+      this.turnAtBottom = true;
       if (this.sessions.length > 0) await this.selectSession(this.sessions[0].id);
     }
     this.notify(true);
@@ -795,7 +799,10 @@ export class AppStore {
       else state.items.push(errorItem);
       state.running = false;
       state.status = 'error';
-      if (this.activeId === id) this.syncActiveState(state);
+      if (this.activeId === id) {
+        this.syncActiveState(state);
+        this.turnAtBottom = true;
+      }
       this.notify(true);
     }
   }
@@ -840,7 +847,10 @@ export class AppStore {
       else state.items.push(errorItem);
       state.running = false;
       state.status = 'error';
-      if (this.activeId === id) this.syncActiveState(state);
+      if (this.activeId === id) {
+        this.syncActiveState(state);
+        this.turnAtBottom = true;
+      }
       this.notify(true);
     }
   }
@@ -862,6 +872,7 @@ export class AppStore {
       state.status = 'idle';
       if (id === this.activeId) {
         this.syncActiveState(state);
+        this.turnAtBottom = true;
       }
     }
     await this.client.abort(id);
@@ -1141,6 +1152,7 @@ export class AppStore {
         }
         if (isActive) {
           this.syncActiveState(state);
+          this.turnAtBottom = true;
           this.notify(true);
         } else {
           const sessionTitle = this.sessions.find((s) => s.id === sessionId)?.title || '后台会话';
