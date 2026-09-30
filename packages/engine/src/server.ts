@@ -32,6 +32,9 @@ import {
   type DecisionPolicy,
   type DecisionStats,
   type ProjectDecisionTree,
+  BackgroundTaskManager,
+  type BackgroundTaskInfo,
+  type SpawnedProcessInfo,
 } from '@easycode/core';
 import { Settings, DEFAULT_SETTINGS, PROVIDER_PRESETS } from './settings.js';
 import type { ModelTestResult, ProviderEntry, ProviderModel, ProviderModelInfo } from './settings.js';
@@ -88,6 +91,8 @@ export class AgentServer {
   private sessions = new Map<string, SessionRuntime>();
   private readonly events = new Emitter<SessionEventPayload>();
   private readonly workspaceLocks = new WorkspaceLockManager();
+  /** 会话绑定的后台任务池（TODOS #37）：懒创建，会话删除/应用退出统一清场 */
+  private readonly bgManagers = new Map<string, BackgroundTaskManager>();
   private readonly decisionStats: DecisionStatsManager;
   private reflexPolicy: DecisionPolicy = new NoopDecisionPolicy();
   private settings: Settings = structuredClone(DEFAULT_SETTINGS);
@@ -315,6 +320,14 @@ export class AgentServer {
   async deleteSession(id: string): Promise<void> {
     this.abort(id);
     this.sessions.delete(id);
+    // 会话删除同步终止其全部后台任务，杜绝僵尸进程与孤儿端口（TODOS #37）
+    const bg = this.bgManagers.get(id);
+    this.bgManagers.delete(id);
+    try {
+      await bg?.disposeAll();
+    } catch {
+      // 清理失败不阻断删除
+    }
     try {
       await this.host.fs.unlink?.(this.sessionFile(id));
       await this.decisionStats.deleteSessionRecords(id);
@@ -456,6 +469,7 @@ export class AgentServer {
         signal: rt.controller.signal,
         approval: rt.approval,
         policy,
+        backgroundTasks: await this.bgManagerFor(id),
         emit: (event) => {
           if (event.type === 'step_end') {
             // 累计会话用量并随事件下发（持久化在会话文件中）
@@ -601,6 +615,81 @@ export class AgentServer {
   }
 
   /* -------------------- 内部 -------------------- */
+
+  /**
+   * 获取（或懒创建）会话绑定的后台任务管理器（TODOS #37）。
+   * 首次创建时从宿主恢复接管仍存活的进程（WebView 重载后的孤儿任务归属回原会话）。
+   */
+  private async bgManagerFor(sessionId: string): Promise<BackgroundTaskManager> {
+    let manager = this.bgManagers.get(sessionId);
+    if (!manager) {
+      manager = new BackgroundTaskManager(this.host, {
+        scope: sessionId,
+        onEvent: (event) => this.events.emit({ sessionId, event }),
+      });
+      this.bgManagers.set(sessionId, manager);
+      try {
+        const spawned = await this.host.process.listSpawned?.();
+        if (spawned?.length) manager.adopt(spawned as SpawnedProcessInfo[]);
+      } catch {
+        // 宿主不支持恢复接管时忽略
+      }
+    }
+    return manager;
+  }
+
+  /* -------------------- 后台任务与端口探测 (TODOS #37) -------------------- */
+
+  /** 列出会话的后台任务（含主服务地址的端口探活刷新） */
+  async listBackgroundTasks(sessionId: string): Promise<BackgroundTaskInfo[]> {
+    const manager = await this.bgManagerFor(sessionId);
+    const list = manager.list();
+    // 仅对运行中且有服务地址的任务做探活（manager 内部有 TTL 缓存，轮询无压力）
+    for (const task of list) {
+      if (task.status === 'running' && task.primaryUrl) {
+        await manager.probe(task.id);
+      }
+    }
+    return manager.list();
+  }
+
+  /** 读取后台任务日志尾部 */
+  async getTaskLogs(sessionId: string, taskId: string, tailLines?: number): Promise<string> {
+    const manager = await this.bgManagerFor(sessionId);
+    const text = manager.logs(taskId, tailLines);
+    if (text === undefined) throw new Error(`后台任务不存在: ${taskId}`);
+    return text;
+  }
+
+  /** 停止后台任务（Windows 树杀整棵进程树） */
+  async stopBackgroundTask(sessionId: string, taskId: string): Promise<BackgroundTaskInfo | null> {
+    const manager = await this.bgManagerFor(sessionId);
+    return manager.stop(taskId);
+  }
+
+  /** 重启后台任务：以原命令与工作目录重新拉起（停止旧进程后启动新任务） */
+  async restartBackgroundTask(sessionId: string, taskId: string): Promise<BackgroundTaskInfo> {
+    const manager = await this.bgManagerFor(sessionId);
+    const task = manager.get(taskId);
+    if (!task) throw new Error(`后台任务不存在: ${taskId}`);
+    if (task.status === 'running') {
+      await manager.stop(taskId);
+    }
+    // run_command 的后台任务一律以会话工作区为 cwd
+    const cwd = this.sessions.get(sessionId)?.data.meta.workspaceRoot || undefined;
+    return manager.start(task.command, { cwd });
+  }
+
+  /** 终止所有会话的全部后台任务（应用退出时调用） */
+  async stopAllBackgroundTasks(): Promise<void> {
+    for (const manager of this.bgManagers.values()) {
+      try {
+        await manager.disposeAll();
+      } catch {
+        // 忽略单个会话清理失败
+      }
+    }
+  }
 
   private createProvider(providerId: string, model: string, nativeWebSearch: boolean): Provider {
     const entry = this.settings.providers[providerId];

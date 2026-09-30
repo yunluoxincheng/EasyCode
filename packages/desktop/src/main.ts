@@ -16,6 +16,12 @@ import { NodeHost } from '@easycode/host-node';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+// 开发/测试隔离开关：设置 EASYCODE_DATA_DIR 时整个实例（Chromium profile + 引擎数据）
+// 使用独立目录，不影响用户真实数据；未设置时行为与默认完全一致。
+if (process.env.EASYCODE_DATA_DIR) {
+  app.setPath('userData', process.env.EASYCODE_DATA_DIR);
+}
+
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let isQuitting = false;
@@ -211,6 +217,15 @@ const handlers: Record<string, Handler> = {
   'get-git-diff': (args) => server.getGitDiff(args.id as string, args.options),
   'stage-git-files': (args) => server.stageGitFiles(args.id as string, args.paths as string[] | undefined),
   'discard-git-changes': (args) => server.discardGitChanges(args.id as string, args.paths as string[]),
+  'list-background-tasks': (args) => server.listBackgroundTasks(args.id as string),
+  'get-task-logs': (args) =>
+    server.getTaskLogs(args.id as string, args.taskId as string, args.tailLines as number | undefined),
+  'stop-background-task': (args) => server.stopBackgroundTask(args.id as string, args.taskId as string),
+  'restart-background-task': (args) => server.restartBackgroundTask(args.id as string, args.taskId as string),
+  'open-url': async (args) => {
+    await shell.openExternal(String(args.url));
+    return null;
+  },
   'get-decision-stats': (args) => server.getDecisionStats(args),
   'get-decision-tree': () => server.getDecisionTree(),
   'export-decision-dataset': (args) => server.exportDecisionDataset(args),
@@ -305,6 +320,8 @@ app.whenReady().then(async () => {
 
 app.on('before-quit', () => {
   isQuitting = true;
+  // 应用退出时终止所有后台任务，杜绝孤儿 dev server 与端口残留（TODOS #37）
+  void server.stopAllBackgroundTasks();
 });
 
 app.on('window-all-closed', () => {

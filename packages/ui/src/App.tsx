@@ -9,6 +9,9 @@ import { SettingsPage } from './components/SettingsPage.js';
 import { TitleBar, ResizeEdges } from './components/TitleBar.js';
 import { ContextMenu } from './components/ContextMenu.js';
 import { GitInspectorModal } from './components/GitInspectorModal.js';
+import { BackgroundTasksBar } from './components/BackgroundTasksBar.js';
+import { TaskLogsDrawer } from './components/TaskLogsDrawer.js';
+import { PreviewPanel } from './components/PreviewPanel.js';
 import { updater } from './updater.js';
 
 export function App() {
@@ -42,8 +45,11 @@ export function App() {
           <Sidebar />
           <section className="main">
             <Transcript />
+            <TaskLogsDrawer />
+            <BackgroundTasksBar />
             <Composer />
           </section>
+          <PreviewPanel />
         </div>
       )}
       {store.createProjectOpen && <CreateProjectDialog />}

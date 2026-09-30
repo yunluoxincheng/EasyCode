@@ -24,6 +24,78 @@ const MAX_STR: usize = 200_000;
 #[derive(Default)]
 struct PidMap(Mutex<HashMap<String, u32>>);
 
+/// 后台任务注册表（TODOS #37）：id -> 元数据。WebView 重载后 proc_list 恢复接管；
+/// 应用退出时 kill_all_spawned 清场，杜绝孤儿 dev server 占端口。
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SpawnedInfo {
+    id: String,
+    pid: u32,
+    command: String,
+    started_ms: u64,
+    alive: bool,
+}
+
+#[derive(Default)]
+struct SpawnMap(Mutex<HashMap<String, SpawnedInfo>>);
+
+/// 流式增量解码器（TODOS #37）：逐块解出完整 UTF-8 片段，跨块的不完整多字节序列
+/// 留待下一块；对确定非法的字节段（如 GBK 输出）走 decode_output 的 CP_ACP 回退。
+/// 单个高位非法字节在缓冲不足 4 字节时先观望——它可能是被截断的 GBK 双字节字符。
+struct StreamDecoder {
+    buf: Vec<u8>,
+}
+
+impl StreamDecoder {
+    fn new() -> Self {
+        Self { buf: Vec::new() }
+    }
+
+    fn feed(&mut self, chunk: &[u8], out: &mut Vec<String>) {
+        self.buf.extend_from_slice(chunk);
+        loop {
+            if self.buf.is_empty() {
+                return;
+            }
+            match std::str::from_utf8(&self.buf) {
+                Ok(s) => {
+                    out.push(s.to_string());
+                    self.buf.clear();
+                    return;
+                }
+                Err(e) => {
+                    let valid = e.valid_up_to();
+                    if valid > 0 {
+                        // valid_up_to 保证前缀合法
+                        let s = std::str::from_utf8(&self.buf[..valid]).unwrap_or_default();
+                        out.push(s.to_string());
+                        self.buf.drain(..valid);
+                        continue;
+                    }
+                    match e.error_len() {
+                        Some(n) => {
+                            if n == 1 && self.buf[0] >= 0x80 && self.buf.len() < 4 {
+                                return; // 观望：可能是跨块多字节字符（GBK 等）
+                            }
+                            let bad: Vec<u8> = self.buf.drain(..n).collect();
+                            out.push(decode_output(&bad));
+                        }
+                        None => return, // 不完整 UTF-8 序列，等待更多数据
+                    }
+                }
+            }
+        }
+    }
+
+    /// 流结束：冲刷残余字节（不完整序列按 ACP/lossy 兜底）
+    fn flush(&mut self, out: &mut Vec<String>) {
+        if !self.buf.is_empty() {
+            let rest = std::mem::take(&mut self.buf);
+            out.push(decode_output(&rest));
+        }
+    }
+}
+
 /// 运行中 HTTP 请求的取消句柄：id -> oneshot sender。
 #[derive(Default)]
 struct HttpAbortMap(Mutex<HashMap<String, tokio::sync::oneshot::Sender<()>>>);
@@ -405,6 +477,37 @@ fn proc_detect_shells() -> Vec<ShellInfo> {
     detect_available_shells()
 }
 
+/// 按请求的 shell（或自动探测结果）构造执行命令的 shell 进程（proc_run / proc_spawn 共用）
+fn make_shell_command(command: &str, cwd: Option<&str>, shell: Option<&str>) -> Command {
+    #[cfg(windows)]
+    let mut cmd = {
+        let shells = detect_available_shells();
+        let (bin, shell_args) = resolve_windows_shell(shell, &shells);
+        let mut c = Command::new(bin);
+        for a in shell_args {
+            c.arg(a);
+        }
+        c.arg(command);
+        c
+    };
+    #[cfg(not(windows))]
+    let mut cmd = {
+        let bin = match shell {
+            Some("bash") => "bash",
+            _ => "sh",
+        };
+        let mut c = Command::new(bin);
+        c.arg("-c").arg(command);
+        c
+    };
+    if let Some(dir) = cwd {
+        if !dir.is_empty() {
+            cmd.current_dir(dir);
+        }
+    }
+    cmd
+}
+
 #[tauri::command]
 async fn proc_run(
     state: tauri::State<'_, PidMap>,
@@ -416,32 +519,7 @@ async fn proc_run(
 ) -> Result<serde_json::Value, String> {
     let timeout = Duration::from_millis(timeout_ms.unwrap_or(120_000).clamp(1_000, 600_000));
 
-    #[cfg(windows)]
-    let mut cmd = {
-        let shells = detect_available_shells();
-        let (bin, shell_args) = resolve_windows_shell(shell.as_deref(), &shells);
-        let mut c = Command::new(bin);
-        for a in shell_args {
-            c.arg(a);
-        }
-        c.arg(&command);
-        c
-    };
-    #[cfg(not(windows))]
-    let mut cmd = {
-        let bin = match shell.as_deref() {
-            Some("bash") => "bash",
-            _ => "sh",
-        };
-        let mut c = Command::new(bin);
-        c.arg("-c").arg(&command);
-        c
-    };
-    if let Some(dir) = cwd.as_deref() {
-        if !dir.is_empty() {
-            cmd.current_dir(dir);
-        }
-    }
+    let mut cmd = make_shell_command(&command, cwd.as_deref(), shell.as_deref());
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).stdin(Stdio::null());
     hide_window(&mut cmd);
 
@@ -525,6 +603,205 @@ fn proc_kill(state: tauri::State<'_, PidMap>, id: String) -> Result<(), String> 
     Ok(())
 }
 
+/// 启动长期运行的后台进程（TODOS #37）：立即返回 id/pid；
+/// stdout+stderr 合流经流式解码后以 {"t":"out"} 帧推送，退出时补发 {"t":"exit"} 帧。
+#[tauri::command]
+async fn proc_spawn(
+    app: AppHandle,
+    spawns: tauri::State<'_, SpawnMap>,
+    pids: tauri::State<'_, PidMap>,
+    id: String,
+    command: String,
+    cwd: Option<String>,
+    shell: Option<String>,
+    on_event: Channel<serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    let mut cmd = make_shell_command(&command, cwd.as_deref(), shell.as_deref());
+    cmd.stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null());
+    hide_window(&mut cmd);
+
+    let mut child = cmd.spawn().map_err(|e| format!("启动后台进程失败: {}", e))?;
+    let pid = child.id();
+    let started_ms = std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    spawns.0.lock().unwrap().insert(
+        id.clone(),
+        SpawnedInfo {
+            id: id.clone(),
+            pid,
+            command: command.clone(),
+            started_ms,
+            alive: true,
+        },
+    );
+    pids.0.lock().unwrap().insert(id.clone(), pid);
+
+    let send_frame = |ch: &Channel<serde_json::Value>, frame: serde_json::Value| {
+        // WebView 已重载/关闭时发送失败属预期，静默即可
+        let _ = ch.send(frame);
+    };
+
+    let mut stdout_pipe = child.stdout.take();
+    let mut stderr_pipe = child.stderr.take();
+    let ch_out = on_event.clone();
+    let out_handle = std::thread::spawn(move || {
+        let mut decoder = StreamDecoder::new();
+        let mut buf = [0u8; 8192];
+        if let Some(p) = stdout_pipe.as_mut() {
+            loop {
+                match p.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let mut frags: Vec<String> = Vec::new();
+                        decoder.feed(&buf[..n], &mut frags);
+                        for f in frags {
+                            send_frame(&ch_out, serde_json::json!({ "t": "out", "d": f }));
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            let mut tail: Vec<String> = Vec::new();
+            decoder.flush(&mut tail);
+            for f in tail {
+                send_frame(&ch_out, serde_json::json!({ "t": "out", "d": f }));
+            }
+        }
+    });
+    let ch_err = on_event.clone();
+    let err_handle = std::thread::spawn(move || {
+        let mut decoder = StreamDecoder::new();
+        let mut buf = [0u8; 8192];
+        if let Some(p) = stderr_pipe.as_mut() {
+            loop {
+                match p.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let mut frags: Vec<String> = Vec::new();
+                        decoder.feed(&buf[..n], &mut frags);
+                        for f in frags {
+                            send_frame(&ch_err, serde_json::json!({ "t": "out", "d": f }));
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            let mut tail: Vec<String> = Vec::new();
+            decoder.flush(&mut tail);
+            for f in tail {
+                send_frame(&ch_err, serde_json::json!({ "t": "out", "d": f }));
+            }
+        }
+    });
+
+    // 等待进程退出：标记注册表失活并通知 WebView
+    let app_handle = app.clone();
+    let task_id = id.clone();
+    let ch_exit = on_event;
+    std::thread::spawn(move || {
+        let _ = out_handle.join();
+        let _ = err_handle.join();
+        let code = match child.wait() {
+            Ok(status) => status.code(),
+            Err(_) => None,
+        };
+        if let Some(e) = app_handle
+            .state::<SpawnMap>()
+            .0
+            .lock()
+            .unwrap()
+            .get_mut(&task_id)
+        {
+            e.alive = false;
+        }
+        app_handle.state::<PidMap>().0.lock().unwrap().remove(&task_id);
+        send_frame(
+            &ch_exit,
+            serde_json::json!({ "t": "exit", "code": code }),
+        );
+    });
+
+    Ok(serde_json::json!({ "id": id, "pid": pid }))
+}
+
+/// 列出宿主侧登记的后台任务（WebView 重载后恢复接管用）
+#[tauri::command]
+fn proc_list(state: tauri::State<'_, SpawnMap>) -> Vec<SpawnedInfo> {
+    let mut list: Vec<SpawnedInfo> = state.0.lock().unwrap().values().cloned().collect();
+    list.sort_by(|a, b| a.started_ms.cmp(&b.started_ms));
+    list
+}
+
+/// 本地服务端口探活（TODOS #37）：对 http(s) URL 的 host:port 发起 TCP 连接，
+/// 协议无关、不受 WebView CORS 限制。
+#[tauri::command]
+async fn net_probe(url: String, timeout_ms: Option<u64>) -> Result<bool, String> {
+    let parsed = reqwest::Url::parse(&url).map_err(|e| e.to_string())?;
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return Ok(false);
+    }
+    let Some(host) = parsed.host_str() else {
+        return Ok(false);
+    };
+    let port = parsed.port_or_known_default().unwrap_or(80);
+    let timeout = Duration::from_millis(timeout_ms.unwrap_or(1_600).clamp(100, 5_000));
+    let addr = if host.contains(':') {
+        format!("[{}]:{}", host, port)
+    } else {
+        format!("{}:{}", host, port)
+    };
+    let ok = tokio::task::spawn_blocking(move || {
+        use std::net::ToSocketAddrs;
+        match addr.to_socket_addrs() {
+            Ok(mut addrs) => match addrs.next() {
+                Some(a) => std::net::TcpStream::connect_timeout(&a, timeout).is_ok(),
+                None => false,
+            },
+            Err(_) => false,
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(ok)
+}
+
+/// 应用退出时终止所有仍在运行的后台任务（树杀整棵进程树，杜绝孤儿端口）
+fn kill_all_spawned(app: &AppHandle) {
+    let targets: Vec<(String, u32)> = {
+        let map = app.state::<SpawnMap>();
+        let collected: Vec<(String, u32)> = map
+            .0
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|e| e.alive)
+            .map(|e| (e.id.clone(), e.pid))
+            .collect();
+        collected
+    };
+    for (id, pid) in targets {
+        let mut cmd = if cfg!(windows) {
+            let mut c = Command::new("taskkill");
+            c.args(["/PID", &pid.to_string(), "/T", "/F"]);
+            c
+        } else {
+            let mut c = Command::new("kill");
+            c.arg("-9").arg(pid.to_string());
+            c
+        };
+        hide_window(&mut cmd);
+        let _ = cmd.output();
+        if let Some(e) = app.state::<SpawnMap>().0.lock().unwrap().get_mut(&id) {
+            e.alive = false;
+        }
+    }
+}
+
 #[tauri::command]
 async fn pick_folder(app: AppHandle) -> Result<Option<String>, String> {
     let (tx, rx) = tokio::sync::oneshot::channel::<Option<String>>();
@@ -539,6 +816,13 @@ async fn pick_folder(app: AppHandle) -> Result<Option<String>, String> {
 async fn open_path(app: AppHandle, path: String) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
     app.opener().open_path(&path, None::<&str>).map_err(|e| e.to_string())
+}
+
+/// 用系统默认浏览器打开 URL（TODOS #44 预览面板「外部浏览器打开」兜底）
+#[tauri::command]
+async fn open_url(app: AppHandle, url: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    app.opener().open_url(&url, None::<&str>).map_err(|e| e.to_string())
 }
 
 /// 探测 PATH 中的 code 命令（VS Code CLI）。返回是否找到。
@@ -753,6 +1037,7 @@ fn main() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .manage(PidMap::default())
+        .manage(SpawnMap::default())
         .manage(HttpAbortMap::default())
         .manage(CloseToTrayState(Mutex::new(true))) // 默认开启关闭最小化到托盘
         .setup(|app| {
@@ -824,8 +1109,12 @@ fn main() {
             fs_unlink,
             proc_run,
             proc_kill,
+            proc_spawn,
+            proc_list,
+            net_probe,
             pick_folder,
             open_path,
+            open_url,
             open_in_vscode,
             proc_detect_shells,
             send_notification,
@@ -833,6 +1122,15 @@ fn main() {
             http_stream_cancel,
             set_close_to_tray
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            // 应用退出（托盘退出 / 窗口退出）时清场后台任务，杜绝孤儿进程占端口（TODOS #37）
+            if matches!(
+                event,
+                tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
+            ) {
+                kill_all_spawned(app_handle);
+            }
+        });
 }
