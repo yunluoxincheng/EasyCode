@@ -23,6 +23,7 @@ interface SpawnEntry {
   child: ChildProcess;
   command: string;
   cwd?: string;
+  shell?: string;
   startedAt: number;
 }
 
@@ -75,6 +76,7 @@ export class NodeHost implements Host {
         pid: e.child.pid,
         command: e.command,
         cwd: e.cwd,
+        shell: e.shell,
         startedAt: e.startedAt,
         alive: e.child.exitCode === null && e.child.signalCode === null && !e.child.killed,
       })),
@@ -175,6 +177,9 @@ function spawnShell(
         cwd: opts.cwd,
         windowsHide: true,
         stdio: ['ignore', 'pipe', 'pipe'],
+        // Unix 下让 shell 成为独立进程组长（pgid = pid）：停止时对整组发信号，
+        // 才能连同 `sh -c "pnpm dev"` 拉起的 node/vite 后代一起终止（Windows 由 taskkill /T 负责）
+        detached: process.platform !== 'win32',
       });
     } catch (err) {
       reject(err instanceof Error ? err : new Error(String(err)));
@@ -187,6 +192,7 @@ function spawnShell(
       child,
       command,
       cwd: opts.cwd,
+      shell: opts.shell,
       startedAt: Date.now(),
     };
 
@@ -227,7 +233,8 @@ function spawnShell(
   });
 }
 
-/** 树杀：Windows 用 taskkill /T /F；类 Unix 先 SIGTERM，3s 后 SIGKILL 兜底 */
+/** 树杀：Windows 用 taskkill /T /F；类 Unix 对独立进程组（detached 产生，pgid=pid）发组信号，
+ *  连同 shell 拉起的 node/vite 等后代一起终止；3s 后 SIGKILL 兜底 */
 async function killSpawned(registry: Map<string, SpawnEntry>, id: string): Promise<void> {
   const entry = registry.get(id);
   if (!entry) return;
@@ -248,18 +255,31 @@ async function killSpawned(registry: Map<string, SpawnEntry>, id: string): Promi
     });
     return;
   }
-  try {
-    child.kill('SIGTERM');
-  } catch {
-    /* 进程可能已退出 */
-  }
-  setTimeout(() => {
-    if (child.exitCode === null && child.signalCode === null) {
+  const signalGroup = (signal: NodeJS.Signals): void => {
+    if (child.pid === undefined) {
       try {
-        child.kill('SIGKILL');
+        child.kill(signal);
       } catch {
         /* 已退出 */
       }
+      return;
+    }
+    try {
+      // 负数 pid = 对整个进程组发信号（组在 detached spawn 时建立）
+      process.kill(-child.pid, signal);
+    } catch {
+      // 组不存在（进程已退出）或非组长：退回单杀
+      try {
+        child.kill(signal);
+      } catch {
+        /* 已退出 */
+      }
+    }
+  };
+  signalGroup('SIGTERM');
+  setTimeout(() => {
+    if (child.exitCode === null && child.signalCode === null) {
+      signalGroup('SIGKILL');
     }
   }, 3000);
 }

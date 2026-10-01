@@ -994,6 +994,9 @@ export class AppStore {
     if (!this.activeId || !this.client.restartBackgroundTask) return null;
     try {
       const task = await this.client.restartBackgroundTask(this.activeId, taskId);
+      // 日志抽屉 / 预览面板锚点跟进新任务，避免停留在已停止的旧任务上
+      if (this.taskDrawerTaskId === taskId) this.taskDrawerTaskId = task.id;
+      if (this.previewTaskId === taskId) this.previewTaskId = task.id;
       await this.refreshBackgroundTasks();
       this.showToast('✓ 后台任务已重新启动');
       return task;

@@ -32,6 +32,8 @@ struct SpawnedInfo {
     id: String,
     pid: u32,
     command: String,
+    cwd: Option<String>,
+    shell: Option<String>,
     started_ms: u64,
     alive: bool,
 }
@@ -39,21 +41,39 @@ struct SpawnedInfo {
 #[derive(Default)]
 struct SpawnMap(Mutex<HashMap<String, SpawnedInfo>>);
 
-/// 流式增量解码器（TODOS #37）：逐块解出完整 UTF-8 片段，跨块的不完整多字节序列
-/// 留待下一块；对确定非法的字节段（如 GBK 输出）走 decode_output 的 CP_ACP 回退。
-/// 单个高位非法字节在缓冲不足 4 字节时先观望——它可能是被截断的 GBK 双字节字符。
+/// 流式增量解码器（TODOS #37）：默认按 UTF-8 增量解出完整片段（跨块的不完整序列留待下一块）；
+/// 一旦出现确定非法的 UTF-8 字节（如 GBK 输出），整个流确定性切换为 ANSI 代码页解码——
+/// 与 proc_run 的整缓冲判定语义一致，避免按 UTF-8 非法长度逐字节碎解 GBK 双字节字符。
+/// ANSI 模式下保留末尾可能不完整的多字节 lead 字节（GBK/Big5 lead 均 ≥ 0x81）到下一块。
 struct StreamDecoder {
     buf: Vec<u8>,
+    /// true = 已判定为 ANSI 代码页流（CP_ACP，如简体中文 Windows 的 GBK/CP936）
+    ansi_mode: bool,
 }
 
 impl StreamDecoder {
     fn new() -> Self {
-        Self { buf: Vec::new() }
+        Self {
+            buf: Vec::new(),
+            ansi_mode: false,
+        }
     }
 
     fn feed(&mut self, chunk: &[u8], out: &mut Vec<String>) {
-        self.buf.extend_from_slice(chunk);
+        if self.buf.len() < 1 << 20 {
+            self.buf.extend_from_slice(chunk);
+        } else {
+            // 异常防护：残存缓冲异常膨胀时直接 lossy 丢弃，保证不解内存
+            out.push(String::from_utf8_lossy(&self.buf).into_owned());
+            self.buf.clear();
+            out.push(String::from_utf8_lossy(chunk).into_owned());
+            return;
+        }
         loop {
+            if self.ansi_mode {
+                self.feed_ansi(out);
+                return;
+            }
             if self.buf.is_empty() {
                 return;
             }
@@ -73,17 +93,30 @@ impl StreamDecoder {
                         continue;
                     }
                     match e.error_len() {
-                        Some(n) => {
-                            if n == 1 && self.buf[0] >= 0x80 && self.buf.len() < 4 {
-                                return; // 观望：可能是跨块多字节字符（GBK 等）
-                            }
-                            let bad: Vec<u8> = self.buf.drain(..n).collect();
-                            out.push(decode_output(&bad));
+                        None => return, // 不完整的 UTF-8 序列：留待下一块（也可能本是 ANSI 多字节的前半）
+                        Some(_) => {
+                            // 确定非法：整流切换 ANSI 代码页模式（不再按 UTF-8 非法长度碎解）
+                            self.ansi_mode = true;
+                            self.feed_ansi(out);
+                            return;
                         }
-                        None => return, // 不完整 UTF-8 序列，等待更多数据
                     }
                 }
             }
+        }
+    }
+
+    /// ANSI 代码页流式解码：保留末尾可能是多字节 lead 的高位字节到下一块
+    fn feed_ansi(&mut self, out: &mut Vec<String>) {
+        let keep = if self.buf.last().is_some_and(|b| *b >= 0x80) {
+            1
+        } else {
+            0
+        };
+        if self.buf.len() > keep {
+            let decoded = decode_output(&self.buf[..self.buf.len() - keep]);
+            out.push(decoded);
+            self.buf.drain(..self.buf.len() - keep);
         }
     }
 
@@ -92,6 +125,65 @@ impl StreamDecoder {
         if !self.buf.is_empty() {
             let rest = std::mem::take(&mut self.buf);
             out.push(decode_output(&rest));
+        }
+    }
+}
+
+#[cfg(test)]
+mod stream_decoder_tests {
+    use super::*;
+
+    #[test]
+    fn utf8_multibyte_across_chunks() {
+        let mut d = StreamDecoder::new();
+        let mut out = Vec::new();
+        // "你" = E4 BD A0，"好" = E5 A5 BD；在"你"的第二字节后切块
+        d.feed(&[0xE4, 0xBD], &mut out);
+        assert!(out.is_empty(), "不完整序列应等待下一块");
+        d.feed(&[0xA0, 0xE5, 0xA5, 0xBD, 0x0A], &mut out);
+        d.flush(&mut out);
+        assert_eq!(out.join(""), "你好\n");
+    }
+
+    #[test]
+    fn utf8_ascii_passthrough() {
+        let mut d = StreamDecoder::new();
+        let mut out = Vec::new();
+        d.feed(b"ready in 233 ms\n", &mut out);
+        d.flush(&mut out);
+        assert_eq!(out.join(""), "ready in 233 ms\n");
+    }
+
+    #[test]
+    fn ansi_stream_switches_wholesale_without_per_byte_split() {
+        // GBK "你好" = C4 E3 BA C3：首块只有 lead 字节 C4 时不得立即碎解
+        let mut d = StreamDecoder::new();
+        let mut out = Vec::new();
+        d.feed(&[0xC4], &mut out);
+        assert!(out.is_empty(), "单 lead 字节应观望而非逐字节碎解");
+        d.feed(&[0xE3, 0xBA, 0xC3, 0x0D, 0x0A], &mut out);
+        d.flush(&mut out);
+        // 关键回归断言：整段切换 ANSI 模式后一次性解码，不产生逐字节碎片
+        assert_eq!(out.len(), 1, "应整段解码而非按 UTF-8 非法长度碎解: {:?}", out);
+        // 同流后续块继续走 ANSI 模式且按 lead 字节持有跨块边界
+        let mut out2 = Vec::new();
+        // GBK "中文" = D6 D0 CE C4：先到 D6 D0 CE，C4 留待下一块
+        d.feed(&[0xD6, 0xD0, 0xCE], &mut out2);
+        d.feed(&[0xC4, 0x21], &mut out2);
+        d.flush(&mut out2);
+        // 多个传输段是正常的（JS 侧拼行），但字符本身不得被碎解
+        assert!(!out2.is_empty());
+        // 精确字符断言仅在实际 GBK 代码页（CP936）机器上成立；
+        // ACP=65001（系统 UTF-8）等环境退路是 lossy，但结构上保证 lead 字节跨块持有
+        #[cfg(windows)]
+        {
+            extern "system" {
+                fn GetACP() -> u32;
+            }
+            if unsafe { GetACP() } == 936 {
+                assert_eq!(out.join(""), "你好\r\n");
+                assert_eq!(out2.join(""), "中文!");
+            }
         }
     }
 }
@@ -498,6 +590,10 @@ fn make_shell_command(command: &str, cwd: Option<&str>, shell: Option<&str>) -> 
         };
         let mut c = Command::new(bin);
         c.arg("-c").arg(command);
+        // Unix 下让 shell 成为独立进程组长（pgid = pid）：终止时对整组发信号，
+        // 才能连同 `sh -c "pnpm dev"` 拉起的 node/vite 后代一起终止
+        use std::os::unix::process::CommandExt;
+        c.process_group(0);
         c
     };
     if let Some(dir) = cwd {
@@ -506,6 +602,30 @@ fn make_shell_command(command: &str, cwd: Option<&str>, shell: Option<&str>) -> 
         }
     }
     cmd
+}
+
+/// 终止进程：Windows 树杀整棵进程树；Unix 优先按进程组杀
+/// （命令以独立进程组启动，组长 pid 即 pgid），非组长（历史记录）回退单杀。
+fn kill_process(pid: u32) {
+    #[cfg(windows)]
+    {
+        let mut cmd = Command::new("taskkill");
+        cmd.args(["/PID", &pid.to_string(), "/T", "/F"]);
+        hide_window(&mut cmd);
+        let _ = cmd.output();
+    }
+    #[cfg(not(windows))]
+    {
+        let group_killed = Command::new("kill")
+            .arg("-9")
+            .arg(format!("-{}", pid))
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !group_killed {
+            let _ = Command::new("kill").arg("-9").arg(pid.to_string()).output();
+        }
+    }
 }
 
 #[tauri::command]
@@ -588,17 +708,7 @@ async fn proc_run(
 #[tauri::command]
 fn proc_kill(state: tauri::State<'_, PidMap>, id: String) -> Result<(), String> {
     if let Some(pid) = state.0.lock().unwrap().remove(&id) {
-        let mut cmd = if cfg!(windows) {
-            let mut c = Command::new("taskkill");
-            c.args(["/PID", &pid.to_string(), "/T", "/F"]);
-            c
-        } else {
-            let mut c = Command::new("kill");
-            c.arg("-9").arg(pid.to_string());
-            c
-        };
-        hide_window(&mut cmd);
-        let _ = cmd.output();
+        kill_process(pid);
     }
     Ok(())
 }
@@ -635,6 +745,8 @@ async fn proc_spawn(
             id: id.clone(),
             pid,
             command: command.clone(),
+            cwd: cwd.clone(),
+            shell: shell.clone(),
             started_ms,
             alive: true,
         },
@@ -785,17 +897,7 @@ fn kill_all_spawned(app: &AppHandle) {
         collected
     };
     for (id, pid) in targets {
-        let mut cmd = if cfg!(windows) {
-            let mut c = Command::new("taskkill");
-            c.args(["/PID", &pid.to_string(), "/T", "/F"]);
-            c
-        } else {
-            let mut c = Command::new("kill");
-            c.arg("-9").arg(pid.to_string());
-            c
-        };
-        hide_window(&mut cmd);
-        let _ = cmd.output();
+        kill_process(pid);
         if let Some(e) = app.state::<SpawnMap>().0.lock().unwrap().get_mut(&id) {
             e.alive = false;
         }

@@ -6,14 +6,15 @@
 
 ### 新增
 - 长期运行后台进程管理与端口探测（Background Tasks & Port Watcher）：`run_command` 扩展 `background` 参数，dev server / watch / 容器等长期命令后台常驻运行，调用立即返回任务 ID 与 PID，不再被 120s 超时强杀或残留孤儿端口；配套新增 `read_task_logs`（列任务 / 流式查看输出 / 确认服务就绪）与 `stop_task`（Windows `taskkill /T /F` 树杀整棵进程树）两个工具（TODOS #37）
-- 会话级后台任务管理器（`BackgroundTaskManager`）：环形行缓冲实时输出（约 1200 行 / 200KB 上限）、正则捕获 localhost / 127.0.0.1 服务地址、宿主 TCP 探活确认就绪（TTL 缓存防轮询压力）、单会话任务数上限（默认 8）；删除会话与应用退出统一清场（Tauri 退出钩子 `kill_all_spawned` / Electron `before-quit`），WebView 重载后经宿主 `proc_list` 自动恢复接管仍存活的进程（TODOS #37）
+- 会话级后台任务管理器（`BackgroundTaskManager`）：环形行缓冲实时输出（约 1200 行 / 200KB 上限）、`\r` 覆盖语义与单行硬上限保证裸回车进度输出与无换行流的内存有界、单调 `outputBytes` 增量信号、正则捕获 localhost / 127.0.0.1 服务地址、宿主 TCP 探活确认就绪（TTL 缓存防轮询压力）、单会话任务数上限（默认 8）；kill 失败自动回滚停止意图保持状态真实；删除会话与应用退出统一清场（Tauri 退出钩子 `kill_all_spawned` / Electron `before-quit` 等待清场完成，3s 超时兜底），WebView 重载后经宿主 `proc_list` 自动恢复接管仍存活的进程（保留 cwd / shell 供按原样重启）（TODOS #37）
 - 底部常驻后台任务条与实时日志抽屉：会话存在后台任务时，Composer 上方展示任务 chip（`● 命令 · 服务地址 · 运行中 Xm Ys`，秒级本地计时）与「⧉ 预览 / ↗ 浏览器 / ■ 停止」快捷操作；点击 chip 滑出半屏拟终端日志抽屉，ANSI 解码渲染、1s 轮询增量、贴底跟随与「↓ 回到最新」（TODOS #37）
-- 双宿主流式进程能力：Host 接口扩展 `process.spawn / kill / listSpawned / probePort`（core 保持零依赖，能力注入）；NodeHost 以 `StringDecoder` 增量解码输出，Tauri 新增 `proc_spawn`（Channel 流式帧推送，跨 chunk 边界安全的多字节增量解码器，兼容 GBK 输出回退 CP_ACP）、`proc_list`、`net_probe`（TCP 探活不受 WebView CORS 限制）；系统提示词同步增加后台任务使用纪律（TODOS #37）
+- 双宿主流式进程能力与真树杀：Host 接口扩展 `process.spawn / kill / listSpawned / probePort`（core 保持零依赖，能力注入）；Windows 以 `taskkill /T /F` 树杀整棵进程树，Unix 以独立进程组启动（Node `detached` / Rust `process_group(0)`）并对整组发 SIGTERM→SIGKILL 信号，连同 shell 拉起的 node/vite 后代一起终止；NodeHost 以 `StringDecoder` 增量解码输出，Tauri 新增 `proc_spawn`（Channel 流式帧推送，确定性编码模式解码器：UTF-8 增量解出、出现确定非法字节即整流切换 ANSI 代码页并按多字节 lead 跨块持有，避免逐字节碎解 GBK）、`proc_list`、`net_probe`（TCP 探活不受 WebView CORS 限制）；系统提示词同步增加后台任务使用纪律（TODOS #37）
 - 内嵌 Web 预览面板（Embedded Preview）：右侧滑出预览分区与会话区左右分栏（左缘拖拽调宽），内嵌 iframe 实时加载本地服务；极客风地址栏支持编辑跳转、⟳ 刷新、⚡ 跟随刷新（轮询任务输出行数增量自动轻刷新，HMR 失效兜底）、↗ 外部浏览器兜底与桌面 / 平板 / 手机视口宽度快捷切换（TODOS #44）
-- 预览面板与后台任务条联动：任务条 / 日志抽屉「⧉」一键内嵌预览捕获的服务地址并锚定任务；服务停止或端口失活时自动切换失联占位态 `● 服务已停止 [▶ 重新启动] [⟳ 重试连接]`，重启经 `restartBackgroundTask` 以原命令与工作目录重新拉起并即时恢复预览；新增跨宿主 `openUrl` 能力（Tauri `open_url` / Electron `shell.openExternal` / 演示 `window.open`）（TODOS #44）
+- 预览面板与后台任务条联动：任务条 / 日志抽屉「⧉」一键内嵌预览捕获的服务地址并锚定任务；服务停止或端口失活时自动切换失联占位态 `● 服务已停止 [▶ 重新启动] [⟳ 重试连接]`，重启经 `restartBackgroundTask` 以原命令、原工作目录与原 shell 重新拉起并即时恢复预览（抽屉/预览锚点自动跟进新任务）；跟随刷新以引擎单调 `outputBytes` 为增量信号（与日志 tail 行数无关，长任务不失效）；新增跨宿主 `openUrl` 能力（Tauri `open_url` / Electron `shell.openExternal` / 演示 `window.open`）（TODOS #44）
 
 ### 测试
-- core 新增 8 项 `tasks` 单元测试：任务元数据立即返回、输出行缓冲与 URL 捕获归一化、停止语义（先记录停止意图，杜绝宿主迟到退出事件把「已停止」误判为「failed」）、自然退出事件流、并发上限与不支持环境、宿主恢复接管 scope 过滤、`disposeAll` 清场、日志 tail 截断；全仓 57 项测试通过（TODOS #37）
+- core 新增 15 项 `tasks` 单元测试：任务元数据立即返回、输出行缓冲与 URL 捕获归一化、停止语义（先记录停止意图，杜绝宿主迟到退出事件把「已停止」误判为「failed」；kill 失败回滚保持 running）、自然退出事件流、并发上限与不支持环境、宿主恢复接管 scope 过滤（保留 cwd/shell）、`disposeAll` 清场、日志 tail 截断；审查修复回归：无换行超长输出内存有界且尾部可见、裸 `\r` 进度帧覆盖不堆积、`outputBytes` 与实际输出字节一致、开放尾部行可见、`restart` 复用原命令/cwd/shell（TODOS #37）
+- Rust 新增 3 项 `StreamDecoder` 单元测试：UTF-8 多字节跨块、ASCII 直通、GBK 流整段切换 ANSI 模式且 lead 字节跨块持有（不逐字节碎解）（TODOS #37）
 - 真实环境验证：真实 Node HTTP server 启动 → stdout 捕获地址 → TCP 探活就绪 → 树杀后端口释放 → 事件流 `started→stopped` 全链路通过；Electron GUI 实测（隔离数据目录）跑通审批启动后台 dev server → 任务条 → 日志抽屉 → 内嵌预览 → 停止失联占位 → 重启恢复 → WebView 重载进程接管闭环
 
 ## [0.1.22] - 2026-09-29

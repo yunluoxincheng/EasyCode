@@ -18,6 +18,12 @@ export function TaskLogsDrawer() {
     null;
   const running = task?.status === 'running';
 
+  // 切换抽屉任务时清空旧任务日志并恢复贴底，避免新任务首帧前闪现旧内容
+  useEffect(() => {
+    setLogs('');
+    setPinned(true);
+  }, [task?.id]);
+
   // 日志轮询：抽屉打开期间 1s 拉一次尾部
   useEffect(() => {
     if (!task) return;

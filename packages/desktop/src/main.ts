@@ -318,10 +318,20 @@ app.whenReady().then(async () => {
   initTray();
 });
 
-app.on('before-quit', () => {
+let bgCleanupDone = false;
+app.on('before-quit', (event) => {
   isQuitting = true;
-  // 应用退出时终止所有后台任务，杜绝孤儿 dev server 与端口残留（TODOS #37）
-  void server.stopAllBackgroundTasks();
+  if (bgCleanupDone) return;
+  // 首次退出先等待后台任务树杀完成（Unix 的 SIGTERM→SIGKILL 兜底依赖主进程存活），
+  // 3s 超时兜底保证永不阻塞退出；完成后重新触发 quit
+  event.preventDefault();
+  void Promise.race([
+    server.stopAllBackgroundTasks(),
+    new Promise((resolve) => setTimeout(resolve, 3000)),
+  ]).finally(() => {
+    bgCleanupDone = true;
+    app.quit();
+  });
 });
 
 app.on('window-all-closed', () => {

@@ -59,6 +59,8 @@ class FakeHost implements Host {
           id,
           pid: 1,
           command: e.command,
+          cwd: e.opts.cwd,
+          shell: e.opts.shell,
           startedAt: Date.now(),
           alive: !e.killed,
         })),
@@ -233,4 +235,122 @@ test('logs：tail 行数截断与任务不存在', async () => {
   assert.ok(tail.includes('line-49'));
   assert.ok(!tail.includes('line-40\nline-41') === false || tail.split('\n').length <= 10);
   assert.equal(manager.logs('missing'), undefined);
+});
+
+/* ---------------- 审查修复回归（PR #3） ---------------- */
+
+test('无换行超长输出：内存受控且日志可见（pending 硬上限）', async () => {
+  const host = new FakeHost();
+  const manager = new BackgroundTaskManager(host, { scope: 's1' });
+  const info = await manager.start('stream');
+  const entry = host.spawned.get(info.id)!;
+  const chunk = 'x'.repeat(8192);
+  for (let i = 0; i < 64; i++) entry.opts.onOutput?.(chunk); // 512KB 无任何换行
+  const logs = manager.logs(info.id)!;
+  // 日志保留尾部（截断头部的超长单行），总量有硬上限而非随输出无限增长
+  assert.ok(logs.length < 100_000, `logs 应有界，实际 ${logs.length}`);
+  assert.ok(logs.endsWith('x'), '尾部内容应可见');
+  // 单调计数不受截断影响
+  assert.equal(manager.get(info.id)!.outputBytes, 64 * 8192);
+});
+
+test('裸 \\r 进度输出：覆盖当前行语义，不堆积历史帧', async () => {
+  const host = new FakeHost();
+  const manager = new BackgroundTaskManager(host, { scope: 's1' });
+  const info = await manager.start('build');
+  const entry = host.spawned.get(info.id)!;
+  for (let i = 1; i <= 5000; i++) {
+    entry.opts.onOutput?.(`building ${i}%\r`);
+  }
+  entry.opts.onOutput?.('done\n');
+  const logs = manager.logs(info.id)!;
+  assert.ok(logs.length < 20_000, `进度帧不应堆积历史，实际 ${logs.length}`);
+  assert.ok(logs.includes('done'), '完结行应保留');
+  assert.ok(!logs.includes('building 4999%'), '被覆盖的进度帧不应出现在日志');
+  // outputBytes 与实际输出字节精确一致（含被覆盖丢弃的帧）
+  let total = 0;
+  for (let i = 1; i <= 5000; i++) total += `building ${i}%\r`.length;
+  total += 'done\n'.length;
+  assert.equal(manager.get(info.id)!.outputBytes, total);
+});
+
+test('outputBytes 单调递增且与输出字节一致（跨 \\r 与 \\n）', async () => {
+  const host = new FakeHost();
+  const manager = new BackgroundTaskManager(host, { scope: 's1' });
+  const info = await manager.start('mix');
+  const entry = host.spawned.get(info.id)!;
+  entry.opts.onOutput?.('a\rbb\rccc\n');
+  entry.opts.onOutput?.('dddd');
+  assert.equal(manager.get(info.id)!.outputBytes, ('a\rbb\rccc\n').length + 4);
+});
+
+test('logs：未换行的当前行也应在日志中可见', async () => {
+  const host = new FakeHost();
+  const manager = new BackgroundTaskManager(host, { scope: 's1' });
+  const info = await manager.start('tail');
+  host.spawned.get(info.id)!.opts.onOutput?.('VITE ready in 300 ms\n');
+  host.spawned.get(info.id)!.opts.onOutput?.('➜  Local:   http://localhost:5173/');
+  assert.ok(manager.logs(info.id)!.includes('localhost:5173'), '开放尾部行应可见');
+});
+
+test('restart：复用原命令、原工作目录与原 shell', async () => {
+  const host = new FakeHost();
+  const manager = new BackgroundTaskManager(host, { scope: 's1' });
+  const info = await manager.start('$env:NODE_ENV="dev"; pnpm dev', {
+    cwd: '/ws',
+    shell: 'pwsh',
+  });
+  const restarted = await manager.restart(info.id);
+  assert.notEqual(restarted.id, info.id, '重启产生新任务');
+  assert.equal(restarted.command, info.command);
+  assert.equal(restarted.cwd, '/ws');
+  assert.equal(restarted.shell, 'pwsh');
+  assert.equal(manager.get(info.id)!.status, 'killed', '旧任务被停止');
+  const spawned = [...host.spawned.values()];
+  assert.equal(spawned.length, 2);
+  assert.equal(spawned[1].opts.cwd, '/ws');
+  assert.equal(spawned[1].opts.shell, 'pwsh');
+});
+
+test('kill 失败：保持 running 态且可重试停止', async () => {
+  const host = new FakeHost();
+  let failKill = true;
+  const failingKill: BackgroundTaskManager = new BackgroundTaskManager(
+    {
+      ...host,
+      process: {
+        ...host.process,
+        kill: async () => {
+          if (failKill) throw new Error('taskkill failed');
+          return host.process.kill('any');
+        },
+      },
+    } as unknown as Host,
+    { scope: 's1' },
+  );
+  const info = await failingKill.start('node server.js');
+  await assert.rejects(() => failingKill.stop(info.id), /taskkill failed/);
+  assert.equal(failingKill.get(info.id)!.status, 'running', 'kill 失败不得误标 killed');
+  failKill = false;
+  const after = await failingKill.stop(info.id);
+  assert.equal(after?.status, 'killed');
+});
+
+test('adopt：保留宿主记录的 cwd 与 shell（供恢复后重启复用）', () => {
+  const host = new FakeHost();
+  const manager = new BackgroundTaskManager(host, { scope: 's1' });
+  manager.adopt([
+    {
+      id: 's1:tabc',
+      pid: 1,
+      command: 'pnpm dev',
+      cwd: '/ws',
+      shell: 'git-bash',
+      startedAt: 1,
+      alive: true,
+    },
+  ]);
+  const info = manager.get('s1:tabc')!;
+  assert.equal(info.cwd, '/ws');
+  assert.equal(info.shell, 'git-bash');
 });

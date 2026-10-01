@@ -667,17 +667,10 @@ export class AgentServer {
     return manager.stop(taskId);
   }
 
-  /** 重启后台任务：以原命令与工作目录重新拉起（停止旧进程后启动新任务） */
+  /** 重启后台任务：以原命令、原工作目录与原 shell 重新拉起（停止旧进程后启动新任务） */
   async restartBackgroundTask(sessionId: string, taskId: string): Promise<BackgroundTaskInfo> {
     const manager = await this.bgManagerFor(sessionId);
-    const task = manager.get(taskId);
-    if (!task) throw new Error(`后台任务不存在: ${taskId}`);
-    if (task.status === 'running') {
-      await manager.stop(taskId);
-    }
-    // run_command 的后台任务一律以会话工作区为 cwd
-    const cwd = this.sessions.get(sessionId)?.data.meta.workspaceRoot || undefined;
-    return manager.start(task.command, { cwd });
+    return manager.restart(taskId);
   }
 
   /** 终止所有会话的全部后台任务（应用退出时调用） */

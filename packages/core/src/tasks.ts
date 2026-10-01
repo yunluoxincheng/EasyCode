@@ -30,6 +30,12 @@ export interface BackgroundTaskInfo {
   probedAt?: number;
   /** 主服务地址（最近捕获、优先已就绪的） */
   primaryUrl?: string;
+  /** 启动时的工作目录（「按原命令重启」复用） */
+  cwd?: string;
+  /** 启动时指定的 shell（「按原命令重启」复用） */
+  shell?: string;
+  /** 累计输出字节数（单调递增，供 UI 跟随刷新做增量信号） */
+  outputBytes: number;
 }
 
 export interface BackgroundTaskOptions {
@@ -52,13 +58,19 @@ interface BgTask {
   urls: string[];
   alive?: boolean;
   probedAt?: number;
+  /** 启动时的工作目录（「按原命令重启」复用） */
+  cwd?: string;
+  /** 启动时指定的 shell（「按原命令重启」复用） */
+  shell?: string;
+  /** 累计输出字节数（单调递增，供 UI 跟随刷新做增量信号） */
+  outputBytes: number;
   /** 用户/系统已请求停止：迟到的宿主退出事件不得把状态改判为 failed */
   stopRequested?: boolean;
   /** 输出环形行缓冲（不含未完结的当前行） */
   lines: string[];
-  /** 未凑齐换行的输出尾巴 */
+  /** 未凑齐换行的当前行（\r 覆盖语义下只保留最后一段，有硬上限） */
   pending: string;
-  /** 输出总字符数（用于环形缓冲容量裁剪） */
+  /** 行缓冲累计字符数（用于环形缓冲容量裁剪） */
   chars: number;
   /** 从宿主恢复接管的任务：无法重新挂接输出流 */
   recovered?: boolean;
@@ -66,8 +78,16 @@ interface BgTask {
 
 const MAX_LINES = 1200;
 const MAX_CHARS = 200_000;
+/** 单行（未换行的开放尾部）硬上限：无换行 / 裸 \r 输出也不至于撑爆内存 */
+const MAX_PENDING_CHARS = 64_000;
 const PROBE_TTL_MS = 3_000;
 const PROBE_TIMEOUT_MS = 1_600;
+
+/** \r 覆盖语义：取最后一个 \r 之后的内容（进度条式原地刷新只留最终帧） */
+function takeAfterLastCr(segment: string): string {
+  const idx = segment.lastIndexOf('\r');
+  return idx === -1 ? segment : segment.slice(idx + 1);
+}
 
 /**
  * 从一行输出中提取本地服务监听地址。
@@ -142,6 +162,9 @@ export class BackgroundTaskManager {
       alive: t.alive,
       probedAt: t.probedAt,
       primaryUrl: this.primaryUrlOf(t),
+      cwd: t.cwd,
+      shell: t.shell,
+      outputBytes: t.outputBytes,
     };
   }
 
@@ -170,6 +193,9 @@ export class BackgroundTaskManager {
       lines: [],
       pending: '',
       chars: 0,
+      outputBytes: 0,
+      cwd: runOpts?.cwd,
+      shell: runOpts?.shell,
     };
     this.tasks.set(id, task);
     try {
@@ -215,6 +241,9 @@ export class BackgroundTaskManager {
         lines: [],
         pending: '',
         chars: 0,
+        outputBytes: 0,
+        cwd: info.cwd,
+        shell: info.shell,
         recovered: true,
       };
       task.lines.push('[EasyCode] 界面重载后恢复接管该进程；此前的输出历史不可用，停止操作仍有效。');
@@ -223,24 +252,45 @@ export class BackgroundTaskManager {
     }
   }
 
+  /** 累计一行（含 URL 捕获）并入环形缓冲 */
+  private pushLine(task: BgTask, rawSegment: string): void {
+    // URL 捕取要在 \r 归约前做：进度条帧里打印的服务地址同样有效
+    for (const url of captureServiceUrls(rawSegment)) {
+      if (!task.urls.includes(url)) {
+        task.urls.push(url);
+        task.alive = undefined;
+        task.probedAt = undefined;
+      }
+    }
+    const line = takeAfterLastCr(rawSegment);
+    task.lines.push(line);
+    task.chars += line.length + 1;
+  }
+
   private writeOutput(id: string, chunk: string): void {
     const task = this.tasks.get(id);
     if (!task) return;
+    task.outputBytes += chunk.length;
     task.pending += chunk;
-    task.chars += chunk.length;
+    // 消费完整的 \n 结尾段（每段内部按 \r 覆盖语义归约成单行）
     let idx: number;
     while ((idx = task.pending.search(/\r?\n/)) !== -1) {
       const matched = task.pending.slice(idx).match(/^\r?\n/)?.[0] ?? '\n';
-      const line = task.pending.slice(0, idx);
+      const segment = task.pending.slice(0, idx);
       task.pending = task.pending.slice(idx + matched.length);
-      task.lines.push(line);
-      for (const url of captureServiceUrls(line)) {
-        if (!task.urls.includes(url)) {
-          task.urls.push(url);
-          task.alive = undefined;
-          task.probedAt = undefined;
-        }
-      }
+      this.pushLine(task, segment);
+    }
+    // 开放尾部（尚无换行）：\r 视为覆盖当前行，历史帧即时丢弃，
+    // 保证 `building 10%\rbuilding 20%\r…` 这类裸回车进度输出不会无界堆积
+    const lastCr = task.pending.lastIndexOf('\r');
+    if (lastCr !== -1) {
+      this.captureUrlsOnly(task, task.pending.slice(0, lastCr));
+      task.pending = task.pending.slice(lastCr + 1);
+    }
+    // 单行硬上限：永不换行的超长输出（如 base64 流）也受控
+    if (task.pending.length > MAX_PENDING_CHARS) {
+      const overflow = task.pending.length - MAX_PENDING_CHARS;
+      task.pending = `…[EasyCode] 超长单行已丢弃头部 ${overflow} 字符\n${task.pending.slice(-MAX_PENDING_CHARS)}`;
     }
     while (task.lines.length > MAX_LINES || task.chars > MAX_CHARS) {
       const dropped = task.lines.shift();
@@ -249,18 +299,23 @@ export class BackgroundTaskManager {
     }
   }
 
+  /** 只做 URL 捕获不保留内容（用于被 \r 覆盖语义丢弃的历史帧） */
+  private captureUrlsOnly(task: BgTask, text: string): void {
+    for (const url of captureServiceUrls(text)) {
+      if (!task.urls.includes(url)) {
+        task.urls.push(url);
+        task.alive = undefined;
+        task.probedAt = undefined;
+      }
+    }
+  }
+
   private markExited(id: string, code: number | null, killed: boolean): void {
     const task = this.tasks.get(id);
     if (!task || task.status !== 'running') return;
     // 冲刷未完结的尾巴行
     if (task.pending.trim()) {
-      task.lines.push(task.pending);
-      for (const url of captureServiceUrls(task.pending)) {
-        if (task.urls.includes(url)) continue;
-        task.urls.push(url);
-        task.alive = undefined;
-        task.probedAt = undefined;
-      }
+      this.pushLine(task, task.pending);
     }
     task.pending = '';
     task.durationMs = Date.now() - task.startedAt;
@@ -272,7 +327,7 @@ export class BackgroundTaskManager {
     this.emit(killed || task.stopRequested ? 'stopped' : 'exited', task);
   }
 
-  /** 停止任务：Windows 树杀整棵进程树，杜绝孤儿子进程占端口 */
+  /** 停止任务：Windows 树杀整棵进程树；Unix 以进程组为单位终止，杜绝孤儿子进程占端口 */
   async stop(id: string): Promise<BackgroundTaskInfo | null> {
     const task = this.tasks.get(id);
     if (!task) return null;
@@ -283,11 +338,26 @@ export class BackgroundTaskManager {
     task.stopRequested = true;
     try {
       await kill(id);
-    } finally {
-      // 宿主 onExit 已把状态置为 killed 时这里是 no-op；否则兜底标记
+    } catch (err) {
+      // kill 失败时回滚停止意图，保持 UI 状态与真实进程一致
+      task.stopRequested = undefined;
+      throw err;
+    }
+    // 宿主 onExit 已把状态置为 killed 时这里是 no-op；否则兜底标记
+    if (task.status === 'running' && task.stopRequested) {
       this.markExited(id, task.exitCode ?? null, true);
     }
     return this.toInfo(task);
+  }
+
+  /** 以原命令、原工作目录与原 shell 重新拉起任务（旧任务仍在运行则先停止） */
+  async restart(id: string): Promise<BackgroundTaskInfo> {
+    const task = this.tasks.get(id);
+    if (!task) throw new Error(`后台任务不存在: ${id}`);
+    if (task.status === 'running') {
+      await this.stop(id);
+    }
+    return this.start(task.command, { cwd: task.cwd, shell: task.shell });
   }
 
   list(): BackgroundTaskInfo[] {
@@ -299,11 +369,12 @@ export class BackgroundTaskManager {
     return t ? this.toInfo(t) : undefined;
   }
 
-  /** 读取任务日志尾部；task 不存在时返回 undefined */
+  /** 读取任务日志尾部；task 不存在时返回 undefined。含未换行的当前行 */
   logs(id: string, tailLines = 200): string | undefined {
     const task = this.tasks.get(id);
     if (!task) return undefined;
     const lines = task.lines.slice(-Math.max(1, Math.min(tailLines, MAX_LINES)));
+    if (task.pending) lines.push(task.pending);
     return lines.join('\n');
   }
 

@@ -142,12 +142,22 @@ export async function createTauriHost(): Promise<Host> {
       },
       listSpawned: async () => {
         const list = await invoke<
-          Array<{ id: string; pid: number; command: string; startedMs: number; alive: boolean }>
+          Array<{
+            id: string;
+            pid: number;
+            command: string;
+            cwd?: string;
+            shell?: string;
+            startedMs: number;
+            alive: boolean;
+          }>
         >('proc_list');
         return list.map((t) => ({
           id: t.id,
           pid: t.pid,
           command: t.command,
+          cwd: t.cwd,
+          shell: t.shell,
           startedAt: t.startedMs,
           alive: t.alive,
         }));

@@ -43,6 +43,8 @@ export interface SpawnedProcessInfo {
   pid?: number;
   command: string;
   cwd?: string;
+  /** 启动时的 shell（恢复接管后「按原命令重启」复用；宿主未记录时缺省） */
+  shell?: string;
   startedAt: number;
   alive: boolean;
 }

@@ -16,7 +16,6 @@ export function PreviewPanel() {
   const store = useStore();
   const [reloadTick, setReloadTick] = useState(0);
   const [urlDraft, setUrlDraft] = useState(store.previewUrl ?? '');
-  const [logLineCount, setLogLineCount] = useState(0);
   const dragRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const bodyRef = useRef<HTMLDivElement | null>(null);
 
@@ -25,6 +24,8 @@ export function PreviewPanel() {
   const stopped = task !== null && !running;
   // 未绑定任务的裸 URL 预览不显示失联占位
   const showStoppedOverlay = stopped;
+  // 跟随刷新基线：outputBytes 是引擎侧单调递增的累计输出字节，与日志 tail 长度无关
+  const lastBytesRef = useRef(0);
 
   // 同步外部地址变化（任务条/抽屉一键预览）
   useEffect(() => {
@@ -32,27 +33,22 @@ export function PreviewPanel() {
     setReloadTick((t) => t + 1);
   }, [store.previewUrl]);
 
-  // 跟随刷新（TODOS #44）：任务产出新输出行时自动轻刷新（HMR 失效场景兜底）
+  // 切换锚定任务时重置基线，避免跨任务的输出计数互相污染
   useEffect(() => {
-    if (!store.previewFollow || !store.previewTaskId) return;
-    const timer = setInterval(() => {
-      const sessionId = store.activeId;
-      const taskId = store.previewTaskId;
-      if (!sessionId || !taskId || !store.client.getTaskLogs) return;
-      void store.client
-        .getTaskLogs(sessionId, taskId, 200)
-        .then((text) => {
-          const count = text ? text.split('\n').length : 0;
-          setLogLineCount((prev) => {
-            if (count > prev) setReloadTick((t) => t + 1);
-            return count;
-          });
-        })
-        .catch(() => {});
-    }, 2000);
-    return () => clearInterval(timer);
+    lastBytesRef.current = store.previewTask?.outputBytes ?? 0;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [store.previewFollow, store.previewTaskId]);
+  }, [store.previewTaskId]);
+
+  // 跟随刷新（TODOS #44）：锚定任务产生新输出（字节数增长）时自动轻刷新，HMR 失效兜底。
+  // 数据源是 store 对 listBackgroundTasks 的既有轮询，这里零额外请求。
+  useEffect(() => {
+    const current = store.previewTask;
+    if (!current) return;
+    if (current.outputBytes > lastBytesRef.current) {
+      lastBytesRef.current = current.outputBytes;
+      if (store.previewFollow) setReloadTick((t) => t + 1);
+    }
+  });
 
   // 拖拽调节宽度
   const startDrag = (e: React.MouseEvent): void => {
@@ -173,12 +169,9 @@ export function PreviewPanel() {
                       className="btn primary"
                       type="button"
                       onClick={() => {
+                        // store.restartTask 会把预览/抽屉锚点跟进到新任务
                         void store.restartTask(task.id).then((newTask) => {
-                          if (newTask) {
-                            store.previewTaskId = newTask.id;
-                            store.notify();
-                            setReloadTick((t) => t + 1);
-                          }
+                          if (newTask) setReloadTick((t) => t + 1);
                         });
                       }}
                     >
