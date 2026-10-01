@@ -814,8 +814,11 @@ async fn proc_run(
 
 #[tauri::command]
 fn proc_kill(state: tauri::State<'_, PidMap>, id: String) -> Result<(), String> {
-    if let Some(pid) = state.0.lock().unwrap().remove(&id) {
+    // 先查后杀：确认终止成功才移除登记——kill 失败保留句柄，重试语义才成立
+    let pid = state.0.lock().unwrap().get(&id).copied();
+    if let Some(pid) = pid {
         kill_process(pid)?;
+        state.0.lock().unwrap().remove(&id);
     }
     Ok(())
 }

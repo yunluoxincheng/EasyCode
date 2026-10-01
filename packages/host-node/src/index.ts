@@ -234,66 +234,77 @@ function spawnShell(
 }
 
 /**
- * 树杀并等待终止流程真正完成（Promise 语义 = 进程组已消亡或发生真失败）：
- * - Windows：taskkill /T /F 整树强杀；非零退出码时探活区分「进程已不存在（成功）」与真失败
- * - Unix：后台进程为独立进程组（detached 产生，pgid=pid）。组 SIGTERM → 等待 shell 退出或
- *   3s 宽限 → 以「组」为对象探活（不依赖组长自身状态，忽略 SIGTERM 的 node/vite 后代
- *   仍会被连根清除）→ 仍存活则组 SIGKILL → 确认消亡；EPERM 等真失败向上抛出，
+ * 树杀并等待终止流程真正完成（Promise 语义 = 目标已消亡或发生真失败）。
+ * 登记表仅在确认目标消亡后删除——kill 真失败时保留句柄，使「失败 → running → 可重试」成立。
+ * - Windows：taskkill /T /F 整树强杀；非零退出码经探活区分「进程已不存在（成功）」与真失败
+ * - Unix：以「进程组」为生命周期单位。组长 shell 可能已退出而后代（node/vite）仍存活，
+ *   child.exitCode/signalCode 只描述组长，不得作为整棵任务的存续依据——入口到出口
+ *   全程以 process.kill(-pgid, 0) 探活为准：组 SIGTERM → 等待组长退出或 3s 宽限 →
+ *   组探活 → 仍存活则组 SIGKILL → 确认消亡；EPERM 等真失败向上抛出，
  *   由 Core 回滚停止意图保持 UI 与真实进程一致
  */
 async function killSpawned(registry: Map<string, SpawnEntry>, id: string): Promise<void> {
   const entry = registry.get(id);
   if (!entry) return;
-  registry.delete(id);
   const { child } = entry;
-  if (child.exitCode !== null || child.signalCode !== null || child.killed) return;
 
   if (process.platform === 'win32') {
-    if (child.pid === undefined) {
+    if (child.exitCode !== null || child.signalCode !== null || child.killed) {
+      registry.delete(id);
+      return;
+    }
+    const pid = child.pid;
+    if (pid === undefined) {
       try {
         child.kill('SIGKILL');
       } catch {
         /* 已退出 */
       }
+      registry.delete(id);
       return;
     }
-    const pid = child.pid;
-    await new Promise<void>((resolve, reject) => {
-      const killer = nodeSpawn('taskkill', ['/PID', String(pid), '/T', '/F'], {
-        windowsHide: true,
-        stdio: 'ignore',
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const killer = nodeSpawn('taskkill', ['/PID', String(pid), '/T', '/F'], {
+          windowsHide: true,
+          stdio: 'ignore',
+        });
+        killer.on('close', (code) => {
+          if (code === 0) {
+            resolve();
+            return;
+          }
+          // 非零退出码：区分「进程已不存在（视为成功）」与真失败（保持可重试语义）
+          try {
+            process.kill(pid, 0);
+            reject(new Error(`taskkill 退出码 ${code}，进程可能仍在运行`));
+          } catch {
+            resolve(); // ESRCH：进程已不存在
+          }
+        });
+        killer.on('error', () => {
+          try {
+            child.kill('SIGKILL');
+          } catch {
+            /* 已退出 */
+          }
+          try {
+            process.kill(pid, 0);
+            reject(new Error('taskkill 不可用，且目标进程仍在运行'));
+          } catch {
+            resolve();
+          }
+        });
       });
-      killer.on('close', (code) => {
-        if (code === 0) {
-          resolve();
-          return;
-        }
-        // 非零退出码：区分「进程已不存在（视为成功）」与真失败（保持可重试语义）
-        try {
-          process.kill(pid, 0);
-          reject(new Error(`taskkill 退出码 ${code}，进程可能仍在运行`));
-        } catch {
-          resolve(); // ESRCH：进程已不存在
-        }
-      });
-      killer.on('error', () => {
-        try {
-          child.kill('SIGKILL');
-        } catch {
-          /* 已退出 */
-        }
-        try {
-          process.kill(pid, 0);
-          reject(new Error('taskkill 不可用，且目标进程仍在运行'));
-        } catch {
-          resolve();
-        }
-      });
-    });
+      registry.delete(id); // 确认终止成功后才移除登记
+    } catch (err) {
+      // kill 失败：保留登记句柄供重试，错误上抛由 Core 回滚停止意图
+      throw err;
+    }
     return;
   }
 
-  // ---------- Unix：进程组生命周期 ----------
+  // ---------- Unix：入口到出口全程以进程组为生命周期单位 ----------
   const pid = child.pid;
   const groupAlive = (): boolean => {
     if (pid === undefined) {
@@ -324,24 +335,43 @@ async function killSpawned(registry: Map<string, SpawnEntry>, id: string): Promi
     }
   };
 
-  if (signalGroup('SIGTERM') === 'gone') return; // 组已不存在，无事可做
-  // 等待组长 shell 退出或宽限期到（两者先到为准）
-  await new Promise<void>((resolve) => {
-    const done = (): void => {
-      clearTimeout(timer);
-      child.off('close', done);
-      resolve();
-    };
-    const timer = setTimeout(done, 3000);
-    child.once('close', done);
-  });
-  if (!groupAlive()) return;
-  if (signalGroup('SIGKILL') === 'gone') return;
+  // 组长已退出而后代仍存活时（exitCode 已置、组探活仍为真），必须继续走完整终止流程
+  if (!groupAlive()) {
+    registry.delete(id); // 整组已消亡：清登记即可（close 处理器删除幂等）
+    return;
+  }
+  if (signalGroup('SIGTERM') === 'gone') {
+    registry.delete(id);
+    return;
+  }
+  // 等待组长退出或宽限期到（先到为准）；组长已退出时跳过等待直接进入组探活
+  // ——后代持有继承的 stdio 管道会推迟 'close'，不能等它
+  if (child.exitCode === null && child.signalCode === null) {
+    await new Promise<void>((resolve) => {
+      const done = (): void => {
+        clearTimeout(timer);
+        child.off('close', done);
+        resolve();
+      };
+      const timer = setTimeout(done, 3000);
+      child.once('close', done);
+    });
+  }
+  if (!groupAlive()) {
+    registry.delete(id);
+    return;
+  }
+  if (signalGroup('SIGKILL') === 'gone') {
+    registry.delete(id);
+    return;
+  }
   // SIGKILL 已发出：短暂等待内核回收后确认整组消亡，仍存活则暴露为真失败
   await new Promise((resolve) => setTimeout(resolve, 100));
   if (groupAlive()) {
+    // 不删登记：保留句柄供重试；错误上抛由 Core 回滚停止意图
     throw new Error('SIGKILL 已发送但进程组仍存活（可能权限不足），任务保持运行态');
   }
+  registry.delete(id); // 确认整组消亡后才移除登记
 }
 
 /** TCP 探活：连接成功即视为端口存活（协议无关，无 CORS 问题） */

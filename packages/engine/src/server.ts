@@ -320,13 +320,15 @@ export class AgentServer {
   async deleteSession(id: string): Promise<void> {
     this.abort(id);
     this.sessions.delete(id);
-    // 会话删除同步终止其全部后台任务，杜绝僵尸进程与孤儿端口（TODOS #37）
+    // 会话删除同步终止其后台任务，杜绝僵尸进程与孤儿端口（TODOS #37）。
+    // 仍有清理失败（存活）任务时保留 manager —— 引用已从会话表摘除，
+    // 供应用退出 stopAllBackgroundTasks 兜底再清一次
     const bg = this.bgManagers.get(id);
-    this.bgManagers.delete(id);
-    try {
-      await bg?.disposeAll();
-    } catch {
-      // 清理失败不阻断删除
+    if (bg) {
+      await bg.disposeAll();
+      if (bg.runningCount() === 0) {
+        this.bgManagers.delete(id);
+      }
     }
     try {
       await this.host.fs.unlink?.(this.sessionFile(id));
@@ -673,15 +675,15 @@ export class AgentServer {
     return manager.restart(taskId);
   }
 
-  /** 终止所有会话的全部后台任务（应用退出时调用） */
+  /** 终止所有会话的全部后台任务（应用退出时调用）。跨会话并行执行，总耗时以单任务为准 */
   async stopAllBackgroundTasks(): Promise<void> {
-    for (const manager of this.bgManagers.values()) {
-      try {
-        await manager.disposeAll();
-      } catch {
-        // 忽略单个会话清理失败
-      }
-    }
+    await Promise.all(
+      [...this.bgManagers.values()].map((manager) =>
+        manager.disposeAll().catch(() => {
+          // 单会话清理失败不影响其余会话
+        }),
+      ),
+    );
   }
 
   private createProvider(providerId: string, model: string, nativeWebSearch: boolean): Provider {
