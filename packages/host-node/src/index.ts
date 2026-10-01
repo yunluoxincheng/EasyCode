@@ -233,55 +233,115 @@ function spawnShell(
   });
 }
 
-/** 树杀：Windows 用 taskkill /T /F；类 Unix 对独立进程组（detached 产生，pgid=pid）发组信号，
- *  连同 shell 拉起的 node/vite 等后代一起终止；3s 后 SIGKILL 兜底 */
+/**
+ * 树杀并等待终止流程真正完成（Promise 语义 = 进程组已消亡或发生真失败）：
+ * - Windows：taskkill /T /F 整树强杀；非零退出码时探活区分「进程已不存在（成功）」与真失败
+ * - Unix：后台进程为独立进程组（detached 产生，pgid=pid）。组 SIGTERM → 等待 shell 退出或
+ *   3s 宽限 → 以「组」为对象探活（不依赖组长自身状态，忽略 SIGTERM 的 node/vite 后代
+ *   仍会被连根清除）→ 仍存活则组 SIGKILL → 确认消亡；EPERM 等真失败向上抛出，
+ *   由 Core 回滚停止意图保持 UI 与真实进程一致
+ */
 async function killSpawned(registry: Map<string, SpawnEntry>, id: string): Promise<void> {
   const entry = registry.get(id);
   if (!entry) return;
   registry.delete(id);
   const { child } = entry;
   if (child.exitCode !== null || child.signalCode !== null || child.killed) return;
-  if (process.platform === 'win32' && child.pid !== undefined) {
-    await new Promise<void>((resolve) => {
-      const killer = nodeSpawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], {
-        windowsHide: true,
-        stdio: 'ignore',
-      });
-      killer.on('close', () => resolve());
-      killer.on('error', () => {
-        child.kill('SIGKILL');
-        resolve();
-      });
-    });
-    return;
-  }
-  const signalGroup = (signal: NodeJS.Signals): void => {
+
+  if (process.platform === 'win32') {
     if (child.pid === undefined) {
       try {
-        child.kill(signal);
+        child.kill('SIGKILL');
       } catch {
         /* 已退出 */
       }
       return;
     }
+    const pid = child.pid;
+    await new Promise<void>((resolve, reject) => {
+      const killer = nodeSpawn('taskkill', ['/PID', String(pid), '/T', '/F'], {
+        windowsHide: true,
+        stdio: 'ignore',
+      });
+      killer.on('close', (code) => {
+        if (code === 0) {
+          resolve();
+          return;
+        }
+        // 非零退出码：区分「进程已不存在（视为成功）」与真失败（保持可重试语义）
+        try {
+          process.kill(pid, 0);
+          reject(new Error(`taskkill 退出码 ${code}，进程可能仍在运行`));
+        } catch {
+          resolve(); // ESRCH：进程已不存在
+        }
+      });
+      killer.on('error', () => {
+        try {
+          child.kill('SIGKILL');
+        } catch {
+          /* 已退出 */
+        }
+        try {
+          process.kill(pid, 0);
+          reject(new Error('taskkill 不可用，且目标进程仍在运行'));
+        } catch {
+          resolve();
+        }
+      });
+    });
+    return;
+  }
+
+  // ---------- Unix：进程组生命周期 ----------
+  const pid = child.pid;
+  const groupAlive = (): boolean => {
+    if (pid === undefined) {
+      return child.exitCode === null && child.signalCode === null;
+    }
     try {
-      // 负数 pid = 对整个进程组发信号（组在 detached spawn 时建立）
-      process.kill(-child.pid, signal);
-    } catch {
-      // 组不存在（进程已退出）或非组长：退回单杀
-      try {
-        child.kill(signal);
-      } catch {
-        /* 已退出 */
-      }
+      process.kill(-pid, 0);
+      return true;
+    } catch (err) {
+      return (err as NodeJS.ErrnoException).code === 'EPERM'; // EPERM = 组存在但无权限
     }
   };
-  signalGroup('SIGTERM');
-  setTimeout(() => {
-    if (child.exitCode === null && child.signalCode === null) {
-      signalGroup('SIGKILL');
+  /** 返回 done=信号已送达 / gone=组已不存在 / failed=权限等真失败（不静默吞掉） */
+  const signalGroup = (signal: NodeJS.Signals): 'done' | 'gone' | 'failed' => {
+    if (pid === undefined) {
+      try {
+        child.kill(signal);
+        return 'done';
+      } catch (err) {
+        return (err as NodeJS.ErrnoException).code === 'ESRCH' ? 'gone' : 'failed';
+      }
     }
-  }, 3000);
+    try {
+      process.kill(-pid, signal);
+      return 'done';
+    } catch (err) {
+      return (err as NodeJS.ErrnoException).code === 'ESRCH' ? 'gone' : 'failed';
+    }
+  };
+
+  if (signalGroup('SIGTERM') === 'gone') return; // 组已不存在，无事可做
+  // 等待组长 shell 退出或宽限期到（两者先到为准）
+  await new Promise<void>((resolve) => {
+    const done = (): void => {
+      clearTimeout(timer);
+      child.off('close', done);
+      resolve();
+    };
+    const timer = setTimeout(done, 3000);
+    child.once('close', done);
+  });
+  if (!groupAlive()) return;
+  if (signalGroup('SIGKILL') === 'gone') return;
+  // SIGKILL 已发出：短暂等待内核回收后确认整组消亡，仍存活则暴露为真失败
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  if (groupAlive()) {
+    throw new Error('SIGKILL 已发送但进程组仍存活（可能权限不足），任务保持运行态');
+  }
 }
 
 /** TCP 探活：连接成功即视为端口存活（协议无关，无 CORS 问题） */

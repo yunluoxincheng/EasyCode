@@ -322,12 +322,13 @@ let bgCleanupDone = false;
 app.on('before-quit', (event) => {
   isQuitting = true;
   if (bgCleanupDone) return;
-  // 首次退出先等待后台任务树杀完成（Unix 的 SIGTERM→SIGKILL 兜底依赖主进程存活），
-  // 3s 超时兜底保证永不阻塞退出；完成后重新触发 quit
+  // 首次退出先等待后台任务终止流程真正完成（Unix 侧为组 SIGTERM → 3s 宽限 → 组 SIGKILL，
+  // killSpawned 的 Promise 语义 = 整组消亡；disposeAll 并行执行，总耗时以单任务为准），
+  // 5s 超时兜底保证永不阻塞退出；完成后重新触发 quit
   event.preventDefault();
   void Promise.race([
     server.stopAllBackgroundTasks(),
-    new Promise((resolve) => setTimeout(resolve, 3000)),
+    new Promise((resolve) => setTimeout(resolve, 5000)),
   ]).finally(() => {
     bgCleanupDone = true;
     app.quit();

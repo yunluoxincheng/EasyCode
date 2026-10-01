@@ -269,7 +269,8 @@ export class BackgroundTaskManager {
 
   private writeOutput(id: string, chunk: string): void {
     const task = this.tasks.get(id);
-    if (!task) return;
+    // 任务已终结后到达的残留管道数据不再入缓冲
+    if (!task || task.status !== 'running') return;
     task.outputBytes += chunk.length;
     task.pending += chunk;
     // 消费完整的 \n 结尾段（每段内部按 \r 覆盖语义归约成单行）
@@ -423,16 +424,16 @@ export class BackgroundTaskManager {
     return alive;
   }
 
-  /** 终止所有仍在运行的任务（会话删除 / 应用退出时调用） */
+  /** 终止所有仍在运行的任务（会话删除 / 应用退出时调用）。并行执行，总耗时以单个任务为准 */
   async disposeAll(): Promise<void> {
     const running = [...this.tasks.values()].filter((t) => t.status === 'running');
-    for (const task of running) {
-      try {
-        await this.stop(task.id);
-      } catch {
-        // 单个任务清理失败不影响其余
-      }
-    }
+    await Promise.all(
+      running.map((task) =>
+        this.stop(task.id).catch(() => {
+          // 单个任务清理失败不影响其余
+        }),
+      ),
+    );
   }
 
   /** 运行中任务数 */

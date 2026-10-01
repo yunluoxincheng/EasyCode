@@ -354,3 +354,21 @@ test('adopt：保留宿主记录的 cwd 与 shell（供恢复后重启复用）'
   assert.equal(info.cwd, '/ws');
   assert.equal(info.shell, 'git-bash');
 });
+
+test('MemoryHost 演示链路：输出被接收、URL 被捕获、停止生效（不经过 FakeHost）', async () => {
+  const manager = new BackgroundTaskManager(new MemoryHost(), { scope: 'demo' });
+  const info = await manager.start('demo dev server');
+  // MemoryHost 每 350ms 输出一行，共 4 行（约 1.4s）
+  await new Promise((r) => setTimeout(r, 1700));
+  const task = manager.get(info.id)!;
+  assert.equal(task.status, 'running');
+  assert.ok(manager.logs(info.id)!.includes('http://localhost:4173'), '演示输出应进入日志');
+  assert.deepEqual(task.urls, ['http://localhost:4173'], '服务地址应被捕获');
+  const bytesBeforeStop = task.outputBytes;
+  assert.ok(bytesBeforeStop > 0, 'outputBytes 应随输出增长');
+  const after = await manager.stop(info.id);
+  assert.equal(after?.status, 'killed');
+  // 停止后演示定时器已清除，不应再有输出进入缓冲
+  await new Promise((r) => setTimeout(r, 600));
+  assert.equal(manager.get(info.id)!.outputBytes, bytesBeforeStop, '停止后不应再有输出');
+});

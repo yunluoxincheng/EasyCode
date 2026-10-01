@@ -106,17 +106,41 @@ impl StreamDecoder {
         }
     }
 
-    /// ANSI 代码页流式解码：保留末尾可能是多字节 lead 的高位字节到下一块
+    /// ANSI 代码页流式解码：按真实 ACP 的 DBCS 语义成对消费 lead+trail，
+    /// 末尾孤立 lead 保留到下一块（trail 字节数值落在 lead 区间也不会误判，
+    /// 因为它已作为前一 lead 的 trail 被消费）。非 DBCS 代码页整段解码、无持有。
     fn feed_ansi(&mut self, out: &mut Vec<String>) {
-        let keep = if self.buf.last().is_some_and(|b| *b >= 0x80) {
-            1
-        } else {
-            0
-        };
-        if self.buf.len() > keep {
-            let decoded = decode_output(&self.buf[..self.buf.len() - keep]);
-            out.push(decoded);
-            self.buf.drain(..self.buf.len() - keep);
+        #[cfg(windows)]
+        {
+            let cp = get_acp();
+            // DBCS 扫描：返回可安全解码的前缀长度（孤立 lead 之前）
+            let mut i = 0usize;
+            while i < self.buf.len() {
+                if is_dbcs_lead_byte(cp, self.buf[i]) {
+                    if i + 1 < self.buf.len() {
+                        i += 2; // lead + trail 成对消费
+                    } else {
+                        break; // 末尾孤立 lead：留待下一块
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+            if i > 0 {
+                let decoded = decode_output(&self.buf[..i]);
+                out.push(decoded);
+                self.buf.drain(..i);
+            }
+            return;
+        }
+        #[cfg(not(windows))]
+        {
+            // 非 Windows 无 DBCS 语义（decode_output 退路是逐字节 lossy，与配对无关），整段解码
+            if !self.buf.is_empty() {
+                let decoded = decode_output(&self.buf);
+                out.push(decoded);
+                self.buf.clear();
+            }
         }
     }
 
@@ -152,6 +176,28 @@ mod stream_decoder_tests {
         d.feed(b"ready in 233 ms\n", &mut out);
         d.flush(&mut out);
         assert_eq!(out.join(""), "ready in 233 ms\n");
+    }
+
+    #[test]
+    fn dbcs_complete_char_at_chunk_end_is_not_split() {
+        // GBK "中" = D6 D0，chunk 恰好结束在完整双字节字符之后：
+        // trail 字节 D0 数值同样落在 lead 区间，但不得被误判为下一字符的 lead
+        let mut d = StreamDecoder::new();
+        let mut out = Vec::new();
+        d.feed(&[0xD6, 0xD0], &mut out);
+        // 立即整段解码（旧实现会保留 D0、单独碎解 D6）
+        assert_eq!(out.len(), 1, "完整 DBCS 字符应成对消费: {:?}", out);
+        d.feed(&[0xCE, 0xC4], &mut out);
+        d.flush(&mut out);
+        #[cfg(windows)]
+        {
+            extern "system" {
+                fn GetACP() -> u32;
+            }
+            if unsafe { GetACP() } == 936 {
+                assert_eq!(out.join(""), "中文");
+            }
+        }
     }
 
     #[test]
@@ -222,6 +268,25 @@ fn hide_window(cmd: &mut Command) {
 }
 #[cfg(not(windows))]
 fn hide_window(_cmd: &mut Command) {}
+
+/// 当前 ANSI 代码页（简体中文 Windows 通常为 936/GBK；开启系统 UTF-8 时为 65001）
+#[cfg(windows)]
+fn get_acp() -> u32 {
+    extern "system" {
+        fn GetACP() -> u32;
+    }
+    unsafe { GetACP() }
+}
+
+/// DBCS lead 字节判定（Win32 IsDBCSLeadByteEx）：按真实代码页的 lead 区间判定，
+/// trail 字节即便数值落在 lead 区间也不会被误判（它由前导 lead 的配对逻辑消费）
+#[cfg(windows)]
+fn is_dbcs_lead_byte(cp: u32, byte: u8) -> bool {
+    extern "system" {
+        fn IsDBCSLeadByteEx(CodePage: u16, TestChar: u8) -> i32;
+    }
+    unsafe { IsDBCSLeadByteEx(cp as u16, byte) != 0 }
+}
 
 fn truncate(s: &str) -> String {
     if s.len() > MAX_STR {
@@ -604,15 +669,28 @@ fn make_shell_command(command: &str, cwd: Option<&str>, shell: Option<&str>) -> 
     cmd
 }
 
-/// 终止进程：Windows 树杀整棵进程树；Unix 优先按进程组杀
-/// （命令以独立进程组启动，组长 pid 即 pgid），非组长（历史记录）回退单杀。
-fn kill_process(pid: u32) {
+/// 终止进程：Windows 树杀整棵进程树；Unix 优先按进程组杀（命令以独立进程组启动，
+/// 组长 pid 即 pgid），非组长（历史记录）回退单杀。
+/// 返回值语义：Ok = 进程已消亡（或本就不存在）；Err = 进程可能仍在运行（如权限失败）。
+/// 设计取舍：Tauri 侧直接强杀（SIGKILL / taskkill /F），无 TERM 宽限——与 Windows 侧
+/// 一致的确定性语义；graceful 终止由 Node 宿主（TERM → 3s → KILL）承担。
+fn kill_process(pid: u32) -> Result<(), String> {
     #[cfg(windows)]
     {
         let mut cmd = Command::new("taskkill");
         cmd.args(["/PID", &pid.to_string(), "/T", "/F"]);
         hide_window(&mut cmd);
-        let _ = cmd.output();
+        let output = cmd
+            .output()
+            .map_err(|e| format!("执行 taskkill 失败: {}", e))?;
+        if !output.status.success() && process_exists(pid) {
+            return Err(format!(
+                "taskkill 退出码 {:?}，进程 {} 可能仍在运行",
+                output.status.code(),
+                pid
+            ));
+        }
+        Ok(())
     }
     #[cfg(not(windows))]
     {
@@ -620,12 +698,41 @@ fn kill_process(pid: u32) {
             .arg("-9")
             .arg(format!("-{}", pid))
             .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        if !group_killed {
-            let _ = Command::new("kill").arg("-9").arg(pid.to_string()).output();
+            .map_err(|e| format!("执行 kill 失败: {}", e))?;
+        if !group_killed.status.success() {
+            // 非组长或权限失败：单杀回退，仍失败则以探活结果定性
+            let single = Command::new("kill")
+                .arg("-9")
+                .arg(pid.to_string())
+                .output()
+                .map_err(|e| format!("执行 kill 失败: {}", e))?;
+            if !single.status.success() && process_exists(pid) {
+                return Err(format!("kill 失败，进程 {} 可能仍在运行", pid));
+            }
         }
+        Ok(())
     }
+}
+
+/// 探测进程是否仍存在（区分「kill 报错但目标已消亡」与真失败）
+#[cfg(windows)]
+fn process_exists(pid: u32) -> bool {
+    let mut cmd = Command::new("tasklist");
+    cmd.args(["/FI", &format!("PID eq {}", pid), "/NH"]);
+    hide_window(&mut cmd);
+    cmd.output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
+        .unwrap_or(false)
+}
+
+#[cfg(not(windows))]
+fn process_exists(pid: u32) -> bool {
+    Command::new("kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 #[tauri::command]
@@ -708,7 +815,7 @@ async fn proc_run(
 #[tauri::command]
 fn proc_kill(state: tauri::State<'_, PidMap>, id: String) -> Result<(), String> {
     if let Some(pid) = state.0.lock().unwrap().remove(&id) {
-        kill_process(pid);
+        kill_process(pid)?;
     }
     Ok(())
 }
@@ -897,7 +1004,8 @@ fn kill_all_spawned(app: &AppHandle) {
         collected
     };
     for (id, pid) in targets {
-        kill_process(pid);
+        // 应用退出属尽力而为清场：单任务失败不阻断其余
+        let _ = kill_process(pid);
         if let Some(e) = app.state::<SpawnMap>().0.lock().unwrap().get_mut(&id) {
             e.alive = false;
         }

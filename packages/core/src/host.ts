@@ -192,7 +192,8 @@ export class MemoryHost implements Host {
       command: string,
       options: ProcessSpawnOptions,
     ): Promise<ProcessSpawnHandle> => {
-      const id = `demo_${Math.random().toString(36).slice(2, 10)}`;
+      // 必须尊重调用方指定的 id：manager 的输出回调按此 id 索引任务
+      const id = options.id ?? `demo_${Math.random().toString(36).slice(2, 10)}`;
       const lines = [
         `[演示] 正在启动: ${command}`,
         '[演示] dev server 准备中…',

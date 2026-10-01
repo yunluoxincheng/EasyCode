@@ -74,7 +74,7 @@ EasyCode 作为开放、可扩展的桌面 Coding Agent，目前仅提供内置�
 
 ### 37. 长期运行后台进程管理与端口探测（Background Tasks & Port Watcher）
 
-**状态**：✅ 已完成（2026-10-01，经审查返工）——`run_command` 扩展 `background` 参数（立即返回任务 ID/PID，不阻塞 Agent 循环）+ `read_task_logs`（列任务/看输出/端口就绪确认）与 `stop_task` 两个新工具 + 会话级 `BackgroundTaskManager`（环形行缓冲、`\r` 覆盖语义与单行硬上限保证内存有界、单调 `outputBytes` 增量信号、正则捕获本地服务地址、宿主 TCP 探活带 TTL 缓存、单会话任务上限、kill 失败回滚停止意图、删除会话/应用退出统一清场）+ 双宿主真树杀（Windows `taskkill /T /F`；Unix 独立进程组 + 组信号 SIGTERM→SIGKILL，连带 shell 后代）+ 流式实现（NodeHost StringDecoder；Tauri `proc_spawn`/`proc_list`/`net_probe` Channel 流式帧 + 确定性编码模式解码器：UTF-8 增量、非法即整流切 ANSI 代码页并按 lead 字节跨块持有）+ `background_task` 事件驱动底部任务条 + WebView 重载后从宿主恢复接管存活进程（保留 cwd/shell 供重启复用）+ MemoryHost 演示模拟
+**状态**：✅ 已完成（2026-10-01，两轮审查返工）——`run_command` 扩展 `background` 参数（立即返回任务 ID/PID，不阻塞 Agent 循环）+ `read_task_logs`（列任务/看输出/端口就绪确认）与 `stop_task` 两个新工具 + 会话级 `BackgroundTaskManager`（环形行缓冲、`\r` 覆盖语义与单行硬上限保证内存有界、单调 `outputBytes` 增量信号、正则捕获本地服务地址、宿主 TCP 探活带 TTL 缓存、单会话任务上限、kill 失败回滚停止意图、删除会话/应用退出统一清场）+ 双宿主真树杀（Windows `taskkill /T /F` 整树强杀；Unix 独立进程组：Node 按 `组 SIGTERM → 3s 宽限 → 组探活 → 组 SIGKILL → 确认消亡` 完整生命周期终止，Tauri 直接组 SIGKILL 强杀，kill 真失败经探活定性向上抛出）+ 流式实现（NodeHost StringDecoder；Tauri `proc_spawn`/`proc_list`/`net_probe` Channel 流式帧 + 确定性编码模式解码器：UTF-8 增量、非法即整流切 ANSI 代码页并按真实 ACP 的 DBCS lead+trail 成对消费）+ `background_task` 事件驱动底部任务条 + WebView 重载后从宿主恢复接管存活进程（保留 cwd/shell 供重启复用）+ MemoryHost 演示模拟（尊重调用方 id，输出/捕获/停止全链路可用）
 
 **背景**：
 目前的 `run_command` 工具是面向短命令（如 `git status`, `pnpm build`, `pnpm test` 等能在数秒到两分钟内退出且带有 exit code 的命令）设计的，默认带 120s 超时强制中断。
