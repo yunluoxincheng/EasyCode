@@ -74,7 +74,7 @@ EasyCode 作为开放、可扩展的桌面 Coding Agent，目前仅提供内置�
 
 ### 37. 长期运行后台进程管理与端口探测（Background Tasks & Port Watcher）
 
-**状态**：⏳ 待办（规划中）
+**状态**：✅ 已完成（2026-10-01，两轮审查返工）——`run_command` 扩展 `background` 参数（立即返回任务 ID/PID，不阻塞 Agent 循环）+ `read_task_logs`（列任务/看输出/端口就绪确认）与 `stop_task` 两个新工具 + 会话级 `BackgroundTaskManager`（环形行缓冲、`\r` 覆盖语义与单行硬上限保证内存有界、单调 `outputBytes` 增量信号、正则捕获本地服务地址、宿主 TCP 探活带 TTL 缓存、单会话任务上限、kill 失败回滚停止意图、删除会话/应用退出统一清场）+ 双宿主真树杀（Windows `taskkill /T /F` 整树强杀；Unix 独立进程组：Node 按 `组 SIGTERM → 3s 宽限 → 组探活 → 组 SIGKILL → 确认消亡` 完整生命周期终止，Tauri 直接组 SIGKILL 强杀，kill 真失败经探活定性向上抛出）+ 流式实现（NodeHost StringDecoder；Tauri `proc_spawn`/`proc_list`/`net_probe` Channel 流式帧 + 确定性编码模式解码器：UTF-8 增量、非法即整流切 ANSI 代码页并按真实 ACP 的 DBCS lead+trail 成对消费）+ `background_task` 事件驱动底部任务条 + WebView 重载后从宿主恢复接管存活进程（保留 cwd/shell 供重启复用）+ MemoryHost 演示模拟（尊重调用方 id，输出/捕获/停止全链路可用）
 
 **背景**：
 目前的 `run_command` 工具是面向短命令（如 `git status`, `pnpm build`, `pnpm test` 等能在数秒到两分钟内退出且带有 exit code 的命令）设计的，默认带 120s 超时强制中断。
@@ -384,7 +384,7 @@ EasyCode 作为开放、可扩展的桌面 Coding Agent，目前仅提供内置�
 
 ### 44. 内嵌 Web 预览面板（Embedded Preview）
 
-**状态**：⏳ 待办（规划中）
+**状态**：✅ 已完成（2026-10-01，经审查返工）——右侧滑出预览面板（与会话区左右分栏、左缘拖拽调宽）+ 极客风地址栏（可编辑 URL/⟳ 刷新/⚡ 跟随刷新开关/↗ 外部浏览器兜底/✕ 收起）+ 桌面/平板/手机视口宽度快捷切换 + 任务条「⧉ 内嵌预览」一键联动（自动取捕获的服务地址并锚定任务）+ 服务停止失联占位态（`● 服务已停止 [▶ 重新启动] [⟳ 重试连接]`，重启经 `manager.restart` 以原命令、原工作目录与原 shell 重新拉起，抽屉/预览锚点自动跟进新任务 ID）+ 跟随刷新以引擎单调 `outputBytes` 为增量信号（与日志 tail 长度无关，长任务不失效；切换任务重置基线，数据复用 store 既有轮询零额外请求）+ `openUrl` 跨宿主能力（Tauri `open_url` / Electron `shell.openExternal` / 演示 `window.open`）
 
 **背景**：
 前端开发的高频循环是「改代码 → 看 effect → 再改」。当前 #37 落地后，Agent 启动 dev server 并捕获 `localhost:5173` 地址，用户仍需点击「↗ 浏览器打开」切换到外部浏览器查看——窗口来回切换打断了心流。若能把运行中的本地服务直接内嵌到应用侧边实时预览，配合 Agent 的多会话并发（#29），即可形成「左侧 Agent 改码、右侧页面实时刷新」的沉浸闭环。

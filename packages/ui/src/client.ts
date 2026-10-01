@@ -6,6 +6,7 @@ import {
   type SessionMeta,
   type DecisionStats,
   type ProjectDecisionTree,
+  type BackgroundTaskInfo,
 } from '@easycode/core';
 import { AgentServer, type AgentClient, type ProviderEntry, type Settings } from '@easycode/engine';
 import type {
@@ -145,6 +146,21 @@ export class IpcAgentClient implements AgentClient {
   discardGitChanges(id: string, paths: string[]) {
     return this.invoke<{ ok: boolean; error?: string }>('discard-git-changes', { id, paths });
   }
+  listBackgroundTasks(id: string) {
+    return this.invoke<BackgroundTaskInfo[]>('list-background-tasks', { id });
+  }
+  getTaskLogs(id: string, taskId: string, tailLines?: number) {
+    return this.invoke<string>('get-task-logs', { id, taskId, tailLines });
+  }
+  stopBackgroundTask(id: string, taskId: string) {
+    return this.invoke<BackgroundTaskInfo | null>('stop-background-task', { id, taskId });
+  }
+  restartBackgroundTask(id: string, taskId: string) {
+    return this.invoke<BackgroundTaskInfo>('restart-background-task', { id, taskId });
+  }
+  openUrl(url: string) {
+    return this.invoke<void>('open-url', { url });
+  }
   getDecisionStats(filter?: { workspaceRoot?: string; sessionId?: string }) {
     return this.invoke<DecisionStats>('get-decision-stats', filter);
   }
@@ -264,6 +280,13 @@ export function createDemoClient(): AgentClient {
     getGitDiff: (id, options) => wrap(() => server.getGitDiff(id, options)),
     stageGitFiles: (id, paths) => wrap(() => server.stageGitFiles(id, paths)),
     discardGitChanges: (id, paths) => wrap(() => server.discardGitChanges(id, paths)),
+    listBackgroundTasks: (id) => wrap(() => server.listBackgroundTasks(id)),
+    getTaskLogs: (id, taskId, tailLines) => wrap(() => server.getTaskLogs(id, taskId, tailLines)),
+    stopBackgroundTask: (id, taskId) => wrap(() => server.stopBackgroundTask(id, taskId)),
+    restartBackgroundTask: (id, taskId) => wrap(() => server.restartBackgroundTask(id, taskId)),
+    openUrl: async (url) => {
+      window.open(url, '_blank', 'noopener');
+    },
     pickWorkspace: async () => '/demo-workspace',
     openPath: async (_path) => { /* 演示模式：无实际文件系统 */ },
     openInVscode: async (_path) => { /* 演示模式：无实际文件系统 */ },

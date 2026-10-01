@@ -2,9 +2,11 @@ import type { Host } from '../host.js';
 import { validateToolInput, type JsonSchema } from '../jsonschema.js';
 import type { ApprovalManager } from '../approval.js';
 import { startDecisionObservation, type DecisionPolicy, type DecisionOutcome } from '../policy.js';
+import type { BackgroundTaskManager } from '../tasks.js';
 import { readFileTool, writeFileTool, editFileTool, listDirTool } from './fs.js';
 import { searchFilesTool } from './search.js';
 import { runCommandTool } from './shell.js';
+import { readTaskLogsTool, stopTaskTool } from './tasks.js';
 import { todoWriteTool } from './todo.js';
 import { createWebSearchTool, type WebSearchBackendConfig } from './websearch.js';
 import {
@@ -20,6 +22,7 @@ import {
 } from './git.js';
 
 export { todoWriteTool } from './todo.js';
+export { readTaskLogsTool, stopTaskTool } from './tasks.js';
 export { createWebSearchTool, runWebSearch } from './websearch.js';
 export type { WebSearchBackendConfig, SearchHit } from './websearch.js';
 export {
@@ -51,6 +54,8 @@ export interface ToolContext {
   workspaceLock?: { withLock<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> };
   /** 决策小模型策略接口（TODOS #40）：用于敏感风控评估或影子记录 */
   policy?: DecisionPolicy;
+  /** 后台任务管理器（TODOS #37）：run_command background / read_task_logs / stop_task 依赖 */
+  backgroundTasks?: BackgroundTaskManager;
 }
 
 export interface Tool {
@@ -102,6 +107,8 @@ export function createBuiltinTools(options?: {
     .register(listDirTool)
     .register(searchFilesTool)
     .register(runCommandTool)
+    .register(readTaskLogsTool)
+    .register(stopTaskTool)
     .register(todoWriteTool)
     .register(gitStatusTool)
     .register(gitDiffTool);

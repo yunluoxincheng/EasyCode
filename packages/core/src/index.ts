@@ -4,6 +4,8 @@ export * from './events.js';
 export * from './policy.js';
 // 宿主
 export * from './host.js';
+// 后台任务与端口探测（TODOS #37）
+export * from './tasks.js';
 // 审批
 export * from './approval.js';
 // 工具
