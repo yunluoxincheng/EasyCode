@@ -2,7 +2,7 @@
 
 本文件记录 EasyCode 每个版本的变更。发布时，GitHub Release 说明自动取自对应版本的段落。
 
-## [0.1.23] - 2026-10-01
+## [0.1.23] - 2026-10-12
 
 ### 新增
 - 长期运行后台进程管理与端口探测（Background Tasks & Port Watcher）：`run_command` 扩展 `background` 参数，dev server / watch / 容器等长期命令后台常驻运行，调用立即返回任务 ID 与 PID，不再被 120s 超时强杀或残留孤儿端口；配套新增 `read_task_logs`（列任务 / 流式查看输出 / 确认服务就绪）与 `stop_task`（Windows `taskkill /T /F` 树杀整棵进程树）两个工具（TODOS #37）
