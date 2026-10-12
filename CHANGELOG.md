@@ -2,6 +2,12 @@
 
 本文件记录 EasyCode 每个版本的变更。发布时，GitHub Release 说明自动取自对应版本的段落。
 
+## [未发布]
+
+### 修复
+- 启动白屏修复：会话内容含 `<|im_start|>` 等特殊 token 字面量时，`ContextChip` 的 `gpt-tokenizer` 默认抛出 `Disallowed special token found`，渲染期异常导致整棵 React 树卸载、窗口只剩背景色；token 估算改为 `disallowedSpecial: new Set()` 按普通文本计数
+- 根组件新增 `ErrorBoundary` 兜底：今后任何渲染期异常都显示错误堆栈与重载提示，不再整屏空白
+
 ## [0.1.22] - 2026-09-29
 
 ### 修复

@@ -1,6 +1,7 @@
 import React from 'react';
 import { createRoot } from 'react-dom/client';
 import { App } from './App.js';
+import { ErrorBoundary } from './components/ErrorBoundary.js';
 import { StoreProvider } from './useStore.js';
 import { AppStore } from './store.js';
 import { IpcAgentClient, createDemoClient } from './client.js';
@@ -53,9 +54,11 @@ async function bootstrap(): Promise<void> {
     const store = new AppStore(client);
     createRoot(document.getElementById('root')!).render(
       <React.StrictMode>
-        <StoreProvider value={store}>
-          <App />
-        </StoreProvider>
+        <ErrorBoundary>
+          <StoreProvider value={store}>
+            <App />
+          </StoreProvider>
+        </ErrorBoundary>
       </React.StrictMode>,
     );
   } catch (err) {
