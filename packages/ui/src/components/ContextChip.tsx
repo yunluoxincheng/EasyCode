@@ -12,7 +12,9 @@ import { encode } from 'gpt-tokenizer/encoding/o200k_base';
 /** 精确 token 计数：o200k_base 编码（OpenAI 当前分词规范，对其他模型也是良好近似） */
 function count(text: string): number {
   if (!text) return 0;
-  return encode(text).length;
+  // 会话/文件内容可能含 <|im_start|> 等特殊 token 字面量，默认会抛 "Disallowed special token"，
+  // 渲染期异常会卸载整棵 React 树（白屏）。这里只做估算，一律按普通文本计数。
+  return encode(text, { disallowedSpecial: new Set() }).length;
 }
 function fmtTk(n: number): string {
   return n >= 10000 ? `${(n / 10000).toFixed(1)}万` : n.toLocaleString();
