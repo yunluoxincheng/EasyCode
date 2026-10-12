@@ -16,6 +16,12 @@ import { NodeHost } from '@easycode/host-node';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+// 开发/测试隔离开关：设置 EASYCODE_DATA_DIR 时整个实例（Chromium profile + 引擎数据）
+// 使用独立目录，不影响用户真实数据；未设置时行为与默认完全一致。
+if (process.env.EASYCODE_DATA_DIR) {
+  app.setPath('userData', process.env.EASYCODE_DATA_DIR);
+}
+
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let isQuitting = false;
@@ -211,6 +217,15 @@ const handlers: Record<string, Handler> = {
   'get-git-diff': (args) => server.getGitDiff(args.id as string, args.options),
   'stage-git-files': (args) => server.stageGitFiles(args.id as string, args.paths as string[] | undefined),
   'discard-git-changes': (args) => server.discardGitChanges(args.id as string, args.paths as string[]),
+  'list-background-tasks': (args) => server.listBackgroundTasks(args.id as string),
+  'get-task-logs': (args) =>
+    server.getTaskLogs(args.id as string, args.taskId as string, args.tailLines as number | undefined),
+  'stop-background-task': (args) => server.stopBackgroundTask(args.id as string, args.taskId as string),
+  'restart-background-task': (args) => server.restartBackgroundTask(args.id as string, args.taskId as string),
+  'open-url': async (args) => {
+    await shell.openExternal(String(args.url));
+    return null;
+  },
   'get-decision-stats': (args) => server.getDecisionStats(args),
   'get-decision-tree': () => server.getDecisionTree(),
   'export-decision-dataset': (args) => server.exportDecisionDataset(args),
@@ -303,8 +318,21 @@ app.whenReady().then(async () => {
   initTray();
 });
 
-app.on('before-quit', () => {
+let bgCleanupDone = false;
+app.on('before-quit', (event) => {
   isQuitting = true;
+  if (bgCleanupDone) return;
+  // 首次退出先等待后台任务终止流程真正完成（Unix 侧为组 SIGTERM → 3s 宽限 → 组 SIGKILL，
+  // killSpawned 的 Promise 语义 = 整组消亡；disposeAll 并行执行，总耗时以单任务为准），
+  // 5s 超时兜底保证永不阻塞退出；完成后重新触发 quit
+  event.preventDefault();
+  void Promise.race([
+    server.stopAllBackgroundTasks(),
+    new Promise((resolve) => setTimeout(resolve, 5000)),
+  ]).finally(() => {
+    bgCleanupDone = true;
+    app.quit();
+  });
 });
 
 app.on('window-all-closed', () => {

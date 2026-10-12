@@ -218,8 +218,9 @@ function ToolCard({ item }: { item: ToolItem }) {
 /** run_command 拟终端控制台卡片（TODOS #21） */
 function TerminalCard({ item }: { item: ToolItem }) {
   const [open, setOpen] = useState(false);
-  const i = (item.input ?? {}) as { command?: string; timeout_ms?: number };
+  const i = (item.input ?? {}) as { command?: string; timeout_ms?: number; background?: boolean };
   const command = String(i.command ?? '');
+  const isBackground = i.background === true;
 
   // 解析第一行退出码并与输出文本分离
   const parsed = (() => {
@@ -247,6 +248,7 @@ function TerminalCard({ item }: { item: ToolItem }) {
         <span className={`term-status-badge ${statusClass}`}>
           {isRunning ? 'RUN' : parsed ? (parsed.isSuccess ? 'OK' : 'ERR') : statusClass.toUpperCase()}
         </span>
+        {isBackground && <span className="term-bg-badge">BG</span>}
         <span className="term-cmd-preview">$ {command}</span>
         {parsed?.exitCode !== null && parsed?.exitCode !== undefined && (
           <span className={`term-exit-badge ${parsed.isSuccess ? 'ok' : 'err'}`}>
@@ -289,7 +291,7 @@ function ApprovalCard({ item }: { item: ApprovalItem }) {
   const i = (item.input ?? {}) as Record<string, unknown>;
   const headline =
     item.name === 'run_command'
-      ? `执行命令：${String(i.command ?? '')}`
+      ? `执行命令${i.background ? '（后台常驻）' : ''}：${String(i.command ?? '')}`
       : `${TOOL_LABELS[item.name] ?? item.name}：${String(i.path ?? '')}`;
   return (
     <div className={`approval-card ${item.status}`}>

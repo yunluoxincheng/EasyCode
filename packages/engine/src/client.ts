@@ -5,6 +5,7 @@ import type {
   ApprovalMode,
   DecisionStats,
   ProjectDecisionTree,
+  BackgroundTaskInfo,
 } from '@easycode/core';
 import type { ModelTestResult, ProviderModelInfo, Settings, ShellInfo } from './settings.js';
 import type {
@@ -87,6 +88,16 @@ export interface AgentClient {
   stageGitFiles(id: string, paths?: string[]): Promise<{ ok: boolean; error?: string }>;
   /** 放弃修改 (git checkout / git clean)（TODOS #34） */
   discardGitChanges(id: string, paths: string[]): Promise<{ ok: boolean; error?: string }>;
+  /** 列出会话后台任务（含服务地址与端口探活状态）（TODOS #37） */
+  listBackgroundTasks?(id: string): Promise<BackgroundTaskInfo[]>;
+  /** 读取后台任务日志尾部（TODOS #37） */
+  getTaskLogs?(id: string, taskId: string, tailLines?: number): Promise<string>;
+  /** 停止后台任务（TODOS #37） */
+  stopBackgroundTask?(id: string, taskId: string): Promise<BackgroundTaskInfo | null>;
+  /** 以原命令重启后台任务（TODOS #44 预览面板「重新启动」） */
+  restartBackgroundTask?(id: string, taskId: string): Promise<BackgroundTaskInfo>;
+  /** 用系统默认浏览器打开 URL（TODOS #44 外部浏览器兜底） */
+  openUrl?(url: string): Promise<void>;
   pickWorkspace(): Promise<string | null>;
   /** 获取 Reflex 决策统计指标（TODOS #40） */
   getDecisionStats?(filter?: { workspaceRoot?: string; sessionId?: string }): Promise<DecisionStats>;

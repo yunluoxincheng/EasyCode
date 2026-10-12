@@ -1,4 +1,12 @@
-import type { AgentEvent, ApprovalMode, SessionData, SessionMeta, Usage, TodoItem } from '@easycode/core';
+import type {
+  AgentEvent,
+  ApprovalMode,
+  SessionData,
+  SessionMeta,
+  Usage,
+  TodoItem,
+  BackgroundTaskInfo,
+} from '@easycode/core';
 import { providerLabel, type ProjectEntry, type Settings } from '@easycode/engine';
 import type { AgentClient } from './client.js';
 
@@ -60,7 +68,12 @@ export interface SessionViewState {
   lastUsage: Usage | null;
   running: boolean;
   status: SessionRunStatus;
+  /** 会话绑定的后台任务（TODOS #37）：事件驱动 + 轮询刷新 */
+  bgTasks: BackgroundTaskInfo[];
 }
+
+/** 预览面板视口档位（TODOS #44） */
+export type PreviewViewport = 'desktop' | 'tablet' | 'mobile';
 
 export interface ModelSwitchPending {
   sessionId: string;
@@ -103,6 +116,21 @@ export class AppStore {
   pendingModelSwitch: ModelSwitchPending | null = null;
   /** Git 改动审查全尺寸弹窗状态（TODOS #34） */
   gitModalOpen = false;
+
+  /** 活动会话的后台任务视图（TODOS #37），与 activeSession 的池化状态同步 */
+  bgTasks: BackgroundTaskInfo[] = [];
+  /** 终端日志抽屉（TODOS #37）：打开时展示指定任务（null = 第一个任务） */
+  taskDrawerOpen = false;
+  taskDrawerTaskId: string | null = null;
+  /** 内嵌预览面板（TODOS #44） */
+  previewOpen = false;
+  previewUrl: string | null = null;
+  previewTaskId: string | null = null;
+  previewViewport: PreviewViewport = 'desktop';
+  /** 跟随刷新：后台任务有新输出行时自动轻刷新预览（HMR 失效兜底） */
+  previewFollow = true;
+  previewWidth = 520;
+  private bgPollTimer: ReturnType<typeof setInterval> | null = null;
 
   private listeners = new Set<() => void>();
   private seq = 0;
@@ -355,6 +383,7 @@ export class AppStore {
         lastUsage: null,
         running: false,
         status: 'idle',
+        bgTasks: [],
       };
       this.sessionStates.set(id, state);
     }
@@ -369,6 +398,7 @@ export class AppStore {
     this.sessionUsage = state.sessionUsage;
     this.lastUsage = state.lastUsage;
     this.running = state.running;
+    this.bgTasks = state.bgTasks;
   }
 
   async selectSession(id: string): Promise<void> {
@@ -407,6 +437,7 @@ export class AppStore {
           lastUsage: null,
           running: false,
           status: 'idle',
+          bgTasks: [],
         };
         this.sessionStates.set(id, state);
       } else if (!state.running && state.items.length === 0 && data.messages.length > 0) {
@@ -427,6 +458,8 @@ export class AppStore {
       }
       this.view = 'chat';
       this.notify(true);
+      // TODOS #37：切会话后拉取该会话的后台任务列表（接管恢复任务、点亮任务条）
+      void this.refreshBackgroundTasks();
     } catch (err) {
       if (seq !== this.selectSeq) return;
       this.showToast(err instanceof Error ? err.message : String(err), 'err');
@@ -675,6 +708,12 @@ export class AppStore {
       this.activeTodos = [];
       this.running = false;
       this.turnAtBottom = true;
+      this.bgTasks = [];
+      // 抽屉/预览锚定在被删会话的任务上，一并关闭
+      this.taskDrawerOpen = false;
+      this.taskDrawerTaskId = null;
+      this.previewOpen = false;
+      this.previewTaskId = null;
       if (this.sessions.length > 0) await this.selectSession(this.sessions[0].id);
     }
     this.notify(true);
@@ -877,6 +916,161 @@ export class AppStore {
     }
     await this.client.abort(id);
     this.notify(true);
+  }
+
+  /* ---------------- 后台任务与内嵌预览 (TODOS #37 / #44) ---------------- */
+
+  /** 按需启动后台任务轮询：有运行中任务、抽屉或预览打开时每 2.5s 刷新一次 */
+  ensureBgPolling(): void {
+    if (this.bgPollTimer !== null) return;
+    this.bgPollTimer = setInterval(() => {
+      void this.pollBackgroundTasks();
+    }, 2500);
+  }
+
+  private maybeStopBgPolling(): void {
+    if (this.bgPollTimer === null) return;
+    const hasRunning = this.bgTasks.some((t) => t.status === 'running');
+    if (!hasRunning && !this.taskDrawerOpen && !this.previewOpen) {
+      clearInterval(this.bgPollTimer);
+      this.bgPollTimer = null;
+    }
+  }
+
+  private polling = false;
+
+  private async pollBackgroundTasks(): Promise<void> {
+    const id = this.activeId;
+    if (!id || this.polling || !this.client.listBackgroundTasks) {
+      this.maybeStopBgPolling();
+      return;
+    }
+    this.polling = true;
+    try {
+      const list = await this.client.listBackgroundTasks(id);
+      const state = this.sessionStates.get(id);
+      if (state) state.bgTasks = list;
+      if (id === this.activeId) {
+        this.bgTasks = list;
+      }
+      this.notify(false);
+    } catch {
+      // 轮询失败静默（会话可能刚删除）
+    } finally {
+      this.polling = false;
+      this.maybeStopBgPolling();
+    }
+  }
+
+  /** 事件驱动兜底：会话切换 / 应用启动后主动刷一次任务列表（并接管恢复任务） */
+  async refreshBackgroundTasks(): Promise<void> {
+    if (!this.activeId || !this.client.listBackgroundTasks) return;
+    this.ensureBgPolling();
+    await this.pollBackgroundTasks();
+  }
+
+  toggleTaskDrawer(taskId?: string | null): void {
+    if (this.taskDrawerOpen && (taskId === undefined || taskId === this.taskDrawerTaskId)) {
+      this.taskDrawerOpen = false;
+      this.taskDrawerTaskId = null;
+    } else {
+      this.taskDrawerOpen = true;
+      this.taskDrawerTaskId = taskId ?? this.bgTasks[0]?.id ?? null;
+    }
+    this.notify(true);
+  }
+
+  async stopTask(taskId: string): Promise<void> {
+    if (!this.activeId || !this.client.stopBackgroundTask) return;
+    try {
+      await this.client.stopBackgroundTask(this.activeId, taskId);
+    } catch (err) {
+      this.showToast(err instanceof Error ? err.message : String(err), 'err');
+    }
+    await this.refreshBackgroundTasks();
+  }
+
+  async restartTask(taskId: string): Promise<BackgroundTaskInfo | null> {
+    if (!this.activeId || !this.client.restartBackgroundTask) return null;
+    try {
+      const task = await this.client.restartBackgroundTask(this.activeId, taskId);
+      // 日志抽屉 / 预览面板锚点跟进新任务，避免停留在已停止的旧任务上
+      if (this.taskDrawerTaskId === taskId) this.taskDrawerTaskId = task.id;
+      if (this.previewTaskId === taskId) this.previewTaskId = task.id;
+      await this.refreshBackgroundTasks();
+      this.showToast('✓ 后台任务已重新启动');
+      return task;
+    } catch (err) {
+      this.showToast(err instanceof Error ? err.message : String(err), 'err');
+      return null;
+    }
+  }
+
+  /** 在侧边预览面板打开后台任务的服务地址（TODOS #44） */
+  openPreviewForTask(taskId: string): void {
+    const task = this.bgTasks.find((t) => t.id === taskId);
+    const url = task?.primaryUrl;
+    if (!url) {
+      this.showToast('该任务尚未捕获到服务地址', 'err');
+      return;
+    }
+    this.previewUrl = url;
+    this.previewTaskId = taskId;
+    this.previewOpen = true;
+    this.ensureBgPolling();
+    this.notify(true);
+  }
+
+  openPreview(url: string): void {
+    this.previewUrl = url;
+    this.previewTaskId = this.bgTasks.find(
+      (t) => t.status === 'running' && t.primaryUrl === url,
+    )?.id ?? null;
+    this.previewOpen = true;
+    this.ensureBgPolling();
+    this.notify(true);
+  }
+
+  closePreview(): void {
+    this.previewOpen = false;
+    this.previewTaskId = null;
+    this.notify(true);
+  }
+
+  setPreviewUrl(url: string): void {
+    const trimmed = url.trim();
+    if (!trimmed) return;
+    const normalized = /^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`;
+    this.previewUrl = normalized;
+    this.previewTaskId = this.bgTasks.find(
+      (t) => t.primaryUrl === normalized || t.urls.includes(normalized),
+    )?.id ?? null;
+    this.notify(true);
+  }
+
+  setPreviewViewport(v: PreviewViewport): void {
+    this.previewViewport = v;
+    this.notify();
+  }
+
+  togglePreviewFollow(): void {
+    this.previewFollow = !this.previewFollow;
+    this.notify();
+  }
+
+  setPreviewWidth(w: number): void {
+    this.previewWidth = Math.min(Math.max(w, 300), Math.floor(window.innerWidth * 0.7));
+    this.notify();
+  }
+
+  openExternalUrl(url: string): void {
+    void this.client
+      .openUrl?.(url)
+      .catch((err) => this.showToast(err instanceof Error ? err.message : String(err), 'err'));
+  }
+
+  get previewTask(): BackgroundTaskInfo | null {
+    return (this.previewTaskId ? this.bgTasks.find((t) => t.id === this.previewTaskId) : null) ?? null;
   }
 
   /** 展开/折叠一个回合 */
@@ -1121,6 +1315,27 @@ export class AppStore {
           void this.selectSession(sessionId);
         }
         break;
+
+      case 'background_task': {
+        // TODOS #37：后台任务状态变化——不进回合时间线，只更新任务条/抽屉/预览的数据源
+        const tasks = state.bgTasks;
+        const idx = tasks.findIndex((t) => t.id === event.task.id);
+        if (idx === -1) {
+          tasks.push(event.task);
+        } else {
+          tasks[idx] = event.task;
+        }
+        if (isActive) {
+          this.bgTasks = [...tasks];
+          this.ensureBgPolling();
+          this.notify(false);
+        } else if (event.action === 'started') {
+          const sessionTitle = this.sessions.find((s) => s.id === sessionId)?.title || '后台会话';
+          this.showToast(`[${sessionTitle}] 启动后台任务: ${event.task.command.slice(0, 40)}`);
+          this.notify(false);
+        }
+        break;
+      }
 
       case 'error':
         if (isActive) this.flushPendingNotify();

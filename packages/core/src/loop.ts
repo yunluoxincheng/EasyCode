@@ -7,6 +7,7 @@ import { ApprovalManager } from './approval.js';
 import { executeTool, getToolExecutionOutcome, ToolRegistry } from './tools/index.js';
 import { compactHistoryMessages, pruneHistoricalToolResults } from './compaction.js';
 import { startDecisionObservation, type DecisionPolicy, type DecisionObservation } from './policy.js';
+import type { BackgroundTaskManager } from './tasks.js';
 
 export interface LoopOptions {
   provider: Provider;
@@ -32,6 +33,8 @@ export interface LoopOptions {
   workspaceLock?: { withLock<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> };
   /** 决策小模型策略接口（TODOS #40）：用于影子观测或自适应路由 */
   policy?: DecisionPolicy;
+  /** 会话级后台任务管理器（TODOS #37）：run_command background 与任务查询/停止工具依赖 */
+  backgroundTasks?: BackgroundTaskManager;
 }
 
 export interface LoopResult {
@@ -139,6 +142,7 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
     autoCompactThreshold = 0.85,
     workspaceLock,
     policy,
+    backgroundTasks,
   } = options;
 
   let pendingRecoveries: Array<{ observation: DecisionObservation; name: string; input: unknown }> = [];
@@ -294,6 +298,7 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
           shell,
           workspaceLock,
           policy,
+          backgroundTasks,
         });
         const toolOutcome = getToolExecutionOutcome(call.name, execution);
         if (toolRoutingFollowup && call === calls[0]) {

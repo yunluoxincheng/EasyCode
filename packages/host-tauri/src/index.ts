@@ -111,6 +111,58 @@ export async function createTauriHost(): Promise<Host> {
           opts.signal?.removeEventListener('abort', onAbort);
         }
       },
+      /** 启动长期运行的后台进程（TODOS #37）：stdout/stderr 合流经 Channel 流式回传 */
+      spawn: async (command, opts) => {
+        const id = opts.id ?? crypto.randomUUID();
+        const ch = new Channel<{ t: 'out'; d: string } | { t: 'exit'; code: number | null }>();
+        ch.onmessage = (frame) => {
+          if (frame.t === 'out') opts.onOutput?.(frame.d);
+          else opts.onExit?.(frame.code);
+        };
+        const onAbort = () => {
+          invoke('proc_kill', { id }).catch(() => {});
+        };
+        opts.signal?.addEventListener('abort', onAbort, { once: true });
+        try {
+          const handle = await invoke<{ id: string; pid: number }>('proc_spawn', {
+            id,
+            command,
+            cwd: opts.cwd,
+            shell: opts.shell,
+            onEvent: ch,
+          });
+          return handle;
+        } catch (err) {
+          opts.signal?.removeEventListener('abort', onAbort);
+          throw err;
+        }
+      },
+      kill: async (id) => {
+        await invoke('proc_kill', { id });
+      },
+      listSpawned: async () => {
+        const list = await invoke<
+          Array<{
+            id: string;
+            pid: number;
+            command: string;
+            cwd?: string;
+            shell?: string;
+            startedMs: number;
+            alive: boolean;
+          }>
+        >('proc_list');
+        return list.map((t) => ({
+          id: t.id,
+          pid: t.pid,
+          command: t.command,
+          cwd: t.cwd,
+          shell: t.shell,
+          startedAt: t.startedMs,
+          alive: t.alive,
+        }));
+      },
+      probePort: (url, timeoutMs) => invoke<boolean>('net_probe', { url, timeoutMs }),
     },
     env: {
       dataDir: () => info.data_dir,
@@ -306,6 +358,11 @@ export async function createTauriClient(options?: { reflexPolicy?: DecisionPolic
     getGitDiff: (id, options) => server.getGitDiff(id, options),
     stageGitFiles: (id, paths) => server.stageGitFiles(id, paths),
     discardGitChanges: (id, paths) => server.discardGitChanges(id, paths),
+    listBackgroundTasks: (id) => server.listBackgroundTasks(id),
+    getTaskLogs: (id, taskId, tailLines) => server.getTaskLogs(id, taskId, tailLines),
+    stopBackgroundTask: (id, taskId) => server.stopBackgroundTask(id, taskId),
+    restartBackgroundTask: (id, taskId) => server.restartBackgroundTask(id, taskId),
+    openUrl: (url: string) => invoke<void>('open_url', { url }),
     pickWorkspace: () => invoke<string | null>('pick_folder'),
     openPath: (path: string) => invoke<void>('open_path', { path }),
     openInVscode: (path: string) => invoke<void>('open_in_vscode', { path }),
