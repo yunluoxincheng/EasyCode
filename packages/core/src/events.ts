@@ -1,4 +1,5 @@
 import type { ToolCallBlock, Usage } from './types.js';
+import type { BackgroundTaskInfo } from './tasks.js';
 
 /** 引擎 → UI 的单向事件流（传输层无关：IPC / 进程内 / CLI 终端皆可承载） */
 export type AgentEvent =
@@ -28,6 +29,12 @@ export type AgentEvent =
       beforeTokens?: number;
       afterTokens?: number;
       summary: string;
+    }
+  | {
+      /** 后台任务状态变化（TODOS #37）：不进入回合时间线，仅驱动底部任务条与预览面板 */
+      type: 'background_task';
+      action: 'started' | 'exited' | 'stopped' | 'recovered';
+      task: BackgroundTaskInfo;
     }
   | { type: 'error'; message: string }
   | { type: 'done'; reason: 'completed' | 'aborted' | 'error' };

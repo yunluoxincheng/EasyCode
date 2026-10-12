@@ -24,6 +24,216 @@ const MAX_STR: usize = 200_000;
 #[derive(Default)]
 struct PidMap(Mutex<HashMap<String, u32>>);
 
+/// 后台任务注册表（TODOS #37）：id -> 元数据。WebView 重载后 proc_list 恢复接管；
+/// 应用退出时 kill_all_spawned 清场，杜绝孤儿 dev server 占端口。
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SpawnedInfo {
+    id: String,
+    pid: u32,
+    command: String,
+    cwd: Option<String>,
+    shell: Option<String>,
+    started_ms: u64,
+    alive: bool,
+}
+
+#[derive(Default)]
+struct SpawnMap(Mutex<HashMap<String, SpawnedInfo>>);
+
+/// 流式增量解码器（TODOS #37）：默认按 UTF-8 增量解出完整片段（跨块的不完整序列留待下一块）；
+/// 一旦出现确定非法的 UTF-8 字节（如 GBK 输出），整个流确定性切换为 ANSI 代码页解码——
+/// 与 proc_run 的整缓冲判定语义一致，避免按 UTF-8 非法长度逐字节碎解 GBK 双字节字符。
+/// ANSI 模式下保留末尾可能不完整的多字节 lead 字节（GBK/Big5 lead 均 ≥ 0x81）到下一块。
+struct StreamDecoder {
+    buf: Vec<u8>,
+    /// true = 已判定为 ANSI 代码页流（CP_ACP，如简体中文 Windows 的 GBK/CP936）
+    ansi_mode: bool,
+}
+
+impl StreamDecoder {
+    fn new() -> Self {
+        Self {
+            buf: Vec::new(),
+            ansi_mode: false,
+        }
+    }
+
+    fn feed(&mut self, chunk: &[u8], out: &mut Vec<String>) {
+        if self.buf.len() < 1 << 20 {
+            self.buf.extend_from_slice(chunk);
+        } else {
+            // 异常防护：残存缓冲异常膨胀时直接 lossy 丢弃，保证不解内存
+            out.push(String::from_utf8_lossy(&self.buf).into_owned());
+            self.buf.clear();
+            out.push(String::from_utf8_lossy(chunk).into_owned());
+            return;
+        }
+        loop {
+            if self.ansi_mode {
+                self.feed_ansi(out);
+                return;
+            }
+            if self.buf.is_empty() {
+                return;
+            }
+            match std::str::from_utf8(&self.buf) {
+                Ok(s) => {
+                    out.push(s.to_string());
+                    self.buf.clear();
+                    return;
+                }
+                Err(e) => {
+                    let valid = e.valid_up_to();
+                    if valid > 0 {
+                        // valid_up_to 保证前缀合法
+                        let s = std::str::from_utf8(&self.buf[..valid]).unwrap_or_default();
+                        out.push(s.to_string());
+                        self.buf.drain(..valid);
+                        continue;
+                    }
+                    match e.error_len() {
+                        None => return, // 不完整的 UTF-8 序列：留待下一块（也可能本是 ANSI 多字节的前半）
+                        Some(_) => {
+                            // 确定非法：整流切换 ANSI 代码页模式（不再按 UTF-8 非法长度碎解）
+                            self.ansi_mode = true;
+                            self.feed_ansi(out);
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// ANSI 代码页流式解码：按真实 ACP 的 DBCS 语义成对消费 lead+trail，
+    /// 末尾孤立 lead 保留到下一块（trail 字节数值落在 lead 区间也不会误判，
+    /// 因为它已作为前一 lead 的 trail 被消费）。非 DBCS 代码页整段解码、无持有。
+    fn feed_ansi(&mut self, out: &mut Vec<String>) {
+        #[cfg(windows)]
+        {
+            let cp = get_acp();
+            // DBCS 扫描：返回可安全解码的前缀长度（孤立 lead 之前）
+            let mut i = 0usize;
+            while i < self.buf.len() {
+                if is_dbcs_lead_byte(cp, self.buf[i]) {
+                    if i + 1 < self.buf.len() {
+                        i += 2; // lead + trail 成对消费
+                    } else {
+                        break; // 末尾孤立 lead：留待下一块
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+            if i > 0 {
+                let decoded = decode_output(&self.buf[..i]);
+                out.push(decoded);
+                self.buf.drain(..i);
+            }
+            return;
+        }
+        #[cfg(not(windows))]
+        {
+            // 非 Windows 无 DBCS 语义（decode_output 退路是逐字节 lossy，与配对无关），整段解码
+            if !self.buf.is_empty() {
+                let decoded = decode_output(&self.buf);
+                out.push(decoded);
+                self.buf.clear();
+            }
+        }
+    }
+
+    /// 流结束：冲刷残余字节（不完整序列按 ACP/lossy 兜底）
+    fn flush(&mut self, out: &mut Vec<String>) {
+        if !self.buf.is_empty() {
+            let rest = std::mem::take(&mut self.buf);
+            out.push(decode_output(&rest));
+        }
+    }
+}
+
+#[cfg(test)]
+mod stream_decoder_tests {
+    use super::*;
+
+    #[test]
+    fn utf8_multibyte_across_chunks() {
+        let mut d = StreamDecoder::new();
+        let mut out = Vec::new();
+        // "你" = E4 BD A0，"好" = E5 A5 BD；在"你"的第二字节后切块
+        d.feed(&[0xE4, 0xBD], &mut out);
+        assert!(out.is_empty(), "不完整序列应等待下一块");
+        d.feed(&[0xA0, 0xE5, 0xA5, 0xBD, 0x0A], &mut out);
+        d.flush(&mut out);
+        assert_eq!(out.join(""), "你好\n");
+    }
+
+    #[test]
+    fn utf8_ascii_passthrough() {
+        let mut d = StreamDecoder::new();
+        let mut out = Vec::new();
+        d.feed(b"ready in 233 ms\n", &mut out);
+        d.flush(&mut out);
+        assert_eq!(out.join(""), "ready in 233 ms\n");
+    }
+
+    #[test]
+    fn dbcs_complete_char_at_chunk_end_is_not_split() {
+        // GBK "中" = D6 D0，chunk 恰好结束在完整双字节字符之后：
+        // trail 字节 D0 数值同样落在 lead 区间，但不得被误判为下一字符的 lead
+        let mut d = StreamDecoder::new();
+        let mut out = Vec::new();
+        d.feed(&[0xD6, 0xD0], &mut out);
+        // 立即整段解码（旧实现会保留 D0、单独碎解 D6）
+        assert_eq!(out.len(), 1, "完整 DBCS 字符应成对消费: {:?}", out);
+        d.feed(&[0xCE, 0xC4], &mut out);
+        d.flush(&mut out);
+        #[cfg(windows)]
+        {
+            extern "system" {
+                fn GetACP() -> u32;
+            }
+            if unsafe { GetACP() } == 936 {
+                assert_eq!(out.join(""), "中文");
+            }
+        }
+    }
+
+    #[test]
+    fn ansi_stream_switches_wholesale_without_per_byte_split() {
+        // GBK "你好" = C4 E3 BA C3：首块只有 lead 字节 C4 时不得立即碎解
+        let mut d = StreamDecoder::new();
+        let mut out = Vec::new();
+        d.feed(&[0xC4], &mut out);
+        assert!(out.is_empty(), "单 lead 字节应观望而非逐字节碎解");
+        d.feed(&[0xE3, 0xBA, 0xC3, 0x0D, 0x0A], &mut out);
+        d.flush(&mut out);
+        // 关键回归断言：整段切换 ANSI 模式后一次性解码，不产生逐字节碎片
+        assert_eq!(out.len(), 1, "应整段解码而非按 UTF-8 非法长度碎解: {:?}", out);
+        // 同流后续块继续走 ANSI 模式且按 lead 字节持有跨块边界
+        let mut out2 = Vec::new();
+        // GBK "中文" = D6 D0 CE C4：先到 D6 D0 CE，C4 留待下一块
+        d.feed(&[0xD6, 0xD0, 0xCE], &mut out2);
+        d.feed(&[0xC4, 0x21], &mut out2);
+        d.flush(&mut out2);
+        // 多个传输段是正常的（JS 侧拼行），但字符本身不得被碎解
+        assert!(!out2.is_empty());
+        // 精确字符断言仅在实际 GBK 代码页（CP936）机器上成立；
+        // ACP=65001（系统 UTF-8）等环境退路是 lossy，但结构上保证 lead 字节跨块持有
+        #[cfg(windows)]
+        {
+            extern "system" {
+                fn GetACP() -> u32;
+            }
+            if unsafe { GetACP() } == 936 {
+                assert_eq!(out.join(""), "你好\r\n");
+                assert_eq!(out2.join(""), "中文!");
+            }
+        }
+    }
+}
+
 /// 运行中 HTTP 请求的取消句柄：id -> oneshot sender。
 #[derive(Default)]
 struct HttpAbortMap(Mutex<HashMap<String, tokio::sync::oneshot::Sender<()>>>);
@@ -58,6 +268,25 @@ fn hide_window(cmd: &mut Command) {
 }
 #[cfg(not(windows))]
 fn hide_window(_cmd: &mut Command) {}
+
+/// 当前 ANSI 代码页（简体中文 Windows 通常为 936/GBK；开启系统 UTF-8 时为 65001）
+#[cfg(windows)]
+fn get_acp() -> u32 {
+    extern "system" {
+        fn GetACP() -> u32;
+    }
+    unsafe { GetACP() }
+}
+
+/// DBCS lead 字节判定（Win32 IsDBCSLeadByteEx）：按真实代码页的 lead 区间判定，
+/// trail 字节即便数值落在 lead 区间也不会被误判（它由前导 lead 的配对逻辑消费）
+#[cfg(windows)]
+fn is_dbcs_lead_byte(cp: u32, byte: u8) -> bool {
+    extern "system" {
+        fn IsDBCSLeadByteEx(CodePage: u16, TestChar: u8) -> i32;
+    }
+    unsafe { IsDBCSLeadByteEx(cp as u16, byte) != 0 }
+}
 
 fn truncate(s: &str) -> String {
     if s.len() > MAX_STR {
@@ -405,6 +634,107 @@ fn proc_detect_shells() -> Vec<ShellInfo> {
     detect_available_shells()
 }
 
+/// 按请求的 shell（或自动探测结果）构造执行命令的 shell 进程（proc_run / proc_spawn 共用）
+fn make_shell_command(command: &str, cwd: Option<&str>, shell: Option<&str>) -> Command {
+    #[cfg(windows)]
+    let mut cmd = {
+        let shells = detect_available_shells();
+        let (bin, shell_args) = resolve_windows_shell(shell, &shells);
+        let mut c = Command::new(bin);
+        for a in shell_args {
+            c.arg(a);
+        }
+        c.arg(command);
+        c
+    };
+    #[cfg(not(windows))]
+    let mut cmd = {
+        let bin = match shell {
+            Some("bash") => "bash",
+            _ => "sh",
+        };
+        let mut c = Command::new(bin);
+        c.arg("-c").arg(command);
+        // Unix 下让 shell 成为独立进程组长（pgid = pid）：终止时对整组发信号，
+        // 才能连同 `sh -c "pnpm dev"` 拉起的 node/vite 后代一起终止
+        use std::os::unix::process::CommandExt;
+        c.process_group(0);
+        c
+    };
+    if let Some(dir) = cwd {
+        if !dir.is_empty() {
+            cmd.current_dir(dir);
+        }
+    }
+    cmd
+}
+
+/// 终止进程：Windows 树杀整棵进程树；Unix 优先按进程组杀（命令以独立进程组启动，
+/// 组长 pid 即 pgid），非组长（历史记录）回退单杀。
+/// 返回值语义：Ok = 进程已消亡（或本就不存在）；Err = 进程可能仍在运行（如权限失败）。
+/// 设计取舍：Tauri 侧直接强杀（SIGKILL / taskkill /F），无 TERM 宽限——与 Windows 侧
+/// 一致的确定性语义；graceful 终止由 Node 宿主（TERM → 3s → KILL）承担。
+fn kill_process(pid: u32) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let mut cmd = Command::new("taskkill");
+        cmd.args(["/PID", &pid.to_string(), "/T", "/F"]);
+        hide_window(&mut cmd);
+        let output = cmd
+            .output()
+            .map_err(|e| format!("执行 taskkill 失败: {}", e))?;
+        if !output.status.success() && process_exists(pid) {
+            return Err(format!(
+                "taskkill 退出码 {:?}，进程 {} 可能仍在运行",
+                output.status.code(),
+                pid
+            ));
+        }
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let group_killed = Command::new("kill")
+            .arg("-9")
+            .arg(format!("-{}", pid))
+            .output()
+            .map_err(|e| format!("执行 kill 失败: {}", e))?;
+        if !group_killed.status.success() {
+            // 非组长或权限失败：单杀回退，仍失败则以探活结果定性
+            let single = Command::new("kill")
+                .arg("-9")
+                .arg(pid.to_string())
+                .output()
+                .map_err(|e| format!("执行 kill 失败: {}", e))?;
+            if !single.status.success() && process_exists(pid) {
+                return Err(format!("kill 失败，进程 {} 可能仍在运行", pid));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// 探测进程是否仍存在（区分「kill 报错但目标已消亡」与真失败）
+#[cfg(windows)]
+fn process_exists(pid: u32) -> bool {
+    let mut cmd = Command::new("tasklist");
+    cmd.args(["/FI", &format!("PID eq {}", pid), "/NH"]);
+    hide_window(&mut cmd);
+    cmd.output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
+        .unwrap_or(false)
+}
+
+#[cfg(not(windows))]
+fn process_exists(pid: u32) -> bool {
+    Command::new("kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 #[tauri::command]
 async fn proc_run(
     state: tauri::State<'_, PidMap>,
@@ -416,32 +746,7 @@ async fn proc_run(
 ) -> Result<serde_json::Value, String> {
     let timeout = Duration::from_millis(timeout_ms.unwrap_or(120_000).clamp(1_000, 600_000));
 
-    #[cfg(windows)]
-    let mut cmd = {
-        let shells = detect_available_shells();
-        let (bin, shell_args) = resolve_windows_shell(shell.as_deref(), &shells);
-        let mut c = Command::new(bin);
-        for a in shell_args {
-            c.arg(a);
-        }
-        c.arg(&command);
-        c
-    };
-    #[cfg(not(windows))]
-    let mut cmd = {
-        let bin = match shell.as_deref() {
-            Some("bash") => "bash",
-            _ => "sh",
-        };
-        let mut c = Command::new(bin);
-        c.arg("-c").arg(&command);
-        c
-    };
-    if let Some(dir) = cwd.as_deref() {
-        if !dir.is_empty() {
-            cmd.current_dir(dir);
-        }
-    }
+    let mut cmd = make_shell_command(&command, cwd.as_deref(), shell.as_deref());
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).stdin(Stdio::null());
     hide_window(&mut cmd);
 
@@ -509,20 +814,205 @@ async fn proc_run(
 
 #[tauri::command]
 fn proc_kill(state: tauri::State<'_, PidMap>, id: String) -> Result<(), String> {
-    if let Some(pid) = state.0.lock().unwrap().remove(&id) {
-        let mut cmd = if cfg!(windows) {
-            let mut c = Command::new("taskkill");
-            c.args(["/PID", &pid.to_string(), "/T", "/F"]);
-            c
-        } else {
-            let mut c = Command::new("kill");
-            c.arg("-9").arg(pid.to_string());
-            c
-        };
-        hide_window(&mut cmd);
-        let _ = cmd.output();
+    // 先查后杀：确认终止成功才移除登记——kill 失败保留句柄，重试语义才成立
+    let pid = state.0.lock().unwrap().get(&id).copied();
+    if let Some(pid) = pid {
+        kill_process(pid)?;
+        state.0.lock().unwrap().remove(&id);
     }
     Ok(())
+}
+
+/// 启动长期运行的后台进程（TODOS #37）：立即返回 id/pid；
+/// stdout+stderr 合流经流式解码后以 {"t":"out"} 帧推送，退出时补发 {"t":"exit"} 帧。
+#[tauri::command]
+async fn proc_spawn(
+    app: AppHandle,
+    spawns: tauri::State<'_, SpawnMap>,
+    pids: tauri::State<'_, PidMap>,
+    id: String,
+    command: String,
+    cwd: Option<String>,
+    shell: Option<String>,
+    on_event: Channel<serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    let mut cmd = make_shell_command(&command, cwd.as_deref(), shell.as_deref());
+    cmd.stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null());
+    hide_window(&mut cmd);
+
+    let mut child = cmd.spawn().map_err(|e| format!("启动后台进程失败: {}", e))?;
+    let pid = child.id();
+    let started_ms = std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    spawns.0.lock().unwrap().insert(
+        id.clone(),
+        SpawnedInfo {
+            id: id.clone(),
+            pid,
+            command: command.clone(),
+            cwd: cwd.clone(),
+            shell: shell.clone(),
+            started_ms,
+            alive: true,
+        },
+    );
+    pids.0.lock().unwrap().insert(id.clone(), pid);
+
+    let send_frame = |ch: &Channel<serde_json::Value>, frame: serde_json::Value| {
+        // WebView 已重载/关闭时发送失败属预期，静默即可
+        let _ = ch.send(frame);
+    };
+
+    let mut stdout_pipe = child.stdout.take();
+    let mut stderr_pipe = child.stderr.take();
+    let ch_out = on_event.clone();
+    let out_handle = std::thread::spawn(move || {
+        let mut decoder = StreamDecoder::new();
+        let mut buf = [0u8; 8192];
+        if let Some(p) = stdout_pipe.as_mut() {
+            loop {
+                match p.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let mut frags: Vec<String> = Vec::new();
+                        decoder.feed(&buf[..n], &mut frags);
+                        for f in frags {
+                            send_frame(&ch_out, serde_json::json!({ "t": "out", "d": f }));
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            let mut tail: Vec<String> = Vec::new();
+            decoder.flush(&mut tail);
+            for f in tail {
+                send_frame(&ch_out, serde_json::json!({ "t": "out", "d": f }));
+            }
+        }
+    });
+    let ch_err = on_event.clone();
+    let err_handle = std::thread::spawn(move || {
+        let mut decoder = StreamDecoder::new();
+        let mut buf = [0u8; 8192];
+        if let Some(p) = stderr_pipe.as_mut() {
+            loop {
+                match p.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let mut frags: Vec<String> = Vec::new();
+                        decoder.feed(&buf[..n], &mut frags);
+                        for f in frags {
+                            send_frame(&ch_err, serde_json::json!({ "t": "out", "d": f }));
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            let mut tail: Vec<String> = Vec::new();
+            decoder.flush(&mut tail);
+            for f in tail {
+                send_frame(&ch_err, serde_json::json!({ "t": "out", "d": f }));
+            }
+        }
+    });
+
+    // 等待进程退出：标记注册表失活并通知 WebView
+    let app_handle = app.clone();
+    let task_id = id.clone();
+    let ch_exit = on_event;
+    std::thread::spawn(move || {
+        let _ = out_handle.join();
+        let _ = err_handle.join();
+        let code = match child.wait() {
+            Ok(status) => status.code(),
+            Err(_) => None,
+        };
+        if let Some(e) = app_handle
+            .state::<SpawnMap>()
+            .0
+            .lock()
+            .unwrap()
+            .get_mut(&task_id)
+        {
+            e.alive = false;
+        }
+        app_handle.state::<PidMap>().0.lock().unwrap().remove(&task_id);
+        send_frame(
+            &ch_exit,
+            serde_json::json!({ "t": "exit", "code": code }),
+        );
+    });
+
+    Ok(serde_json::json!({ "id": id, "pid": pid }))
+}
+
+/// 列出宿主侧登记的后台任务（WebView 重载后恢复接管用）
+#[tauri::command]
+fn proc_list(state: tauri::State<'_, SpawnMap>) -> Vec<SpawnedInfo> {
+    let mut list: Vec<SpawnedInfo> = state.0.lock().unwrap().values().cloned().collect();
+    list.sort_by(|a, b| a.started_ms.cmp(&b.started_ms));
+    list
+}
+
+/// 本地服务端口探活（TODOS #37）：对 http(s) URL 的 host:port 发起 TCP 连接，
+/// 协议无关、不受 WebView CORS 限制。
+#[tauri::command]
+async fn net_probe(url: String, timeout_ms: Option<u64>) -> Result<bool, String> {
+    let parsed = reqwest::Url::parse(&url).map_err(|e| e.to_string())?;
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return Ok(false);
+    }
+    let Some(host) = parsed.host_str() else {
+        return Ok(false);
+    };
+    let port = parsed.port_or_known_default().unwrap_or(80);
+    let timeout = Duration::from_millis(timeout_ms.unwrap_or(1_600).clamp(100, 5_000));
+    let addr = if host.contains(':') {
+        format!("[{}]:{}", host, port)
+    } else {
+        format!("{}:{}", host, port)
+    };
+    let ok = tokio::task::spawn_blocking(move || {
+        use std::net::ToSocketAddrs;
+        match addr.to_socket_addrs() {
+            Ok(mut addrs) => match addrs.next() {
+                Some(a) => std::net::TcpStream::connect_timeout(&a, timeout).is_ok(),
+                None => false,
+            },
+            Err(_) => false,
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(ok)
+}
+
+/// 应用退出时终止所有仍在运行的后台任务（树杀整棵进程树，杜绝孤儿端口）
+fn kill_all_spawned(app: &AppHandle) {
+    let targets: Vec<(String, u32)> = {
+        let map = app.state::<SpawnMap>();
+        let collected: Vec<(String, u32)> = map
+            .0
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|e| e.alive)
+            .map(|e| (e.id.clone(), e.pid))
+            .collect();
+        collected
+    };
+    for (id, pid) in targets {
+        // 应用退出属尽力而为清场：单任务失败不阻断其余
+        let _ = kill_process(pid);
+        if let Some(e) = app.state::<SpawnMap>().0.lock().unwrap().get_mut(&id) {
+            e.alive = false;
+        }
+    }
 }
 
 #[tauri::command]
@@ -539,6 +1029,13 @@ async fn pick_folder(app: AppHandle) -> Result<Option<String>, String> {
 async fn open_path(app: AppHandle, path: String) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
     app.opener().open_path(&path, None::<&str>).map_err(|e| e.to_string())
+}
+
+/// 用系统默认浏览器打开 URL（TODOS #44 预览面板「外部浏览器打开」兜底）
+#[tauri::command]
+async fn open_url(app: AppHandle, url: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    app.opener().open_url(&url, None::<&str>).map_err(|e| e.to_string())
 }
 
 /// 探测 PATH 中的 code 命令（VS Code CLI）。返回是否找到。
@@ -753,6 +1250,7 @@ fn main() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .manage(PidMap::default())
+        .manage(SpawnMap::default())
         .manage(HttpAbortMap::default())
         .manage(CloseToTrayState(Mutex::new(true))) // 默认开启关闭最小化到托盘
         .setup(|app| {
@@ -824,8 +1322,12 @@ fn main() {
             fs_unlink,
             proc_run,
             proc_kill,
+            proc_spawn,
+            proc_list,
+            net_probe,
             pick_folder,
             open_path,
+            open_url,
             open_in_vscode,
             proc_detect_shells,
             send_notification,
@@ -833,6 +1335,15 @@ fn main() {
             http_stream_cancel,
             set_close_to_tray
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            // 应用退出（托盘退出 / 窗口退出）时清场后台任务，杜绝孤儿进程占端口（TODOS #37）
+            if matches!(
+                event,
+                tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
+            ) {
+                kill_all_spawned(app_handle);
+            }
+        });
 }
