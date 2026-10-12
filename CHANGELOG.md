@@ -2,12 +2,6 @@
 
 本文件记录 EasyCode 每个版本的变更。发布时，GitHub Release 说明自动取自对应版本的段落。
 
-## [未发布]
-
-### 修复
-- 启动白屏修复：会话内容含 `<|im_start|>` 等特殊 token 字面量时，`ContextChip` 的 `gpt-tokenizer` 默认抛出 `Disallowed special token found`，渲染期异常导致整棵 React 树卸载、窗口只剩背景色；token 估算改为 `disallowedSpecial: new Set()` 按普通文本计数
-- 根组件新增 `ErrorBoundary` 兜底：今后任何渲染期异常都显示错误堆栈与重载提示，不再整屏空白
-
 ## [0.1.23] - 2026-10-01
 
 ### 新增
@@ -17,6 +11,10 @@
 - 双宿主流式进程能力与真树杀：Host 接口扩展 `process.spawn / kill / listSpawned / probePort`（core 保持零依赖，能力注入）；Windows 以 `taskkill /T /F` 树杀整棵进程树，Unix 以独立进程组启动（Node `detached` / Rust `process_group(0)`）并以进程组为生命周期单位——Node 宿主从入口到出口均以组探活为准（组长 shell 先退出而后代忽略 SIGTERM 存活时同样走完整终止流程：`组 SIGTERM → 等待组长退出或 3s 宽限 → 组探活 → 仍存活则组 SIGKILL → 确认消亡`），Tauri 宿主直接组 SIGKILL 强杀（与 Windows 强杀语义一致，graceful 终止由 Node 宿主承担）；kill 真失败（如权限不足且进程仍存活）经探活定性后向上抛出，Core 据此回滚停止意图保持 UI 与真实进程一致，进程已消亡（ESRCH / taskkill 128）不误报；NodeHost 以 `StringDecoder` 增量解码输出，Tauri 新增 `proc_spawn`（Channel 流式帧推送，确定性编码模式解码器：UTF-8 增量解出、出现确定非法字节即整流切换 ANSI 代码页，并按真实 ACP 的 DBCS lead+trail 成对消费、末尾孤立 lead 跨块持有，trail 字节落在 lead 区间也不会被碎解）、`proc_list`、`net_probe`（TCP 探活不受 WebView CORS 限制）；系统提示词同步增加后台任务使用纪律（TODOS #37）
 - 内嵌 Web 预览面板（Embedded Preview）：右侧滑出预览分区与会话区左右分栏（左缘拖拽调宽），内嵌 iframe 实时加载本地服务；极客风地址栏支持编辑跳转、⟳ 刷新、⚡ 跟随刷新（轮询任务输出行数增量自动轻刷新，HMR 失效兜底）、↗ 外部浏览器兜底与桌面 / 平板 / 手机视口宽度快捷切换（TODOS #44）
 - 预览面板与后台任务条联动：任务条 / 日志抽屉「⧉」一键内嵌预览捕获的服务地址并锚定任务；服务停止或端口失活时自动切换失联占位态 `● 服务已停止 [▶ 重新启动] [⟳ 重试连接]`，重启经 `restartBackgroundTask` 以原命令、原工作目录与原 shell 重新拉起并即时恢复预览（抽屉/预览锚点自动跟进新任务）；跟随刷新以引擎单调 `outputBytes` 为增量信号（与日志 tail 行数无关，长任务不失效）；新增跨宿主 `openUrl` 能力（Tauri `open_url` / Electron `shell.openExternal` / 演示 `window.open`）（TODOS #44）
+
+### 修复
+- 启动白屏修复：会话内容含 `<|im_start|>` 等特殊 token 字面量时，`ContextChip` 的 `gpt-tokenizer` 默认抛出 `Disallowed special token found`，渲染期异常导致整棵 React 树卸载、窗口只剩背景色；token 估算改为 `disallowedSpecial: new Set()` 按普通文本计数
+- 根组件新增 `ErrorBoundary` 兜底：今后任何渲染期异常都显示错误堆栈与重载提示，不再整屏空白
 
 ### 测试
 - core 新增 16 项 `tasks` 单元测试：任务元数据立即返回、输出行缓冲与 URL 捕获归一化、停止语义（先记录停止意图，杜绝宿主迟到退出事件把「已停止」误判为「failed」；kill 失败回滚保持 running）、自然退出事件流、并发上限与不支持环境、宿主恢复接管 scope 过滤（保留 cwd/shell）、`disposeAll` 清场、日志 tail 截断；审查修复回归：无换行超长输出内存有界且尾部可见、裸 `\r` 进度帧覆盖不堆积、`outputBytes` 与实际输出字节一致、开放尾部行可见、`restart` 复用原命令/cwd/shell、MemoryHost 真实链路（不经过测试替身：输出接收/URL 捕获/停止后无残余输出）（TODOS #37）
