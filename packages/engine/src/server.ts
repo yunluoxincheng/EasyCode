@@ -51,9 +51,10 @@ import {
   type TurnCheckpointSummary,
   type TurnUndoPreview,
   type TurnUndoFilePreview,
+  type RevertTurnOptions,
 } from './checkpoints.js';
 
-export type { TurnCheckpointSummary, TurnUndoPreview, TurnUndoFilePreview };
+export type { TurnCheckpointSummary, TurnUndoPreview, TurnUndoFilePreview, RevertTurnOptions };
 
 /** 回合快照回退执行结果（TODOS #36） */
 export interface TurnUndoResult {
@@ -419,8 +420,20 @@ export class AgentServer {
       id?: string;
       createdAt?: string;
     };
-    const userMsgId = old.id ?? `m_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-    rt.data.messages[idx] = { role: 'user', content, id: userMsgId, createdAt: old.createdAt };
+    const newUserMsgId = `m_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    const removedIds = rt.data.messages
+      .slice(idx)
+      .filter((m): m is Extract<ChatMessage, { role: 'user' }> => m.role === 'user')
+      .map((m) => m.id)
+      .filter((x): x is string => Boolean(x));
+    const retainedUserTurns = rt.data.messages.slice(0, idx).filter((m) => m.role === 'user').length;
+    await this.checkpoints.pruneCheckpointsFromTurn(id, retainedUserTurns + 1, removedIds);
+    rt.data.messages[idx] = {
+      role: 'user',
+      content,
+      id: newUserMsgId,
+      createdAt: new Date().toISOString(),
+    };
     rt.data.messages = rt.data.messages.slice(0, idx + 1);
     rt.data.meta.updatedAt = new Date().toISOString();
     await this.runTurn(rt);
@@ -482,31 +495,37 @@ export class AgentServer {
           globalRules: this.settings.globalRules,
         },
       });
-      // TODOS #38：解析用户消息中的 @file:start-end 行范围引用并注入切片上下文（仅作用于 wire 请求，不污染持久化原文）
+      // TODOS #38 (P2 #7 修复)：代码行范围引用仅在消息首次发送时解析并固化至 msg.rangeContext，
+      // 后续轮次直接复用发送时的静态切片快照，杜绝跨轮次重复磁盘读取与历史上下文漂移
       let baseMessages: ChatMessage[] = rt.data.messages;
-      if (rt.data.meta.workspaceRoot) {
-        const cloned: ChatMessage[] = [];
-        let anyEnriched = false;
-        for (const msg of rt.data.messages) {
-          if (msg.role === 'user' && parseCodeRangeMentions(msg.content).length > 0) {
-            const { enrichedText, snippets } = await resolveCodeRangeMentions(
-              this.host,
-              rt.data.meta.workspaceRoot,
-              msg.content,
-            );
-            if (snippets.length > 0) {
-              const msgId = msg.id ?? `m_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
-              msg.id = msgId;
-              originalUserContents.set(msgId, msg.content);
-              cloned.push({ ...msg, content: enrichedText });
-              anyEnriched = true;
-              continue;
+      const cloned: ChatMessage[] = [];
+      let anyEnriched = false;
+      for (const msg of rt.data.messages) {
+        if (msg.role === 'user') {
+          if (msg.rangeContext === undefined) {
+            if (rt.data.meta.workspaceRoot && parseCodeRangeMentions(msg.content).length > 0) {
+              const { enrichedText, snippets } = await resolveCodeRangeMentions(
+                this.host,
+                rt.data.meta.workspaceRoot,
+                msg.content,
+              );
+              msg.rangeContext = snippets.length > 0 ? enrichedText.slice(msg.content.length) : '';
+            } else {
+              msg.rangeContext = '';
             }
           }
-          cloned.push(msg);
+          if (msg.rangeContext) {
+            const msgId = msg.id ?? `m_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+            msg.id = msgId;
+            originalUserContents.set(msgId, msg.content);
+            cloned.push({ ...msg, content: `${msg.content}${msg.rangeContext}` });
+            anyEnriched = true;
+            continue;
+          }
         }
-        if (anyEnriched) baseMessages = cloned;
+        cloned.push(msg);
       }
+      if (anyEnriched) baseMessages = cloned;
       wireMessages = (!systemPrompt || caps.includes('system'))
           ? baseMessages
           : mergeSystemIntoUser(baseMessages, systemPrompt);
@@ -1337,19 +1356,26 @@ export class AgentServer {
   async revertTurnCheckpoint(
     sessionId: string,
     turnId?: string,
-    paths?: string[],
+    optionsOrPaths?: RevertTurnOptions | string[],
   ): Promise<TurnUndoResult> {
     const rt = this.requireSession(sessionId);
     if (rt.running) {
       throw new Error('会话正在运行中，请先等待完成或点击停止');
     }
 
-    const doRevert = () => this.checkpoints.revertTurn(sessionId, turnId, paths);
-    const { record, revertedPaths } = rt.data.meta.workspaceRoot
-      ? await this.workspaceLocks.getLock(rt.data.meta.workspaceRoot).withLock(doRevert)
+    // P1 #1：先解析目标快照，严格按快照记录的 workspaceRoot 加锁并失效缓存
+    const targetRecord = await this.checkpoints.getTargetRecord(sessionId, turnId);
+    const targetWorkspace = targetRecord.workspaceRoot?.trim();
+    const doRevert = () =>
+      this.checkpoints.revertTurn(sessionId, targetRecord.turnId, optionsOrPaths);
+    const { record, revertedPaths } = targetWorkspace
+      ? await this.workspaceLocks.getLock(targetWorkspace).withLock(doRevert)
       : await doRevert();
 
-    if (rt.data.meta.workspaceRoot) {
+    if (targetWorkspace) {
+      this.workspaceFilesCache.delete(targetWorkspace);
+    }
+    if (rt.data.meta.workspaceRoot && rt.data.meta.workspaceRoot !== targetWorkspace) {
       this.workspaceFilesCache.delete(rt.data.meta.workspaceRoot);
     }
 
@@ -1394,6 +1420,12 @@ export class AgentServer {
     const stat = await this.host.fs.stat(abs);
     if (!stat) throw new Error(`文件不存在: ${cleanRel}`);
     if (stat.isDirectory) throw new Error(`目标是目录，无法作为文件预览: ${cleanRel}`);
+    const maxFileBytes = 2 * 1024 * 1024;
+    if (stat.size > maxFileBytes) {
+      throw new Error(
+        `文件体积过大 (${(stat.size / 1024 / 1024).toFixed(2)} MB > 2 MB)，请使用外部编辑器打开: ${cleanRel}`,
+      );
+    }
     let raw = await this.host.fs.readFile(abs);
     if (raw.includes('\u0000')) {
       throw new Error(`疑似二进制文件，无法以文本预览: ${cleanRel}`);

@@ -4419,3 +4419,38 @@ select:focus-visible,
   border-radius: 3px;
   border: 1px solid rgba(74, 222, 128, 0.25);
 }
+
+.turn-undo-warn-banner {
+  flex-direction: column;
+  gap: 6px;
+}
+.turn-undo-warn-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.turn-undo-force-confirm {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--text-bright);
+  cursor: pointer;
+  user-select: none;
+  padding-top: 2px;
+}
+.turn-undo-force-confirm input {
+  accent-color: var(--amber);
+  cursor: pointer;
+}
+
+.ws-tree-trunc-hint {
+  padding: 4px 8px;
+  margin: 0 6px 4px;
+  font-size: 10.5px;
+  color: var(--amber);
+  background: rgba(245, 158, 11, 0.08);
+  border: 1px solid rgba(245, 158, 11, 0.25);
+  border-radius: 3px;
+  line-height: 1.4;
+}

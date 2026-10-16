@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { formatFileMention } from '@easycode/core';
 import { useStore } from '../useStore.js';
 import type { UserItem } from '../store.js';
 import { ProjectSwitcher } from './ProjectSwitcher.js';
@@ -495,8 +496,9 @@ export function Composer() {
     const start = mention.startIndex;
     const caret = ta.selectionStart ?? (start + mention.query.length + 1);
     const colonIdx = mention.query.indexOf(':');
-    const rangeSuffix = colonIdx !== -1 ? mention.query.slice(colonIdx) : '';
-    const replacement = `@${filePath}${rangeSuffix} `;
+    const rangeClean = colonIdx !== -1 ? mention.query.slice(colonIdx + 1) : '';
+    const formatted = formatFileMention(filePath, rangeClean || null);
+    const replacement = colonIdx !== -1 && !rangeClean ? `${formatted}:` : `${formatted} `;
     const newText = text.slice(0, start) + replacement + text.slice(caret);
     setText(newText);
     setMention({
@@ -891,7 +893,7 @@ export function Composer() {
             let nextVal = e.target.value;
             let caret = e.target.selectionStart ?? nextVal.length;
             const before = nextVal.slice(0, caret);
-            const colonTighten = /(@[^\s@:]+) :$/.exec(before);
+            const colonTighten = /(@(?:"[^"\r\n:]+"|[^\s@:]+)) :$/.exec(before);
             if (colonTighten) {
               nextVal = nextVal.slice(0, caret - 2) + ':' + nextVal.slice(caret);
               caret -= 1;

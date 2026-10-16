@@ -21,6 +21,7 @@ import type {
   TurnCheckpointSummary,
   TurnUndoPreview,
   TurnUndoResult,
+  RevertTurnOptions,
   WorkspaceFilePreview,
 } from '@easycode/engine';
 
@@ -139,8 +140,16 @@ export class IpcAgentClient implements AgentClient {
   previewTurnUndo(id: string, turnId?: string) {
     return this.invoke<TurnUndoPreview>('preview-turn-undo', { id, turnId });
   }
-  revertTurnCheckpoint(id: string, turnId?: string, paths?: string[]) {
-    return this.invoke<TurnUndoResult>('revert-turn-checkpoint', { id, turnId, paths });
+  revertTurnCheckpoint(
+    id: string,
+    turnId?: string,
+    optionsOrPaths?: RevertTurnOptions | string[],
+  ) {
+    return this.invoke<TurnUndoResult>('revert-turn-checkpoint', {
+      id,
+      turnId,
+      options: optionsOrPaths,
+    });
   }
   getProjectRules(id: string) {
     return this.invoke<ProjectRuleInfo | null>('get-project-rules', { id });
@@ -293,7 +302,8 @@ export function createDemoClient(): AgentClient {
     readWorkspaceFile: (id, relPath) => wrap(() => server.readWorkspaceFile(id, relPath)),
     listTurnCheckpoints: (id) => wrap(() => server.listTurnCheckpoints(id)),
     previewTurnUndo: (id, turnId) => wrap(() => server.previewTurnUndo(id, turnId)),
-    revertTurnCheckpoint: (id, turnId, paths) => wrap(() => server.revertTurnCheckpoint(id, turnId, paths)),
+    revertTurnCheckpoint: (id, turnId, optionsOrPaths) =>
+      wrap(() => server.revertTurnCheckpoint(id, turnId, optionsOrPaths)),
     getProjectRules: (id) => wrap(() => server.getSessionProjectRules(id)),
     initProjectRules: (id) => wrap(() => server.initSessionProjectRules(id)),
     listCustomPrompts: (id) => wrap(() => server.listSessionCustomPrompts(id)),

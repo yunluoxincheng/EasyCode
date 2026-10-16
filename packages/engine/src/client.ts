@@ -18,6 +18,7 @@ import type {
   TurnUndoPreview,
   TurnUndoFilePreview,
   TurnUndoResult,
+  RevertTurnOptions,
   WorkspaceFilePreview,
 } from './server.js';
 
@@ -86,7 +87,11 @@ export interface AgentClient {
   /** 生成回合撤销预览与冲突检测报告（TODOS #36） */
   previewTurnUndo?(id: string, turnId?: string): Promise<TurnUndoPreview>;
   /** 执行回合代码改动撤销，安全恢复文件并追加系统通知（TODOS #36） */
-  revertTurnCheckpoint?(id: string, turnId?: string, paths?: string[]): Promise<TurnUndoResult>;
+  revertTurnCheckpoint?(
+    id: string,
+    turnId?: string,
+    optionsOrPaths?: RevertTurnOptions | string[],
+  ): Promise<TurnUndoResult>;
   /** 获取当前会话工作区项目规范（TODOS #33） */
   getProjectRules(id: string): Promise<ProjectRuleInfo | null>;
   /** 初始化当前会话工作区项目规范（TODOS #33） */

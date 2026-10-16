@@ -19,6 +19,8 @@ export type AssistantBlock = TextBlock | ThinkingBlock | ToolCallBlock;
 export interface UserMessage {
   role: 'user';
   content: string;
+  /** 发送时固化的 @file:start-end 代码行范围切片快照（TODOS #38：防历史上下文漂移与重复磁盘读取） */
+  rangeContext?: string;
   /** 会话内唯一标识（UI 锚点/编辑定位用） */
   id?: string;
   /** ISO 时间戳 */

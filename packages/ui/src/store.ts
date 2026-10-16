@@ -617,7 +617,7 @@ export class AppStore {
     }
   }
 
-  /** 根据 UI TurnItem 查找关联的回合代码改动快照（通过 toolCallIds 或前置用户消息 msgId 匹配） */
+  /** 根据 UI TurnItem 查找关联的回合代码改动快照（严格通过实际执行的写文件 toolCallIds 匹配，P2 #6） */
   getTurnCheckpointForTurn(turn: TurnItem): TurnCheckpointSummary | undefined {
     if (this.checkpoints.length === 0) return undefined;
     const callIds = new Set<string>();
@@ -626,18 +626,8 @@ export class AppStore {
         callIds.add(it.callId);
       }
     }
-    if (callIds.size > 0) {
-      const matched = this.checkpoints.find((c) => c.toolCallIds.some((id) => callIds.has(id)));
-      if (matched) return matched;
-    }
-    const idx = this.items.indexOf(turn);
-    if (idx > 0) {
-      const prev = this.items[idx - 1];
-      if (prev.kind === 'user' && prev.msgId) {
-        return this.checkpoints.find((c) => c.userMessageId === prev.msgId);
-      }
-    }
-    return undefined;
+    if (callIds.size === 0) return undefined;
+    return this.checkpoints.find((c) => c.toolCallIds.some((id) => callIds.has(id)));
   }
 
   /** 呼出回合撤销确认弹窗（turnId 缺省或为 'latest' 时默认定位最近一个包含代码改动的回合） */
@@ -667,11 +657,16 @@ export class AppStore {
     this.notify(true);
   }
 
-  /** 执行回合快照回退并刷新会话时间线 */
-  async executeTurnUndo(turnId: string, paths?: string[]): Promise<boolean> {
-    if (!this.activeId || !this.client.revertTurnCheckpoint) return false;
+  /** 执行回合快照回退并刷新会话时间线（支持 CAS 冲突返回供弹窗二次确认，P1 #3） */
+  async executeTurnUndo(
+    turnId: string,
+    optionsOrPaths?: { paths?: string[]; force?: boolean } | string[],
+  ): Promise<{ ok: boolean; conflict?: boolean; error?: string }> {
+    if (!this.activeId || !this.client.revertTurnCheckpoint) {
+      return { ok: false, error: '当前环境不支持快照回退' };
+    }
     try {
-      const res = await this.client.revertTurnCheckpoint(this.activeId, turnId, paths);
+      const res = await this.client.revertTurnCheckpoint(this.activeId, turnId, optionsOrPaths);
       const state = this.sessionStates.get(this.activeId);
       if (state) {
         state.checkpoints = res.checkpoints;
@@ -685,10 +680,12 @@ export class AppStore {
         `[ OK ] 已撤销第 ${res.turnNumber} 回合的文件变更（共 ${res.revertedPaths.length} 个文件）`,
       );
       this.notify(true);
-      return true;
+      return { ok: true };
     } catch (err) {
-      this.showToast(err instanceof Error ? err.message : String(err), 'err');
-      return false;
+      const msg = err instanceof Error ? err.message : String(err);
+      const isConflict = msg.includes('[CONFLICT]') || msg.includes('已被修改');
+      this.showToast(msg.replace(/^\[CONFLICT\]\s*/, ''), 'err');
+      return { ok: false, conflict: isConflict, error: msg.replace(/^\[CONFLICT\]\s*/, '') };
     }
   }
 

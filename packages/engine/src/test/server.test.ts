@@ -7,6 +7,7 @@ import {
   WorkspaceLockManager,
   parseCodeRangeMentions,
   resolveCodeRangeMentions,
+  formatFileMention,
 } from '../index.js';
 import { MemoryHost } from '@easycode/core';
 
@@ -551,8 +552,15 @@ test('TODOS #36: CheckpointManager 同回合多次修改基准保持、冲突检
   assert.equal(fileC.modifiedInLaterTurns, false);
   assert.equal(fileC.diskDiverged, false);
 
-  // 执行第 1 回合回退：a.ts 应回到第 1 回合前的原始版本，新建的 c.ts 应被删除，会话应追加回退系统通知
-  const undoRes = await server.revertTurnCheckpoint(session.id, turn1.turnId);
+  // P1 #3 验证：存在跨回合修改冲突时，未传 force=true 必须被 CAS 校验拦截，绝不静默覆盖
+  await assert.rejects(
+    () => server.revertTurnCheckpoint(session.id, turn1.turnId),
+    /\[CONFLICT\] 检测到文件在回退前已被修改/,
+  );
+  assert.equal(await host.fs.readFile('/ws/src/a.ts'), 'line1\nline2_turn2\n', 'CAS 拦截后文件保持原样未被覆盖');
+
+  // 显式传入 force: true 执行第 1 回合强制回退：a.ts 回到第 1 回合前的原始版本，新建的 c.ts 被删除
+  const undoRes = await server.revertTurnCheckpoint(session.id, turn1.turnId, { force: true });
   assert.deepEqual(undoRes.revertedPaths.sort(), ['src/a.ts', 'src/c.ts']);
   const aContentAfterUndo = await host.fs.readFile('/ws/src/a.ts');
   assert.equal(aContentAfterUndo, 'line1\nline2\nline3\n');
@@ -731,4 +739,247 @@ test('TODOS #36 & #38 全链路: 真实工具执行 write_file/edit_file 触发�
   // 删除会话快照文件后列表为空
   await mgr.deleteSessionCheckpoints('s_e2e');
   assert.deepEqual(await mgr.listCheckpoints('s_e2e'), []);
+});
+
+test('审查回归 (P1 #1/#2/#3 & P2 #4/#5/#6/#7/#8/#9): 跨工作区锁一致性、unlink 失败上报、分步部分回退、编辑重发清理、防历史漂移与真实 NodeHost 验证', async () => {
+  const fsp = await import('node:fs/promises');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const { NodeHost } = await import('@easycode/host-node');
+  const { writeFileTool } = await import('@easycode/core');
+
+  // 1. P2 #5: 含空格路径的引号转义与解析闭环
+  const quotedToken = formatFileMention('src/my file.ts', '10-12');
+  assert.equal(quotedToken, '@"src/my file.ts":10-12');
+  const parsedQuoted = parseCodeRangeMentions(`请检查 ${quotedToken} 的实现`);
+  assert.equal(parsedQuoted.length, 1);
+  assert.equal(parsedQuoted[0].path, 'src/my file.ts');
+  assert.equal(parsedQuoted[0].startLine, 10);
+  assert.equal(parsedQuoted[0].endLine, 12);
+
+  // 2. P1 #2: unlink 失败或不支持时绝不吞错谎报成功
+  const hostNoUnlink = new MemoryHost({ '/ws/new.ts': 'hello' });
+  const mgrNoUnlink = new CheckpointManager(hostNoUnlink);
+  const tNoUnlink = mgrNoUnlink.beginTurn({
+    sessionId: 's_unlink',
+    workspaceRoot: '/ws',
+    turnNumber: 1,
+    userMessageId: 'u_1',
+  });
+  await tNoUnlink.recordFileChange({
+    callId: 'c_1',
+    relPath: 'new.ts',
+    absPath: '/ws/new.ts',
+    existedBefore: false,
+    beforeContent: null,
+    afterContent: 'hello',
+  });
+  // 模拟 unlink 抛错且文件仍在磁盘上
+  hostNoUnlink.fs.unlink = async () => {
+    throw new Error('EBUSY: resource busy or locked');
+  };
+  await assert.rejects(
+    () => mgrNoUnlink.revertTurn('s_unlink', tNoUnlink.turnId),
+    /删除新建文件失败 \(new\.ts\): EBUSY/,
+  );
+  const afterFailSummary = (await mgrNoUnlink.listCheckpoints('s_unlink'))[0];
+  assert.equal(afterFailSummary.revertedAt, undefined, '删除失败时绝不能将快照标记为已撤销');
+
+  // 3. P2 #4: 分三次部分回退 A、B、C 后，整回合自动标记 revertedAt
+  const hostPartial = new MemoryHost({
+    '/ws/a.ts': 'a1',
+    '/ws/b.ts': 'b1',
+    '/ws/c.ts': 'c1',
+  });
+  const mgrPartial = new CheckpointManager(hostPartial);
+  const tPartial = mgrPartial.beginTurn({
+    sessionId: 's_partial',
+    workspaceRoot: '/ws',
+    turnNumber: 1,
+    userMessageId: 'u_p1',
+  });
+  for (const name of ['a.ts', 'b.ts', 'c.ts']) {
+    await tPartial.recordFileChange({
+      callId: `call_${name}`,
+      relPath: name,
+      absPath: `/ws/${name}`,
+      existedBefore: true,
+      beforeContent: `${name[0]}0`,
+      afterContent: `${name[0]}1`,
+    });
+  }
+  await mgrPartial.revertTurn('s_partial', tPartial.turnId, ['a.ts']);
+  assert.equal((await mgrPartial.listCheckpoints('s_partial'))[0].revertedAt, undefined);
+  await mgrPartial.revertTurn('s_partial', tPartial.turnId, ['b.ts']);
+  assert.equal((await mgrPartial.listCheckpoints('s_partial'))[0].revertedAt, undefined);
+  await mgrPartial.revertTurn('s_partial', tPartial.turnId, ['c.ts']);
+  const finalPartial = (await mgrPartial.listCheckpoints('s_partial'))[0];
+  assert.ok(finalPartial.revertedAt, '所有文件分批恢复完成后，整回合必须标记 revertedAt');
+
+  // 4. P2 #9: write_file 在读取原文件快照失败时中止覆盖写入，绝不伪造空字符串基准
+  const hostReadFail = new MemoryHost({ '/ws/important.ts': 'PRECIOUS_CONTENT' });
+  const readFiles = new Set<string>(['/ws/important.ts']);
+  hostReadFail.fs.readFile = async () => {
+    throw new Error('EACCES: permission denied');
+  };
+  let fileChangedCalled = false;
+  await assert.rejects(
+    () =>
+      writeFileTool.execute(
+        { path: 'important.ts', content: 'NEW_CONTENT' },
+        {
+          host: hostReadFail,
+          workspace: '/ws',
+          signal: new AbortController().signal,
+          readFiles,
+          onFileChange: () => {
+            fileChangedCalled = true;
+          },
+        },
+      ),
+    /读取原文件快照失败，已中止覆盖写入以保护原文件/,
+  );
+  assert.equal(fileChangedCalled, false, '读取原文件失败时绝不能触发快照记录或覆盖原文件');
+
+  // 5. P1 #1 + P2 #6 + P2 #7 + P2 #8: 工作区切换加锁一致性、编辑重发清理旧快照、历史行范围引用防漂移、大文件 stat 前置拦截
+  const hostServer = new MemoryHost({
+    '/wsA/main.ts': 'lineA1\nlineA2\nlineA3\n',
+    '/wsB/other.ts': 'lineB1\n',
+  });
+  const server = new AgentServer(hostServer);
+  await server.updateSettings({
+    providers: {
+      mock: {
+        kind: 'mock',
+        baseURL: '',
+        name: 'Mock',
+        enabled: true,
+        models: [{ name: 'mock-model', enabled: true }],
+      },
+    },
+    defaultProvider: 'mock',
+  });
+  const sSwitch = await server.createSession({
+    workspaceRoot: '/wsA',
+    providerId: 'mock',
+    title: '跨工作区与防漂移会话',
+  });
+
+  // 发送首轮带 @main.ts:1-2 引用的消息
+  await server.sendMessage(sSwitch.id, '请分析 @main.ts:1-2');
+  const sDataAfterTurn1 = await server.getSession(sSwitch.id);
+  const firstUserMsg = sDataAfterTurn1.messages.find((m) => m.role === 'user');
+  assert.ok(firstUserMsg && firstUserMsg.role === 'user');
+  assert.match(firstUserMsg.rangeContext ?? '', /lineA1/, '首轮发送时固化 rangeContext 快照');
+
+  // 修改磁盘上的 /wsA/main.ts，验证第 2 轮发送时第 1 轮的 rangeContext 不会漂移成新内容
+  await hostServer.fs.writeFile('/wsA/main.ts', 'DRIFTED_LINE_1\nDRIFTED_LINE_2\n');
+  await server.sendMessage(sSwitch.id, '第二轮普通提问');
+  const sDataAfterTurn2 = await server.getSession(sSwitch.id);
+  const firstUserMsgAfterTurn2 = sDataAfterTurn2.messages.find((m) => m.role === 'user');
+  assert.ok(firstUserMsgAfterTurn2 && firstUserMsgAfterTurn2.role === 'user');
+  assert.match(firstUserMsgAfterTurn2.rangeContext ?? '', /lineA1/, '历史轮次的 rangeContext 保持发送时快照，不发生历史漂移');
+  assert.doesNotMatch(firstUserMsgAfterTurn2.rangeContext ?? '', /DRIFTED_LINE_1/);
+
+  // P2 #6: 在第 2 轮挂一个快照，然后调用 editLastUserMessage，验证第 2 轮的旧快照被清理
+  const internalCheckpoints = (server as any).checkpoints as CheckpointManager;
+  const t2Tracker = internalCheckpoints.beginTurn({
+    sessionId: sSwitch.id,
+    workspaceRoot: '/wsA',
+    turnNumber: 2,
+    userMessageId: sDataAfterTurn2.messages.filter((m) => m.role === 'user')[1].id!,
+  });
+  await t2Tracker.recordFileChange({
+    callId: 'c_t2',
+    relPath: 'main.ts',
+    absPath: '/wsA/main.ts',
+    existedBefore: true,
+    beforeContent: 'lineA1\nlineA2\nlineA3\n',
+    afterContent: 'DRIFTED_LINE_1\nDRIFTED_LINE_2\n',
+  });
+  assert.equal((await server.listTurnCheckpoints(sSwitch.id)).length, 1);
+  await server.editLastUserMessage(sSwitch.id, '编辑重发第二轮提问（无文件修改）');
+  assert.equal(
+    (await server.listTurnCheckpoints(sSwitch.id)).length,
+    0,
+    '编辑重发截断旧回合后，被截断回合的残留快照必须被清理',
+  );
+
+  // P1 #1: 在 /wsA 记录快照后，将会话工作区切换至 /wsB，验证回退时锁定的是 /wsA 而非 /wsB
+  const tSwitchTracker = internalCheckpoints.beginTurn({
+    sessionId: sSwitch.id,
+    workspaceRoot: '/wsA',
+    turnNumber: 2,
+    userMessageId: 'u_wsA',
+  });
+  await tSwitchTracker.recordFileChange({
+    callId: 'c_wsA',
+    relPath: 'main.ts',
+    absPath: '/wsA/main.ts',
+    existedBefore: true,
+    beforeContent: 'ORIG_WSA',
+    afterContent: 'DRIFTED_LINE_1\nDRIFTED_LINE_2\n',
+  });
+  await server.setSessionWorkspace(sSwitch.id, '/wsB');
+  const wsLocks = (server as any).workspaceLocks as WorkspaceLockManager;
+  const eventsOrder: string[] = [];
+  const holdWsALock = wsLocks.getLock('/wsA').withLock(async () => {
+    eventsOrder.push('wsA_lock_held');
+    await new Promise((r) => setTimeout(r, 25));
+    eventsOrder.push('wsA_lock_released');
+  });
+  const revertPromise = server
+    .revertTurnCheckpoint(sSwitch.id, tSwitchTracker.turnId)
+    .then(() => {
+      eventsOrder.push('revert_done');
+    });
+  await Promise.all([holdWsALock, revertPromise]);
+  assert.deepEqual(
+    eventsOrder,
+    ['wsA_lock_held', 'wsA_lock_released', 'revert_done'],
+    '即使会话已切到 /wsB，回退 /wsA 的快照仍必须等待 /wsA 的互斥锁',
+  );
+  assert.equal(await hostServer.fs.readFile('/wsA/main.ts'), 'ORIG_WSA');
+
+  // 6. 真实 NodeHost 临时目录端到端验证（落盘快照、预览与回退删除新建文件）
+  const tmpRoot = await fsp.mkdtemp(path.join(os.tmpdir(), 'easycode-chk-test-'));
+  try {
+    const wsDir = path.join(tmpRoot, 'ws');
+    const dataDir = path.join(tmpRoot, 'data');
+    await fsp.mkdir(wsDir, { recursive: true });
+    await fsp.writeFile(path.join(wsDir, 'real.ts'), 'export const v = 1;\n', 'utf8');
+
+    const nodeHost = new NodeHost({ dataDir });
+    const nodeMgr = new CheckpointManager(nodeHost);
+    const realTurn = nodeMgr.beginTurn({
+      sessionId: 's_node_real',
+      workspaceRoot: wsDir,
+      turnNumber: 1,
+      userMessageId: 'u_real_1',
+    });
+    await fsp.writeFile(path.join(wsDir, 'real.ts'), 'export const v = 2;\n', 'utf8');
+    await realTurn.recordFileChange({
+      callId: 'c_real_1',
+      relPath: 'real.ts',
+      absPath: path.join(wsDir, 'real.ts'),
+      existedBefore: true,
+      beforeContent: 'export const v = 1;\n',
+      afterContent: 'export const v = 2;\n',
+    });
+    await fsp.writeFile(path.join(wsDir, 'created.ts'), 'export const created = true;\n', 'utf8');
+    await realTurn.recordFileChange({
+      callId: 'c_real_2',
+      relPath: 'created.ts',
+      absPath: path.join(wsDir, 'created.ts'),
+      existedBefore: false,
+      beforeContent: null,
+      afterContent: 'export const created = true;\n',
+    });
+
+    await nodeMgr.revertTurn('s_node_real', realTurn.turnId);
+    assert.equal(await fsp.readFile(path.join(wsDir, 'real.ts'), 'utf8'), 'export const v = 1;\n');
+    await assert.rejects(() => fsp.stat(path.join(wsDir, 'created.ts')), /ENOENT/);
+  } finally {
+    await fsp.rm(tmpRoot, { recursive: true, force: true });
+  }
 });

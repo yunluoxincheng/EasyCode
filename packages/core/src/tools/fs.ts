@@ -4,6 +4,22 @@ import { resolveWorkspacePath } from './index.js';
 
 const MAX_READ_BYTES = 64 * 1024;
 const MAX_RANGE_LINES = 500;
+/** 行范围引用前置文件体积上限（2MB），防止超大 JSON/日志/Bundle 整文件读入内存 */
+const MAX_RANGE_FILE_BYTES = 2 * 1024 * 1024;
+/** 单个行范围切片注入的最大字符数（24KB）与单行最大字符数（2000） */
+const MAX_RANGE_CHARS = 24 * 1024;
+const MAX_RANGE_LINE_CHARS = 2000;
+
+/**
+ * 格式化文件 @引用 Token（TODOS #38）：当路径包含空格或双引号时自动用双引号包裹，
+ * 确保 @file 与 @file:start-end 均能被解析器无损识别。
+ */
+export function formatFileMention(relPath: string, rangeSpec?: string | null): string {
+  const clean = relPath.replace(/\\/g, '/').replace(/^\.\//, '');
+  const needsQuotes = /[\s"]/.test(clean);
+  const pathToken = needsQuotes ? `"${clean.replace(/"/g, '')}"` : clean;
+  return rangeSpec ? `@${pathToken}:${rangeSpec}` : `@${pathToken}`;
+}
 
 function withLineNumbers(content: string, offset: number, limit: number): string {
   const lines = content.split('\n');
@@ -92,7 +108,7 @@ export async function resolveCodeRangeMentions(
     try {
       const abs = resolveWorkspacePath(workspace, m.path, host);
       const stat = await host.fs.stat(abs);
-      if (!stat || stat.isDirectory) continue;
+      if (!stat || stat.isDirectory || stat.size > MAX_RANGE_FILE_BYTES) continue;
       const rawContent = await host.fs.readFile(abs);
       if (rawContent.includes('\u0000')) continue;
       const normalized = rawContent.replace(/\r\n/g, '\n');
@@ -106,13 +122,30 @@ export async function resolveCodeRangeMentions(
         Math.min(m.endLine, totalLines, startLine + MAX_RANGE_LINES - 1),
       );
       const numberedLines: string[] = [];
+      let totalChars = 0;
+      let charTruncated = false;
       for (let i = startLine; i <= endLine; i++) {
-        numberedLines.push(`${String(i).padStart(5, ' ')}| ${lines[i - 1]}`);
+        const rawLine = lines[i - 1] ?? '';
+        const clippedLine =
+          rawLine.length > MAX_RANGE_LINE_CHARS
+            ? `${rawLine.slice(0, MAX_RANGE_LINE_CHARS)} ... [单行超长已截断]`
+            : rawLine;
+        const formattedLine = `${String(i).padStart(5, ' ')}| ${clippedLine}`;
+        if (totalChars + formattedLine.length > MAX_RANGE_CHARS && numberedLines.length > 0) {
+          charTruncated = true;
+          break;
+        }
+        numberedLines.push(formattedLine);
+        totalChars += formattedLine.length + 1;
+      }
+      if (charTruncated) {
+        numberedLines.push(`...（片段已达 ${MAX_RANGE_CHARS} 字符上限，余下内容已截断）`);
       }
       const sliceBody = numberedLines.join('\n');
+      const rangeSpec = startLine === endLine ? `${startLine}` : `${startLine}-${endLine}`;
       const rangeDesc = startLine === endLine ? `第 ${startLine} 行` : `第 ${startLine}-${endLine} 行`;
       const formatted = [
-        `### @${m.path}:${startLine === endLine ? startLine : `${startLine}-${endLine}`}`,
+        `### ${formatFileMention(m.path, rangeSpec)}`,
         `> *用户截取了文件 \`${m.path}\` ${rangeDesc}片段（文件共 ${totalLines} 行）：*`,
         '```',
         sliceBody,
@@ -206,8 +239,10 @@ export const writeFileTool: Tool = {
     if (existedBefore && onFileChange) {
       try {
         beforeContent = await host.fs.readFile(abs);
-      } catch {
-        beforeContent = '';
+      } catch (err) {
+        throw new Error(
+          `读取原文件快照失败，已中止覆盖写入以保护原文件 (${rel}): ${err instanceof Error ? err.message : String(err)}`,
+        );
       }
     }
     const dir = host.paths.dirname(abs);

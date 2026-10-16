@@ -18,6 +18,7 @@ export {
   listDirTool,
   parseCodeRangeMentions,
   resolveCodeRangeMentions,
+  formatFileMention,
 } from './tools/fs.js';
 export type { CodeRangeMention, CodeRangeSnippet } from './tools/fs.js';
 

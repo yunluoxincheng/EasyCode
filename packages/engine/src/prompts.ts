@@ -2,6 +2,7 @@ import type { Host } from '@easycode/core';
 export {
   parseCodeRangeMentions,
   resolveCodeRangeMentions,
+  formatFileMention,
   type CodeRangeMention,
   type CodeRangeSnippet,
 } from '@easycode/core';

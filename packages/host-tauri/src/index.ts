@@ -354,7 +354,8 @@ export async function createTauriClient(options?: { reflexPolicy?: DecisionPolic
     readWorkspaceFile: (id, relPath) => server.readWorkspaceFile(id, relPath),
     listTurnCheckpoints: (id) => server.listTurnCheckpoints(id),
     previewTurnUndo: (id, turnId) => server.previewTurnUndo(id, turnId),
-    revertTurnCheckpoint: (id, turnId, paths) => server.revertTurnCheckpoint(id, turnId, paths),
+    revertTurnCheckpoint: (id, turnId, optionsOrPaths) =>
+      server.revertTurnCheckpoint(id, turnId, optionsOrPaths),
     getProjectRules: (id) => server.getSessionProjectRules(id),
     initProjectRules: (id) => server.initSessionProjectRules(id),
     listCustomPrompts: (id) => server.listSessionCustomPrompts(id),

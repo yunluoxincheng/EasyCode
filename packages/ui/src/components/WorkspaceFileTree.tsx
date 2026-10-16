@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { formatFileMention } from '@easycode/core';
 import type { WorkspaceFilePreview } from '@easycode/engine';
 import { useStore } from '../useStore.js';
 
@@ -160,7 +161,7 @@ export function WorkspaceFileTree() {
 
   const handleInsertComposer = (relPath: string) => {
     setCtxMenu(null);
-    store.insertIntoComposer(`@${relPath} `);
+    store.insertIntoComposer(`${formatFileMention(relPath)} `);
   };
 
   const handleOpenExternal = (relPath: string) => {
@@ -237,7 +238,9 @@ export function WorkspaceFileTree() {
       <div className="ws-tree-header" onClick={() => setPanelOpen(!panelOpen)}>
         <span className="ws-tree-caret">{panelOpen ? '▾' : '▸'}</span>
         <span className="ws-tree-title">[TREE] 工作区文件树</span>
-        {files.length > 0 && <span className="ws-tree-count">{files.length}</span>}
+        {files.length > 0 && (
+          <span className="ws-tree-count">{files.length >= 1500 ? '1500+' : files.length}</span>
+        )}
         <span className="spacer" />
         {panelOpen && (
           <button
@@ -275,6 +278,11 @@ export function WorkspaceFileTree() {
               </button>
             )}
           </div>
+          {files.length >= 1500 && (
+            <div className="ws-tree-trunc-hint">
+              [ INFO ] 已展示前 1,500 项文件；深层文件可在输入框用 @关键词 检索
+            </div>
+          )}
           <div className="ws-tree-scroll">
             {loading && files.length === 0 ? (
               <div className="ws-tree-empty">[ WAIT ] 扫描工作区目录...</div>
@@ -401,7 +409,7 @@ export function FilePreviewModal() {
         : `${startLine}-${endLine}`
       : null;
 
-  const mentionToken = rangeSpec ? `@${relPath}:${rangeSpec}` : `@${relPath}`;
+  const mentionToken = formatFileMention(relPath, rangeSpec);
 
   const handleLineMouseDown = (lineNo: number, shiftKey: boolean) => {
     if (shiftKey && anchorLine !== null) {

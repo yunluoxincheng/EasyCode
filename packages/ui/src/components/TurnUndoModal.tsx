@@ -13,26 +13,30 @@ export function TurnUndoModal() {
   const [preview, setPreview] = useState<TurnUndoPreview | null>(null);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [checkedPaths, setCheckedPaths] = useState<Set<string>>(new Set());
+  /** 当勾选文件中存在后续修改或磁盘偏离冲突时，需用户显式勾选确认强制覆盖（P1 #3） */
+  const [forceConfirmed, setForceConfirmed] = useState(false);
 
-  useEffect(() => {
-    if (!sessionId || !targetTurnId || !store.client.previewTurnUndo) return;
+  const loadPreview = (keepSelection = false) => {
+    if (!sessionId || !targetTurnId || !store.client.previewTurnUndo) return () => {};
     let cancelled = false;
     setLoading(true);
     setError(null);
+    setForceConfirmed(false);
     store.client
       .previewTurnUndo(sessionId, targetTurnId)
       .then((res) => {
         if (cancelled) return;
         setPreview(res);
-        setSelectedPath(res.files[0]?.path ?? null);
-        const initialChecked = new Set(
-          res.files.filter((f) => !f.alreadyReverted).map((f) => f.path),
-        );
-        // 若所有文件均已处于恢复状态，默认仍全选方便用户幂等重刷
-        if (initialChecked.size === 0) {
-          for (const f of res.files) initialChecked.add(f.path);
+        setSelectedPath((prev) => (keepSelection && prev ? prev : (res.files[0]?.path ?? null)));
+        if (!keepSelection) {
+          const initialChecked = new Set(
+            res.files.filter((f) => !f.alreadyReverted).map((f) => f.path),
+          );
+          if (initialChecked.size === 0) {
+            for (const f of res.files) initialChecked.add(f.path);
+          }
+          setCheckedPaths(initialChecked);
         }
-        setCheckedPaths(initialChecked);
         setLoading(false);
       })
       .catch((err) => {
@@ -43,6 +47,11 @@ export function TurnUndoModal() {
     return () => {
       cancelled = true;
     };
+  };
+
+  useEffect(() => {
+    return loadPreview(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, targetTurnId, store.client]);
 
   useEffect(() => {
@@ -76,11 +85,26 @@ export function TurnUndoModal() {
     }
   };
 
+  const selectedHasConflicts = Boolean(
+    preview?.files.some(
+      (f) => checkedPaths.has(f.path) && (f.modifiedInLaterTurns || f.diskDiverged),
+    ),
+  );
+
   const handleConfirm = async () => {
     if (!preview || checkedPaths.size === 0 || submitting) return;
+    if (selectedHasConflicts && !forceConfirmed) return;
     setSubmitting(true);
     try {
-      await store.executeTurnUndo(preview.turnId, [...checkedPaths]);
+      const res = await store.executeTurnUndo(preview.turnId, {
+        paths: [...checkedPaths],
+        force: selectedHasConflicts && forceConfirmed,
+      });
+      // P1 #3：若打开弹窗期间文件被外部编辑器改动，Engine CAS 校验拦截返回 conflict，
+      // 自动重新拉取最新冲突状态并要求用户二次确认强制覆盖
+      if (!res.ok && res.conflict) {
+        loadPreview(true);
+      }
     } finally {
       setSubmitting(false);
     }
@@ -129,13 +153,25 @@ export function TurnUndoModal() {
           </button>
         </div>
 
-        {preview?.hasConflicts && (
+        {(preview?.hasConflicts || selectedHasConflicts) && (
           <div className="turn-undo-warn-banner">
-            <span className="warn-tag">[ WARN · 冲突告警 ]</span>
-            <span>
-              部分文件在第 {preview.turnNumber} 回合之后又被后续回合或外部编辑器修改过。执行回退将把所勾选文件直接恢复至第{' '}
-              {preview.turnNumber} 回合开始前的原始快照，请先核对右侧变更明细。
-            </span>
+            <div className="turn-undo-warn-row">
+              <span className="warn-tag">[ WARN · 冲突告警 ]</span>
+              <span>
+                部分文件在第 {preview?.turnNumber} 回合之后又被后续回合或外部编辑器修改过。执行回退将把所勾选文件直接恢复至第{' '}
+                {preview?.turnNumber} 回合开始前的原始快照，请先核对右侧变更明细。
+              </span>
+            </div>
+            {selectedHasConflicts && (
+              <label className="turn-undo-force-confirm">
+                <input
+                  type="checkbox"
+                  checked={forceConfirmed}
+                  onChange={(e) => setForceConfirmed(e.target.checked)}
+                />
+                <span>我已知晓冲突风险，确认强制覆盖已勾选文件的后续修改</span>
+              </label>
+            )}
           </div>
         )}
 
@@ -255,7 +291,7 @@ export function TurnUndoModal() {
 
         <div className="turn-undo-foot">
           <span className="turn-undo-foot-hint">
-            仅恢复已勾选文件的回合前快照，未触碰文件的手写改动完好保留
+            注：仅恢复本回合 write_file / edit_file 修改的勾选文件（不追踪终端命令 run_command 或外部改动）
           </span>
           <div className="turn-undo-foot-actions">
             <button
@@ -269,12 +305,20 @@ export function TurnUndoModal() {
             <button
               className="btn danger"
               type="button"
-              disabled={loading || Boolean(error) || checkedPaths.size === 0 || submitting}
+              disabled={
+                loading ||
+                Boolean(error) ||
+                checkedPaths.size === 0 ||
+                submitting ||
+                (selectedHasConflicts && !forceConfirmed)
+              }
               onClick={() => void handleConfirm()}
             >
               {submitting
                 ? '[ WAIT ] 正在恢复快照...'
-                : `↶ 撤销此回合改动 (${checkedPaths.size})`}
+                : selectedHasConflicts
+                  ? `↶ 强制覆盖并撤销 (${checkedPaths.size})`
+                  : `↶ 撤销此回合改动 (${checkedPaths.size})`}
             </button>
           </div>
         </div>

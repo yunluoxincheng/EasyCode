@@ -12,6 +12,7 @@ export type {
   TurnUndoPreview,
   TurnUndoFilePreview,
   TurnUndoResult,
+  RevertTurnOptions,
   WorkspaceFilePreview,
   // end-server-type-exports
 } from './server.js';
@@ -38,6 +39,7 @@ export {
   buildSystemPrompt,
   parseCodeRangeMentions,
   resolveCodeRangeMentions,
+  formatFileMention,
   type CodeRangeMention,
   type CodeRangeSnippet,
 } from './prompts.js';

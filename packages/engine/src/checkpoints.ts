@@ -6,6 +6,11 @@ import {
   type Host,
 } from '@easycode/core';
 
+/** 单文件快照体积上限（2MB），防止超大生成物撑爆快照存储 */
+const MAX_SNAPSHOT_FILE_BYTES = 2 * 1024 * 1024;
+/** 单会话最多保留的回合快照数量上限 */
+const MAX_CHECKPOINTS_PER_SESSION = 30;
+
 /** 单个文件在某回合内的改动快照（以该回合首次触碰前的状态为基准，TODOS #36） */
 export interface TurnFileSnapshot {
   /** 规范化后的工作区相对路径（统一正斜杠 /） */
@@ -20,6 +25,8 @@ export interface TurnFileSnapshot {
   insertions: number;
   /** 相较于 beforeContent 的删除行数 */
   deletions: number;
+  /** 该文件最近一次执行快照回退的时间 ISO */
+  revertedAt?: string;
 }
 
 /** 单个回合的完整持久化快照记录（TODOS #36） */
@@ -38,7 +45,7 @@ export interface TurnCheckpointRecord {
   toolCallIds: string[];
   /** 创建时间 ISO */
   createdAt: string;
-  /** 若已执行过回退，记录回退时间 ISO */
+  /** 若整回合所有文件均已恢复至回合前状态，记录完成时间 ISO */
   revertedAt?: string;
   /** 该回合修改过的文件快照集合 */
   files: TurnFileSnapshot[];
@@ -58,6 +65,7 @@ export interface TurnCheckpointSummary {
     existedBefore: boolean;
     insertions: number;
     deletions: number;
+    revertedAt?: string;
   }>;
 }
 
@@ -89,6 +97,13 @@ export interface TurnUndoPreview {
   revertedAt?: string;
   hasConflicts: boolean;
   files: TurnUndoFilePreview[];
+}
+
+export interface RevertTurnOptions {
+  /** 仅回退指定相对路径子集；不传或空数组表示回退该回合全部文件 */
+  paths?: string[];
+  /** 是否允许覆盖自本回合结束后已被修改（后续回合或外部编辑器修改）的文件（CAS 强制覆盖） */
+  force?: boolean;
 }
 
 export interface BeginTurnContext {
@@ -128,6 +143,7 @@ function toSummary(rec: TurnCheckpointRecord): TurnCheckpointSummary {
       existedBefore: f.existedBefore,
       insertions: f.insertions,
       deletions: f.deletions,
+      revertedAt: f.revertedAt,
     })),
   };
 }
@@ -137,7 +153,7 @@ function toSummary(rec: TurnCheckpointRecord): TurnCheckpointSummary {
  * - 在 write_file / edit_file 修改文件时记录回合级 Pre-edit 原始快照；
  * - 同一回合内多次修改同一文件，始终以该回合首次触碰前的原始版本为基准；
  * - 存储在 ${dataDir}/checkpoints/${sessionId}.json，绝不污染用户项目工作区与 Git 状态；
- * - 支持冲突检测（后续回合二次修改 / 外部编辑器手动修改）与按回合/按文件安全回退。
+ * - 支持冲突检测（后续回合二次修改 / 外部编辑器手动修改）、CAS 乐观并发校验与按回合/按文件安全回退。
  */
 export class CheckpointManager {
   private cache = new Map<string, TurnCheckpointRecord[]>();
@@ -200,6 +216,45 @@ export class CheckpointManager {
     await next;
   }
 
+  /** 检查单个快照文件在当前磁盘上的状态（是否已恢复、是否与本回合结束快照偏离） */
+  private async inspectFileDiskState(
+    workspaceRoot: string,
+    file: TurnFileSnapshot,
+  ): Promise<{
+    currentExists: boolean;
+    currentContent: string | null;
+    alreadyReverted: boolean;
+    diskDiverged: boolean;
+  }> {
+    let currentExists = false;
+    let currentContent: string | null = null;
+    try {
+      const abs = resolveWorkspacePath(workspaceRoot, file.path, this.host);
+      const stat = await this.host.fs.stat(abs);
+      if (stat && !stat.isDirectory) {
+        currentExists = true;
+        currentContent = await this.host.fs.readFile(abs);
+      }
+    } catch {
+      currentExists = false;
+      currentContent = null;
+    }
+
+    const alreadyReverted = !file.existedBefore
+      ? !currentExists
+      : currentExists && currentContent === file.beforeContent;
+
+    const diskDiverged =
+      !alreadyReverted && (!currentExists || currentContent !== file.afterContent);
+
+    return {
+      currentExists,
+      currentContent,
+      alreadyReverted,
+      diskDiverged,
+    };
+  }
+
   /**
    * 开启一个回合的快照追踪器：仅当回合内实际发生文件写入时才落盘生成快照记录
    */
@@ -211,6 +266,12 @@ export class CheckpointManager {
       turnId,
       recordFileChange: async (change: FileChangeEvent) => {
         if (!ctx.workspaceRoot) return;
+        const beforeLen = change.beforeContent?.length ?? 0;
+        const afterLen = change.afterContent.length;
+        if (beforeLen > MAX_SNAPSHOT_FILE_BYTES || afterLen > MAX_SNAPSHOT_FILE_BYTES) {
+          return;
+        }
+
         const records = await this.loadSessionRecords(ctx.sessionId);
         const relPath = this.normalizeRelPath(ctx.workspaceRoot, change.relPath, change.absPath);
         const key = this.pathKey(relPath);
@@ -231,6 +292,10 @@ export class CheckpointManager {
             files: [],
           };
           records.push(record);
+          // 控制单会话快照数量上限
+          while (records.length > MAX_CHECKPOINTS_PER_SESSION) {
+            records.shift();
+          }
         }
 
         if (change.callId && !record.toolCallIds.includes(change.callId)) {
@@ -268,6 +333,7 @@ export class CheckpointManager {
             existing.afterContent = change.afterContent;
             existing.insertions = stats.insertions;
             existing.deletions = stats.deletions;
+            existing.revertedAt = undefined;
           }
         }
 
@@ -286,6 +352,25 @@ export class CheckpointManager {
   async listCheckpoints(sessionId: string): Promise<TurnCheckpointSummary[]> {
     const records = await this.loadSessionRecords(sessionId);
     return records.filter((r) => r.files.length > 0).map(toSummary);
+  }
+
+  /**
+   * 当用户编辑最后一条提问并截断后续历史时，清理被截断回合残留的旧快照（P2 #6）
+   */
+  async pruneCheckpointsFromTurn(
+    sessionId: string,
+    fromTurnNumber: number,
+    removedUserMessageIds?: string[],
+  ): Promise<void> {
+    const records = await this.loadSessionRecords(sessionId);
+    const removedSet = new Set(removedUserMessageIds ?? []);
+    const filtered = records.filter(
+      (r) => r.turnNumber < fromTurnNumber && !removedSet.has(r.userMessageId),
+    );
+    if (filtered.length !== records.length) {
+      this.cache.set(sessionId, filtered);
+      await this.persistSessionRecords(sessionId);
+    }
   }
 
   /** 解析目标回合快照（turnId 缺省或为 'latest' 时默认取最近一个未撤销的改动回合） */
@@ -317,6 +402,12 @@ export class CheckpointManager {
     return { record: valid[idx], index: idx };
   }
 
+  /** 获取目标回合快照记录（供上层在加工作区锁前先行解析快照绑定的 workspaceRoot，P1 #1） */
+  async getTargetRecord(sessionId: string, turnId?: string): Promise<TurnCheckpointRecord> {
+    const records = await this.loadSessionRecords(sessionId);
+    return this.resolveTargetRecord(records, turnId).record;
+  }
+
   /**
    * 生成回合撤销预览与冲突检测报告（供 <TurnUndoModal> 展示）
    */
@@ -334,26 +425,10 @@ export class CheckpointManager {
         .map((r) => r.turnNumber);
       const modifiedInLaterTurns = laterTurnNumbers.length > 0;
 
-      let currentExists = false;
-      let currentContent: string | null = null;
-      try {
-        const abs = resolveWorkspacePath(record.workspaceRoot, file.path, this.host);
-        const stat = await this.host.fs.stat(abs);
-        if (stat && !stat.isDirectory) {
-          currentExists = true;
-          currentContent = await this.host.fs.readFile(abs);
-        }
-      } catch {
-        currentExists = false;
-        currentContent = null;
-      }
-
-      const alreadyReverted = !file.existedBefore
-        ? !currentExists
-        : currentExists && currentContent === file.beforeContent;
-
-      const diskDiverged =
-        !alreadyReverted && (!currentExists || currentContent !== file.afterContent);
+      const { alreadyReverted, diskDiverged } = await this.inspectFileDiskState(
+        record.workspaceRoot,
+        file,
+      );
 
       const diff = diffLines(
         file.existedBefore ? (file.beforeContent ?? '') : '',
@@ -388,13 +463,20 @@ export class CheckpointManager {
   }
 
   /**
-   * 执行回合代码改动撤销：将目标文件恢复至该回合修改前的原始状态（新建文件则删除）
+   * 执行回合代码改动撤销：
+   * 1. 执行前进行 CAS 乐观并发校验（若目标文件磁盘内容已偏离 afterContent 且未传 force=true，拒绝覆盖）；
+   * 2. 新建文件通过 unlink 删除并经 stat 后置探活验证，删除失败如实抛错（绝不吞错谎报成功）；
+   * 3. 逐文件记录 revertedAt，并基于整回合所有文件的实际恢复状态更新 record.revertedAt。
    */
   async revertTurn(
     sessionId: string,
     turnId?: string,
-    paths?: string[],
+    optionsOrPaths?: RevertTurnOptions | string[],
   ): Promise<{ record: TurnCheckpointRecord; revertedPaths: string[] }> {
+    const opts: RevertTurnOptions = Array.isArray(optionsOrPaths)
+      ? { paths: optionsOrPaths }
+      : (optionsOrPaths ?? {});
+
     const records = await this.loadSessionRecords(sessionId);
     const { record } = this.resolveTargetRecord(records, turnId);
     if (!record.workspaceRoot) {
@@ -402,7 +484,9 @@ export class CheckpointManager {
     }
 
     const filterKeys =
-      paths && paths.length > 0 ? new Set(paths.map((p) => this.pathKey(p))) : null;
+      opts.paths && opts.paths.length > 0
+        ? new Set(opts.paths.map((p) => this.pathKey(p)))
+        : null;
     const targetFiles = filterKeys
       ? record.files.filter((f) => filterKeys.has(this.pathKey(f.path)))
       : record.files;
@@ -411,17 +495,48 @@ export class CheckpointManager {
       throw new Error('未选择任何需要回退的文件');
     }
 
+    // P1 #3：执行前 CAS 乐观并发校验——防止打开预览弹窗后用户在外部编辑器修改了文件却被静默覆盖
+    if (!opts.force) {
+      const divergedPaths: string[] = [];
+      for (const file of targetFiles) {
+        const { diskDiverged } = await this.inspectFileDiskState(record.workspaceRoot, file);
+        if (diskDiverged) {
+          divergedPaths.push(file.path);
+        }
+      }
+      if (divergedPaths.length > 0) {
+        throw new Error(
+          `[CONFLICT] 检测到文件在回退前已被修改（${divergedPaths.join(', ')}），为防止覆盖最新改动已中止。请刷新预览并确认强制覆盖后再试。`,
+        );
+      }
+    }
+
+    const now = new Date().toISOString();
     const revertedPaths: string[] = [];
     for (const file of targetFiles) {
       const abs = resolveWorkspacePath(record.workspaceRoot, file.path, this.host);
       if (!file.existedBefore) {
-        try {
-          const stat = await this.host.fs.stat(abs);
-          if (stat && !stat.isDirectory) {
-            await this.host.fs.unlink?.(abs);
+        // P1 #2：仅当文件确实不存在时才幂等跳过；unlink 缺失或删除后文件仍存在必须抛错
+        const statBefore = await this.host.fs.stat(abs);
+        if (statBefore) {
+          if (statBefore.isDirectory) {
+            throw new Error(`回退失败: 目标路径已变为目录，无法按文件删除 (${file.path})`);
           }
-        } catch {
-          // 已被删除时忽略
+          if (!this.host.fs.unlink) {
+            throw new Error(`当前宿主不支持文件删除 (unlink)，无法回退新建文件 (${file.path})`);
+          }
+          let unlinkErr: unknown;
+          try {
+            await this.host.fs.unlink(abs);
+          } catch (err) {
+            unlinkErr = err;
+          }
+          const statAfter = await this.host.fs.stat(abs);
+          if (statAfter !== null) {
+            throw new Error(
+              `删除新建文件失败 (${file.path}): ${unlinkErr instanceof Error ? unlinkErr.message : String(unlinkErr ?? '目标文件仍存在')}`,
+            );
+          }
         }
       } else {
         const dir = this.host.paths.dirname(abs);
@@ -430,12 +545,23 @@ export class CheckpointManager {
         }
         await this.host.fs.writeFile(abs, file.beforeContent ?? '');
       }
+      file.revertedAt = now;
       revertedPaths.push(file.path);
     }
 
-    if (!filterKeys || revertedPaths.length === record.files.length) {
-      record.revertedAt = new Date().toISOString();
+    // P2 #4：检查该回合全部文件是否均已处于恢复状态（支持分多次部分回退后正确标记整回合完成）
+    let allFilesReverted = true;
+    for (const f of record.files) {
+      const { alreadyReverted } = await this.inspectFileDiskState(record.workspaceRoot, f);
+      if (!alreadyReverted) {
+        allFilesReverted = false;
+        f.revertedAt = undefined;
+      } else if (!f.revertedAt) {
+        f.revertedAt = now;
+      }
     }
+    record.revertedAt = allFilesReverted ? now : undefined;
+
     await this.persistSessionRecords(sessionId);
     return { record, revertedPaths };
   }

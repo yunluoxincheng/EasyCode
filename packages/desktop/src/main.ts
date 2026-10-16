@@ -222,7 +222,7 @@ const handlers: Record<string, Handler> = {
     server.revertTurnCheckpoint(
       args.id as string,
       args.turnId as string | undefined,
-      args.paths as string[] | undefined,
+      (args.options ?? args.paths) as any,
     ),
   'get-project-rules': (args) => server.getSessionProjectRules(args.id as string),
   'init-project-rules': (args) => server.initSessionProjectRules(args.id as string),
