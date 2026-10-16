@@ -158,6 +158,27 @@ export function Composer() {
   // Tauri 宿主：dragDrop 由窗口级接管（DOM drop 事件不触发），监听 onDragDropEvent 拿真实路径
   const insertRef = useRef(insertPaths);
   useEffect(() => {
+    if (!store.composerInsertTick || !store.composerInsertText) return;
+    const snippet = store.composerInsertText;
+    const ta = taRef.current;
+    if (!ta) {
+      setText((prev) => (prev && !/\s$/.test(prev) ? `${prev} ${snippet}` : `${prev}${snippet}`));
+      return;
+    }
+    const start = ta.selectionStart ?? ta.value.length;
+    const end = ta.selectionEnd ?? start;
+    const needLeadingSpace = start > 0 && !/\s/.test(ta.value[start - 1]);
+    const finalSnippet = `${needLeadingSpace ? ' ' : ''}${snippet}`;
+    const nextVal = ta.value.slice(0, start) + finalSnippet + ta.value.slice(end);
+    setText(nextVal);
+    requestAnimationFrame(() => {
+      ta.focus();
+      const caret = start + finalSnippet.length;
+      ta.selectionStart = ta.selectionEnd = caret;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [store.composerInsertTick]);
+  useEffect(() => {
     insertRef.current = insertPaths;
   });
   useEffect(() => {
@@ -212,6 +233,10 @@ export function Composer() {
           setText('');
           historyRef.current = null;
           setSlash((s) => ({ ...s, open: false }));
+          if (matched.id === 'undo') {
+            store.openTurnUndoModal('latest');
+            return;
+          }
           if (matched.id === 'clear') {
             store.showToast('已清空当前输入内容');
             return;
@@ -376,6 +401,10 @@ export function Composer() {
       const newText = text.slice(0, start) + text.slice(caret);
       setText(newText.trimStart());
 
+      if (cmd.id === 'undo') {
+        store.openTurnUndoModal('latest');
+        return;
+      }
       if (cmd.id === 'clear') {
         setText('');
         historyRef.current = null;
@@ -465,7 +494,9 @@ export function Composer() {
     if (!ta) return;
     const start = mention.startIndex;
     const caret = ta.selectionStart ?? (start + mention.query.length + 1);
-    const replacement = `@${filePath} `;
+    const colonIdx = mention.query.indexOf(':');
+    const rangeSuffix = colonIdx !== -1 ? mention.query.slice(colonIdx) : '';
+    const replacement = `@${filePath}${rangeSuffix} `;
     const newText = text.slice(0, start) + replacement + text.slice(caret);
     setText(newText);
     setMention({
@@ -493,7 +524,8 @@ export function Composer() {
     const timer = setTimeout(async () => {
       try {
         setMention((m) => ({ ...m, loading: true }));
-        const list = await store.client.listWorkspaceFiles(session.id, mention.query);
+        const filePart = mention.query.split(':')[0] ?? '';
+        const list = await store.client.listWorkspaceFiles(session.id, filePart);
         setMention((m) => ({ ...m, files: list, loading: false, selectedIndex: 0 }));
       } catch {
         setMention((m) => ({ ...m, files: [], loading: false }));
@@ -765,9 +797,23 @@ export function Composer() {
                     ? '检索中...'
                     : mention.files.length === 0
                       ? '无匹配文件'
-                      : `↑↓ 移动 · Tab/Enter 补全 (${mention.files.length})`}
+                      : `↑↓ 移动 · Tab/Enter 补全 · 按 : 指定行区间 (${mention.files.length})`}
               </span>
             </div>
+            {mention.query.includes(':') && (
+              <div className="mention-range-bar">
+                <span className="mention-range-tag">[ : 行范围切片 ]</span>
+                <span className="mention-range-desc">
+                  语法: <code>@文件:起始行-结束行</code>（如 <code>:50-100</code>）或单行（如{' '}
+                  <code>:35</code>）
+                </span>
+                {/^\d+(?:-\d+)?$/.test(mention.query.split(':')[1] ?? '') && (
+                  <span className="mention-range-ok">
+                    [ OK · 第 {mention.query.split(':')[1]} 行 ]
+                  </span>
+                )}
+              </div>
+            )}
             {!session?.workspaceRoot ? (
               <div className="mention-empty">
                 当前会话未绑定项目工作区，点击上方「＋ 绑定项目」即可引用代码文件
@@ -842,13 +888,25 @@ export function Composer() {
           ref={taRef}
           value={text}
           onChange={(e) => {
-            const nextVal = e.target.value;
-            const caret = e.target.selectionStart ?? nextVal.length;
+            let nextVal = e.target.value;
+            let caret = e.target.selectionStart ?? nextVal.length;
+            const before = nextVal.slice(0, caret);
+            const colonTighten = /(@[^\s@:]+) :$/.exec(before);
+            if (colonTighten) {
+              nextVal = nextVal.slice(0, caret - 2) + ':' + nextVal.slice(caret);
+              caret -= 1;
+              const ta = e.currentTarget;
+              requestAnimationFrame(() => {
+                ta.selectionStart = ta.selectionEnd = caret;
+              });
+            }
+
+
             setText(nextVal);
             checkMention(nextVal, caret);
             checkSlash(nextVal, caret);
           }}
-          onClick={(e) => {
+          onClick={(e) => { // ta-click
             const ta = e.currentTarget;
             const caret = ta.selectionStart ?? ta.value.length;
             checkMention(ta.value, caret);

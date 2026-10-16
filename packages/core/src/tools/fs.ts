@@ -1,7 +1,9 @@
+import type { Host } from '../host.js';
 import type { Tool } from './index.js';
 import { resolveWorkspacePath } from './index.js';
 
 const MAX_READ_BYTES = 64 * 1024;
+const MAX_RANGE_LINES = 500;
 
 function withLineNumbers(content: string, offset: number, limit: number): string {
   const lines = content.split('\n');
@@ -15,6 +17,133 @@ function withLineNumbers(content: string, offset: number, limit: number): string
     out.push(`...（共 ${lines.length} 行，已截断。可用 offset=${end} 继续读取）`);
   }
   return out.join('\n');
+}
+
+/** 代码行号范围引用结构（TODOS #38）：@path/to/file.ts:50-100 或 @path/to/file.ts:35 */
+export interface CodeRangeMention {
+  /** 原始匹配字符串（如 @src/main.ts:10-20） */
+  raw: string;
+  /** 工作区相对路径（如 src/main.ts） */
+  path: string;
+  /** 起始行号（1-based，含） */
+  startLine: number;
+  /** 结束行号（1-based，含） */
+  endLine: number;
+}
+
+/** 解析并切片后的代码片段信息（TODOS #38） */
+export interface CodeRangeSnippet {
+  path: string;
+  startLine: number;
+  endLine: number;
+  totalLines: number;
+  content: string;
+  formatted: string;
+}
+
+/**
+ * 从用户输入文本中解析全部 @path/to/file:start-end 或 @path/to/file:line 行范围引用（TODOS #38）。
+ * 严格要求 @ 前为行首、空白或左标点，避免误匹配邮箱或 URL 端口。
+ */
+export function parseCodeRangeMentions(text: string): CodeRangeMention[] {
+  if (!text || !text.includes('@') || !text.includes(':')) return [];
+  const pattern =
+    /(?:^|(?<=[\s([{"'`<:;，。！？、]))@(?:"([^"\r\n:]+)"|([^\s:"'`<>]+)):(\d+)(?:-(\d+))?(?=$|[\s)\]}"'`,.;:!?，。；：！？、])/g;
+  const mentions: CodeRangeMention[] = [];
+  const seen = new Set<string>();
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(text)) !== null) {
+    const rawPath = (match[1] ?? match[2] ?? '').trim();
+    if (!rawPath) continue;
+    const n1 = parseInt(match[3], 10);
+    const n2 = match[4] !== undefined ? parseInt(match[4], 10) : n1;
+    if (!Number.isFinite(n1) || !Number.isFinite(n2) || n1 < 1 || n2 < 1) continue;
+    const startLine = Math.min(n1, n2);
+    const endLine = Math.max(n1, n2);
+    const cleanPath = rawPath.replace(/\\/g, '/').replace(/^\.\//, '');
+    const key = `${cleanPath}:${startLine}-${endLine}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    mentions.push({
+      raw: match[0],
+      path: cleanPath,
+      startLine,
+      endLine,
+    });
+  }
+  return mentions;
+}
+
+/**
+ * 解析文本中的 @file:start-end 行范围引用，从工作区安全读取对应行切片并注入上下文（TODOS #38）。
+ * 附带行号标尺与“用户截取了文件第 X-Y 行片段”上下文说明。
+ */
+export async function resolveCodeRangeMentions(
+  host: Host,
+  workspace: string,
+  text: string,
+): Promise<{ enrichedText: string; snippets: CodeRangeSnippet[] }> {
+  if (!workspace?.trim()) return { enrichedText: text, snippets: [] };
+  const mentions = parseCodeRangeMentions(text);
+  if (mentions.length === 0) return { enrichedText: text, snippets: [] };
+
+  const snippets: CodeRangeSnippet[] = [];
+  for (const m of mentions) {
+    try {
+      const abs = resolveWorkspacePath(workspace, m.path, host);
+      const stat = await host.fs.stat(abs);
+      if (!stat || stat.isDirectory) continue;
+      const rawContent = await host.fs.readFile(abs);
+      if (rawContent.includes('\u0000')) continue;
+      const normalized = rawContent.replace(/\r\n/g, '\n');
+      const lines = normalized.split('\n');
+      const totalLines = lines.length;
+      if (totalLines === 0) continue;
+
+      const startLine = Math.max(1, Math.min(m.startLine, totalLines));
+      const endLine = Math.max(
+        startLine,
+        Math.min(m.endLine, totalLines, startLine + MAX_RANGE_LINES - 1),
+      );
+      const numberedLines: string[] = [];
+      for (let i = startLine; i <= endLine; i++) {
+        numberedLines.push(`${String(i).padStart(5, ' ')}| ${lines[i - 1]}`);
+      }
+      const sliceBody = numberedLines.join('\n');
+      const rangeDesc = startLine === endLine ? `第 ${startLine} 行` : `第 ${startLine}-${endLine} 行`;
+      const formatted = [
+        `### @${m.path}:${startLine === endLine ? startLine : `${startLine}-${endLine}`}`,
+        `> *用户截取了文件 \`${m.path}\` ${rangeDesc}片段（文件共 ${totalLines} 行）：*`,
+        '```',
+        sliceBody,
+        '```',
+      ].join('\n');
+
+      snippets.push({
+        path: m.path,
+        startLine,
+        endLine,
+        totalLines,
+        content: sliceBody,
+        formatted,
+      });
+    } catch {
+      // 忽略越界或不存在的单个文件引用，不阻断正常提问
+    }
+  }
+
+  if (snippets.length === 0) return { enrichedText: text, snippets: [] };
+  const injectedBlock = [
+    '',
+    '---',
+    '# 引用代码行范围切片 (Code Range Mentions)',
+    ...snippets.map((s) => s.formatted),
+  ].join('\n\n');
+
+  return {
+    enrichedText: `${text}${injectedBlock}`,
+    snippets,
+  };
 }
 
 export const readFileTool: Tool = {
@@ -65,16 +194,35 @@ export const writeFileTool: Tool = {
     },
   },
   sensitive: true,
-  async execute(input, { host, workspace, readFiles }) {
+  async execute(input, { host, workspace, readFiles, callId, onFileChange }) {
     const { path: rel, content } = input as { path: string; content: string };
     const abs = resolveWorkspacePath(workspace, rel, host);
     const stat = await host.fs.stat(abs);
     if (stat && readFiles && !readFiles.has(abs)) {
       throw new Error(`覆盖已有文件前请先 read_file: ${rel}（防盲改保护）`);
     }
+    const existedBefore = Boolean(stat && !stat.isDirectory);
+    let beforeContent: string | null = null;
+    if (existedBefore && onFileChange) {
+      try {
+        beforeContent = await host.fs.readFile(abs);
+      } catch {
+        beforeContent = '';
+      }
+    }
     const dir = host.paths.dirname(abs);
     if (dir && dir !== abs) await host.fs.mkdir(dir, { recursive: true });
     await host.fs.writeFile(abs, content);
+    if (onFileChange) {
+      await onFileChange({
+        callId,
+        relPath: rel,
+        absPath: abs,
+        existedBefore,
+        beforeContent,
+        afterContent: content,
+      });
+    }
     readFiles?.add(abs);
     return `已写入 ${rel}（${content.split('\n').length} 行, ${content.length} 字符）`;
   },
@@ -97,7 +245,7 @@ export const editFileTool: Tool = {
     },
   },
   sensitive: true,
-  async execute(input, { host, workspace, readFiles }) {
+  async execute(input, { host, workspace, readFiles, callId, onFileChange }) {
     const { path: rel, old_string: oldStr, new_string: newStr, replace_all = false } =
       input as {
         path: string;
@@ -118,6 +266,16 @@ export const editFileTool: Tool = {
     }
     const next = replace_all ? content.split(oldStr).join(newStr) : content.replace(oldStr, newStr);
     await host.fs.writeFile(abs, next);
+    if (onFileChange) {
+      await onFileChange({
+        callId,
+        relPath: rel,
+        absPath: abs,
+        existedBefore: true,
+        beforeContent: content,
+        afterContent: next,
+      });
+    }
     readFiles?.add(abs);
     return `已修改 ${rel}（替换 ${replace_all ? count : 1} 处）`;
   },

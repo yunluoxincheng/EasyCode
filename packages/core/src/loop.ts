@@ -4,7 +4,7 @@ import type { ChatMessage, ToolResultMessage } from './types.js';
 import type { Provider, StreamRequest } from './providers/index.js';
 import { extractToolCalls } from './providers/index.js';
 import { ApprovalManager } from './approval.js';
-import { executeTool, getToolExecutionOutcome, ToolRegistry } from './tools/index.js';
+import { executeTool, getToolExecutionOutcome, ToolRegistry, type FileChangeEvent } from './tools/index.js';
 import { compactHistoryMessages, pruneHistoricalToolResults } from './compaction.js';
 import { startDecisionObservation, type DecisionPolicy, type DecisionObservation } from './policy.js';
 import type { BackgroundTaskManager } from './tasks.js';
@@ -35,6 +35,8 @@ export interface LoopOptions {
   policy?: DecisionPolicy;
   /** 会话级后台任务管理器（TODOS #37）：run_command background 与任务查询/停止工具依赖 */
   backgroundTasks?: BackgroundTaskManager;
+  /** 文件写操作完成后的快照回调（TODOS #36）：供上层记录回合级 Pre-edit 快照 */
+  onFileChange?: (change: FileChangeEvent) => Promise<void> | void;
 }
 
 export interface LoopResult {
@@ -143,6 +145,7 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
     workspaceLock,
     policy,
     backgroundTasks,
+    onFileChange,
   } = options;
 
   let pendingRecoveries: Array<{ observation: DecisionObservation; name: string; input: unknown }> = [];
@@ -299,6 +302,8 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
           workspaceLock,
           policy,
           backgroundTasks,
+          callId: call.id,
+          onFileChange,
         });
         const toolOutcome = getToolExecutionOutcome(call.name, execution);
         if (toolRoutingFollowup && call === calls[0]) {

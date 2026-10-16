@@ -14,6 +14,11 @@ import type {
   GitStatusSummary,
   GitDiffResult,
   GitDiffOptions,
+  TurnCheckpointSummary,
+  TurnUndoPreview,
+  TurnUndoFilePreview,
+  TurnUndoResult,
+  WorkspaceFilePreview,
 } from './server.js';
 
 /**
@@ -73,7 +78,15 @@ export interface AgentClient {
   /** 探测系统可用的命令行终端 Shell 列表（由宿主探测） */
   detectShells?(): Promise<ShellInfo[]>;
   /** 列出工作区文件列表（支持 query 模糊过滤，供 @文件 快捷引用） */
-  listWorkspaceFiles(id: string, query?: string): Promise<string[]>;
+  listWorkspaceFiles(id: string, query?: string, limit?: number): Promise<string[]>;
+  /** 读取工作区指定相对路径文件内容（供工作区文件树单击预览与行范围框选引用，TODOS #38） */
+  readWorkspaceFile?(id: string, relPath: string): Promise<WorkspaceFilePreview>;
+  /** 列出会话内包含代码改动的回合快照摘要（TODOS #36） */
+  listTurnCheckpoints?(id: string): Promise<TurnCheckpointSummary[]>;
+  /** 生成回合撤销预览与冲突检测报告（TODOS #36） */
+  previewTurnUndo?(id: string, turnId?: string): Promise<TurnUndoPreview>;
+  /** 执行回合代码改动撤销，安全恢复文件并追加系统通知（TODOS #36） */
+  revertTurnCheckpoint?(id: string, turnId?: string, paths?: string[]): Promise<TurnUndoResult>;
   /** 获取当前会话工作区项目规范（TODOS #33） */
   getProjectRules(id: string): Promise<ProjectRuleInfo | null>;
   /** 初始化当前会话工作区项目规范（TODOS #33） */

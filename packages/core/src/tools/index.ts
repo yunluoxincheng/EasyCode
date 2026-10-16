@@ -42,6 +42,15 @@ export interface ToolSpec {
   parameters: JsonSchema;
 }
 
+export interface FileChangeEvent {
+  callId?: string;
+  relPath: string;
+  absPath: string;
+  existedBefore: boolean;
+  beforeContent: string | null;
+  afterContent: string;
+}
+
 export interface ToolContext {
   host: Host;
   workspace: string;
@@ -56,6 +65,10 @@ export interface ToolContext {
   policy?: DecisionPolicy;
   /** 后台任务管理器（TODOS #37）：run_command background / read_task_logs / stop_task 依赖 */
   backgroundTasks?: BackgroundTaskManager;
+  /** 当前工具调用 ID（用于关联回合快照，TODOS #36） */
+  callId?: string;
+  /** 文件写操作完成后的快照回调（TODOS #36）：携带写前原始内容与写后新内容 */
+  onFileChange?: (change: FileChangeEvent) => Promise<void> | void;
 }
 
 export interface Tool {

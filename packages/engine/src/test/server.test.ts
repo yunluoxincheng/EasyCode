@@ -1,6 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { AgentServer, Mutex, WorkspaceLockManager } from '../index.js';
+import {
+  AgentServer,
+  CheckpointManager,
+  Mutex,
+  WorkspaceLockManager,
+  parseCodeRangeMentions,
+  resolveCodeRangeMentions,
+} from '../index.js';
 import { MemoryHost } from '@easycode/core';
 
 test('AgentServer.forkSession 继承配置、截取指定轮次上下文并重置统计', async () => {
@@ -440,4 +447,288 @@ test('多回合任务与 Action Trace 边界：上一任务的操作绝不泄漏
   // 必须只反映任务二的用户意图，历史动作绝不混入任务一的工具调用
   assert.match(task2FirstStepState.summary, /任务二/);
   assert.deepEqual(task2FirstStepState.history, [], '新任务起始步的 Action Trace 必须为空，绝不混入上一任务');
+});
+
+test('TODOS #36: CheckpointManager 同回合多次修改基准保持、冲突检测与安全回退（含新建文件删除）', async () => {
+  const host = new MemoryHost({
+    '/ws/src/a.ts': 'line1\nline2\nline3\n',
+    '/ws/src/b.ts': 'const x = 1;\n',
+  });
+  const server = new AgentServer(host);
+  await server.updateSettings({
+    providers: {
+      mock: {
+        kind: 'mock',
+        baseURL: '',
+        name: 'Mock',
+        enabled: true,
+        models: [{ name: 'mock-model', enabled: true }],
+      },
+    },
+    defaultProvider: 'mock',
+  });
+
+  const session = await server.createSession({
+    workspaceRoot: '/ws',
+    providerId: 'mock',
+    title: '快照回退测试',
+  });
+
+  // 直接验证 CheckpointManager 在回合内多次修改同一文件与新建文件的行为
+  const mgr = new CheckpointManager(host);
+  const turn1 = mgr.beginTurn({
+    sessionId: session.id,
+    workspaceRoot: '/ws',
+    turnNumber: 1,
+    userMessageId: 'u_turn_1',
+  });
+
+  // 第 1 次修改 a.ts: v0 -> v1
+  await host.fs.writeFile('/ws/src/a.ts', 'line1\nline2_v1\nline3\n');
+  await turn1.recordFileChange({
+    callId: 'call_1',
+    relPath: 'src/a.ts',
+    absPath: '/ws/src/a.ts',
+    existedBefore: true,
+    beforeContent: 'line1\nline2\nline3\n',
+    afterContent: 'line1\nline2_v1\nline3\n',
+  });
+
+  // 同回合第 2 次修改 a.ts: v1 -> v2（基准必须保持为 v0）
+  await host.fs.writeFile('/ws/src/a.ts', 'line1\nline2_v2\nline3\nline4\n');
+  await turn1.recordFileChange({
+    callId: 'call_2',
+    relPath: 'src/a.ts',
+    absPath: '/ws/src/a.ts',
+    existedBefore: true,
+    beforeContent: 'line1\nline2_v1\nline3\n',
+    afterContent: 'line1\nline2_v2\nline3\nline4\n',
+  });
+
+  // 同回合新建 c.ts（existedBefore = false）
+  await host.fs.writeFile('/ws/src/c.ts', 'export const c = 42;\n');
+  await turn1.recordFileChange({
+    callId: 'call_3',
+    relPath: 'src/c.ts',
+    absPath: '/ws/src/c.ts',
+    existedBefore: false,
+    beforeContent: null,
+    afterContent: 'export const c = 42;\n',
+  });
+
+  const list1 = await mgr.listCheckpoints(session.id);
+  assert.equal(list1.length, 1);
+  assert.equal(list1[0].files.length, 2);
+  assert.deepEqual(list1[0].toolCallIds, ['call_1', 'call_2', 'call_3']);
+
+  // 开启第 2 回合，再次修改 a.ts，制造跨回合冲突
+  const turn2 = mgr.beginTurn({
+    sessionId: session.id,
+    workspaceRoot: '/ws',
+    turnNumber: 2,
+    userMessageId: 'u_turn_2',
+  });
+  await host.fs.writeFile('/ws/src/a.ts', 'line1\nline2_turn2\n');
+  await turn2.recordFileChange({
+    callId: 'call_4',
+    relPath: 'src/a.ts',
+    absPath: '/ws/src/a.ts',
+    existedBefore: true,
+    beforeContent: 'line1\nline2_v2\nline3\nline4\n',
+    afterContent: 'line1\nline2_turn2\n',
+  });
+
+  // 预览第 1 回合的回退：应检测到 a.ts 在第 2 回合被修改过，而 c.ts 无冲突
+  const preview1 = await server.previewTurnUndo(session.id, turn1.turnId);
+  assert.equal(preview1.turnNumber, 1);
+  assert.equal(preview1.hasConflicts, true);
+  const fileA = preview1.files.find((f) => f.path === 'src/a.ts')!;
+  const fileC = preview1.files.find((f) => f.path === 'src/c.ts')!;
+  assert.equal(fileA.modifiedInLaterTurns, true);
+  assert.deepEqual(fileA.laterTurnNumbers, [2]);
+  assert.equal(fileA.diskDiverged, true);
+  assert.equal(fileC.existedBefore, false);
+  assert.equal(fileC.modifiedInLaterTurns, false);
+  assert.equal(fileC.diskDiverged, false);
+
+  // 执行第 1 回合回退：a.ts 应回到第 1 回合前的原始版本，新建的 c.ts 应被删除，会话应追加回退系统通知
+  const undoRes = await server.revertTurnCheckpoint(session.id, turn1.turnId);
+  assert.deepEqual(undoRes.revertedPaths.sort(), ['src/a.ts', 'src/c.ts']);
+  const aContentAfterUndo = await host.fs.readFile('/ws/src/a.ts');
+  assert.equal(aContentAfterUndo, 'line1\nline2\nline3\n');
+  const cStatAfterUndo = await host.fs.stat('/ws/src/c.ts');
+  assert.equal(cStatAfterUndo, null, '本回合新建的文件在回退后应被删除');
+
+  const lastMsg = undoRes.session.messages[undoRes.session.messages.length - 1];
+  assert.equal(lastMsg.role, 'assistant');
+  if (lastMsg.role === 'assistant') {
+    const text = lastMsg.blocks.map((b) => (b.type === 'text' ? b.text : '')).join('');
+    assert.match(text, /已撤销第 1 回合的文件变更/);
+  }
+});
+
+test('TODOS #38: @file:start-end 行范围引用解析、切片注入与工作区文件预览', async () => {
+  const sampleLines = Array.from({ length: 30 }, (_, i) => `const line_${i + 1} = ${i + 1};`).join('\n');
+  const host = new MemoryHost({
+    '/ws/src/index.ts': sampleLines,
+  });
+
+  // 1. 解析语法验证（含单行、区间、逆序自动纠正、防邮箱/URL 误判）
+  const mentions = parseCodeRangeMentions(
+    '请看 @src/index.ts:5-8 和单行 @src/index.ts:12，忽略邮箱 dev@test.com:8080 与 http://localhost:3000 及逆序 @src/index.ts:20-18',
+  );
+  assert.equal(mentions.length, 3);
+  assert.deepEqual(
+    mentions.map((m) => ({ path: m.path, start: m.startLine, end: m.endLine })),
+    [
+      { path: 'src/index.ts', start: 5, end: 8 },
+      { path: 'src/index.ts', start: 12, end: 12 },
+      { path: 'src/index.ts', start: 18, end: 20 },
+    ],
+  );
+
+  // 2. 切片注入验证（带行号标尺与说明文案，越界路径自动忽略）
+  const resolved = await resolveCodeRangeMentions(
+    host,
+    '/ws',
+    '优化 @src/index.ts:5-7 以及越界 @../outside.ts:1-3',
+  );
+  assert.equal(resolved.snippets.length, 1);
+  assert.equal(resolved.snippets[0].startLine, 5);
+  assert.equal(resolved.snippets[0].endLine, 7);
+  assert.equal(resolved.snippets[0].totalLines, 30);
+  assert.match(resolved.enrichedText, /用户截取了文件 `src\/index\.ts` 第 5-7 行片段（文件共 30 行）/);
+  assert.match(resolved.enrichedText, /    5\| const line_5 = 5;/);
+  assert.match(resolved.enrichedText, /    7\| const line_7 = 7;/);
+  assert.doesNotMatch(resolved.enrichedText, /const line_8 = 8;/);
+
+  // 3. AgentServer.readWorkspaceFile 预览与越界防护
+  const server = new AgentServer(host);
+  await server.updateSettings({
+    providers: {
+      mock: {
+        kind: 'mock',
+        baseURL: '',
+        name: 'Mock',
+        enabled: true,
+        models: [{ name: 'mock-model', enabled: true }],
+      },
+    },
+    defaultProvider: 'mock',
+  });
+  const session = await server.createSession({
+    workspaceRoot: '/ws',
+    providerId: 'mock',
+    title: '文件预览测试',
+  });
+  const filePreview = await server.readWorkspaceFile(session.id, 'src/index.ts');
+  assert.equal(filePreview.path, 'src/index.ts');
+  assert.equal(filePreview.totalLines, 30);
+  assert.equal(filePreview.truncated, false);
+  await assert.rejects(
+    () => server.readWorkspaceFile(session.id, '../outside.ts'),
+    /路径越界/,
+  );
+});
+
+test('TODOS #36 & #38 全链路: 真实工具执行 write_file/edit_file 触发快照、失败/拒绝零脏快照、会话删除清理', async () => {
+  const { runAgentLoop, createBuiltinTools, ApprovalManager } = await import('@easycode/core');
+  const host = new MemoryHost({
+    '/ws/src/app.ts': 'const a = 1;\nconst b = 2;\nconst c = 3;\n',
+  });
+  const mgr = new CheckpointManager(host);
+  const tracker = mgr.beginTurn({
+    sessionId: 's_e2e',
+    workspaceRoot: '/ws',
+    turnNumber: 1,
+    userMessageId: 'u_1',
+  });
+
+  let step = 0;
+  const fakeProvider = {
+    id: 'fake',
+    async stream() {
+      step++;
+      if (step === 1) {
+        return {
+          blocks: [
+            { type: 'tool_call' as const, id: 'tc_read', name: 'read_file', input: { path: 'src/app.ts' } },
+          ],
+        };
+      }
+      if (step === 2) {
+        return {
+          blocks: [
+            // 1. 正常修改 app.ts (第1次)
+            {
+              type: 'tool_call' as const,
+              id: 'tc_edit_1',
+              name: 'edit_file',
+              input: { path: 'src/app.ts', old_string: 'const b = 2;', new_string: 'const b = 20;' },
+            },
+            // 2. 同回合再次修改 app.ts (第2次)
+            {
+              type: 'tool_call' as const,
+              id: 'tc_edit_2',
+              name: 'edit_file',
+              input: { path: 'src/app.ts', old_string: 'const c = 3;', new_string: 'const c = 30;' },
+            },
+            // 3. 失败的 edit_file（old_string 不存在，不应产生脏快照）
+            {
+              type: 'tool_call' as const,
+              id: 'tc_edit_fail',
+              name: 'edit_file',
+              input: { path: 'src/app.ts', old_string: 'NOT_EXIST', new_string: 'x' },
+            },
+            // 4. 新建文件 helper.ts
+            {
+              type: 'tool_call' as const,
+              id: 'tc_write_new',
+              name: 'write_file',
+              input: { path: 'src/helper.ts', content: 'export const h = true;\n' },
+            },
+          ],
+        };
+      }
+      return { blocks: [{ type: 'text' as const, text: '修改完成' }] };
+    },
+  };
+
+  const messages: any[] = [{ role: 'user', content: '修改代码', id: 'u_1' }];
+  const approval = new ApprovalManager(() => {}, 'yolo');
+  await runAgentLoop({
+    provider: fakeProvider,
+    tools: createBuiltinTools(),
+    host,
+    workspace: '/ws',
+    systemPrompt: '',
+    messages,
+    signal: new AbortController().signal,
+    approval,
+    emit: () => {},
+    onFileChange: (change) => tracker.recordFileChange(change),
+  });
+
+  // 验证真实工具执行后，快照精准记录了 2 个文件（失败的 tc_edit_fail 未被记入 toolCallIds）
+  const summaries = await mgr.listCheckpoints('s_e2e');
+  assert.equal(summaries.length, 1);
+  assert.deepEqual(summaries[0].toolCallIds, ['tc_edit_1', 'tc_edit_2', 'tc_write_new']);
+  assert.equal(summaries[0].files.length, 2);
+
+  // 验证此刻磁盘为修改后状态
+  assert.equal(await host.fs.readFile('/ws/src/app.ts'), 'const a = 1;\nconst b = 20;\nconst c = 30;\n');
+  assert.equal(await host.fs.readFile('/ws/src/helper.ts'), 'export const h = true;\n');
+
+  // 执行按单文件部分回退（先只回退 app.ts）
+  await mgr.revertTurn('s_e2e', summaries[0].turnId, ['src/app.ts']);
+  assert.equal(await host.fs.readFile('/ws/src/app.ts'), 'const a = 1;\nconst b = 2;\nconst c = 3;\n');
+  assert.ok(await host.fs.stat('/ws/src/helper.ts'), '未勾选的 helper.ts 此时仍保留');
+
+  // 再全量回退该回合：helper.ts 亦被清理删除
+  await mgr.revertTurn('s_e2e', summaries[0].turnId);
+  assert.equal(await host.fs.stat('/ws/src/helper.ts'), null);
+
+  // 删除会话快照文件后列表为空
+  await mgr.deleteSessionCheckpoints('s_e2e');
+  assert.deepEqual(await mgr.listCheckpoints('s_e2e'), []);
 });

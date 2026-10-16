@@ -10,8 +10,17 @@ export * from './tasks.js';
 export * from './approval.js';
 // 工具
 export { ToolRegistry, executeTool, resolveWorkspacePath, createBuiltinTools, runWebSearch } from './tools/index.js';
-export type { Tool, ToolSpec, ToolContext, ToolExecution } from './tools/index.js';
-export { readFileTool, writeFileTool, editFileTool, listDirTool } from './tools/fs.js';
+export type { Tool, ToolSpec, ToolContext, ToolExecution, FileChangeEvent } from './tools/index.js';
+export {
+  readFileTool,
+  writeFileTool,
+  editFileTool,
+  listDirTool,
+  parseCodeRangeMentions,
+  resolveCodeRangeMentions,
+} from './tools/fs.js';
+export type { CodeRangeMention, CodeRangeSnippet } from './tools/fs.js';
+
 export { searchFilesTool, listFilesRecursively } from './tools/search.js';
 export { runCommandTool } from './tools/shell.js';
 export { todoWriteTool } from './tools/todo.js';

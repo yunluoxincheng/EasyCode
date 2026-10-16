@@ -12,6 +12,8 @@ import { GitInspectorModal } from './components/GitInspectorModal.js';
 import { BackgroundTasksBar } from './components/BackgroundTasksBar.js';
 import { TaskLogsDrawer } from './components/TaskLogsDrawer.js';
 import { PreviewPanel } from './components/PreviewPanel.js';
+import { TurnUndoModal } from './components/TurnUndoModal.js';
+import { FilePreviewModal } from './components/WorkspaceFileTree.js';
 import { updater } from './updater.js';
 
 export function App() {
@@ -55,6 +57,8 @@ export function App() {
       {store.createProjectOpen && <CreateProjectDialog />}
       {store.pendingModelSwitch && <ModelSwitchGuardModal />}
       {store.gitModalOpen && <GitInspectorModal onClose={() => store.closeGitModal()} />}
+      {store.turnUndoModalTurnId && <TurnUndoModal />}
+      {store.filePreviewPath && <FilePreviewModal />}
       <ResizeEdges />
       <ContextMenu />
       {store.toast && (

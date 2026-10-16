@@ -7,7 +7,12 @@ import type {
   TodoItem,
   BackgroundTaskInfo,
 } from '@easycode/core';
-import { providerLabel, type ProjectEntry, type Settings } from '@easycode/engine';
+import {
+  providerLabel,
+  type ProjectEntry,
+  type Settings,
+  type TurnCheckpointSummary,
+} from '@easycode/engine';
 import type { AgentClient } from './client.js';
 
 export type ViewBlock = { type: 'text' | 'thinking'; text: string };
@@ -70,6 +75,8 @@ export interface SessionViewState {
   status: SessionRunStatus;
   /** 会话绑定的后台任务（TODOS #37）：事件驱动 + 轮询刷新 */
   bgTasks: BackgroundTaskInfo[];
+  /** 会话绑定的回合级代码改动快照（TODOS #36） */
+  checkpoints: TurnCheckpointSummary[];
 }
 
 /** 预览面板视口档位（TODOS #44） */
@@ -115,7 +122,19 @@ export class AppStore {
   projectSearch = '';
   pendingModelSwitch: ModelSwitchPending | null = null;
   /** Git 改动审查全尺寸弹窗状态（TODOS #34） */
+  /** Git 改动审查全尺寸弹窗状态（TODOS #34） */
   gitModalOpen = false;
+  /** 活动会话的回合改动快照摘要（TODOS #36） */
+  checkpoints: TurnCheckpointSummary[] = [];
+  /** 回合撤销确认弹窗当前打开的目标 turnId（TODOS #36，null=关闭） */
+  turnUndoModalTurnId: string | null = null;
+  /** 工作区轻量文件预览弹窗当前打开的相对路径（TODOS #38，null=关闭） */
+  filePreviewPath: string | null = null;
+  /** 工作区文件树刷新信号（TODOS #38） */
+  fileTreeRefreshTick = 0;
+  /** Composer 外部插入文本信号（TODOS #38：从文件树或代码预览框选插入引用） */
+  composerInsertTick = 0;
+  composerInsertText = '';
 
   /** 活动会话的后台任务视图（TODOS #37），与 activeSession 的池化状态同步 */
   bgTasks: BackgroundTaskInfo[] = [];
@@ -384,6 +403,7 @@ export class AppStore {
         running: false,
         status: 'idle',
         bgTasks: [],
+        checkpoints: [],
       };
       this.sessionStates.set(id, state);
     }
@@ -398,7 +418,9 @@ export class AppStore {
     this.sessionUsage = state.sessionUsage;
     this.lastUsage = state.lastUsage;
     this.running = state.running;
+    this.running = state.running;
     this.bgTasks = state.bgTasks;
+    this.checkpoints = state.checkpoints;
   }
 
   async selectSession(id: string): Promise<void> {
@@ -438,6 +460,7 @@ export class AppStore {
           running: false,
           status: 'idle',
           bgTasks: [],
+        checkpoints: [],
         };
         this.sessionStates.set(id, state);
       } else if (!state.running && state.items.length === 0 && data.messages.length > 0) {
@@ -459,7 +482,10 @@ export class AppStore {
       this.view = 'chat';
       this.notify(true);
       // TODOS #37：切会话后拉取该会话的后台任务列表（接管恢复任务、点亮任务条）
+      // TODOS #37：切会话后拉取该会话的后台任务列表（接管恢复任务、点亮任务条）
       void this.refreshBackgroundTasks();
+      // TODOS #36：切会话后拉取该会话的回合代码改动快照
+      void this.refreshCheckpoints(id);
     } catch (err) {
       if (seq !== this.selectSeq) return;
       this.showToast(err instanceof Error ? err.message : String(err), 'err');
@@ -569,6 +595,123 @@ export class AppStore {
   }
 
   closeGitModal(): void {
+    this.gitModalOpen = false;
+    this.notify();
+  }
+
+  /* ---------------- 回合级代码改动快照与一键回退 (TODOS #36) ---------------- */
+
+  /** 刷新指定会话（默认活动会话）的回合代码改动快照列表 */
+  async refreshCheckpoints(sessionId = this.activeId): Promise<void> {
+    if (!sessionId || !this.client.listTurnCheckpoints) return;
+    try {
+      const list = await this.client.listTurnCheckpoints(sessionId);
+      const state = this.sessionStates.get(sessionId);
+      if (state) state.checkpoints = list;
+      if (sessionId === this.activeId) {
+        this.checkpoints = list;
+        this.notify(false);
+      }
+    } catch {
+      // 忽略快照拉取异常
+    }
+  }
+
+  /** 根据 UI TurnItem 查找关联的回合代码改动快照（通过 toolCallIds 或前置用户消息 msgId 匹配） */
+  getTurnCheckpointForTurn(turn: TurnItem): TurnCheckpointSummary | undefined {
+    if (this.checkpoints.length === 0) return undefined;
+    const callIds = new Set<string>();
+    for (const it of turn.items) {
+      if (it.kind === 'tool' && it.callId) {
+        callIds.add(it.callId);
+      }
+    }
+    if (callIds.size > 0) {
+      const matched = this.checkpoints.find((c) => c.toolCallIds.some((id) => callIds.has(id)));
+      if (matched) return matched;
+    }
+    const idx = this.items.indexOf(turn);
+    if (idx > 0) {
+      const prev = this.items[idx - 1];
+      if (prev.kind === 'user' && prev.msgId) {
+        return this.checkpoints.find((c) => c.userMessageId === prev.msgId);
+      }
+    }
+    return undefined;
+  }
+
+  /** 呼出回合撤销确认弹窗（turnId 缺省或为 'latest' 时默认定位最近一个包含代码改动的回合） */
+  openTurnUndoModal(turnId = 'latest'): void {
+    if (!this.activeId) return;
+    if (this.running) {
+      this.showToast('会话正在运行中，请先等待完成或点击停止', 'err');
+      return;
+    }
+    if (turnId === 'latest') {
+      const latestUnreverted = [...this.checkpoints].reverse().find((c) => !c.revertedAt);
+      const fallback = this.checkpoints[this.checkpoints.length - 1];
+      const target = latestUnreverted ?? fallback;
+      if (!target) {
+        this.showToast('当前会话暂无可撤销的代码改动回合', 'err');
+        return;
+      }
+      this.turnUndoModalTurnId = target.turnId;
+    } else {
+      this.turnUndoModalTurnId = turnId;
+    }
+    this.notify(true);
+  }
+
+  closeTurnUndoModal(): void {
+    this.turnUndoModalTurnId = null;
+    this.notify(true);
+  }
+
+  /** 执行回合快照回退并刷新会话时间线 */
+  async executeTurnUndo(turnId: string, paths?: string[]): Promise<boolean> {
+    if (!this.activeId || !this.client.revertTurnCheckpoint) return false;
+    try {
+      const res = await this.client.revertTurnCheckpoint(this.activeId, turnId, paths);
+      const state = this.sessionStates.get(this.activeId);
+      if (state) {
+        state.checkpoints = res.checkpoints;
+        state.items = this.itemsFromSession(res.session);
+      }
+      this.checkpoints = res.checkpoints;
+      if (state) this.syncActiveState(state);
+      this.turnUndoModalTurnId = null;
+      this.fileTreeRefreshTick++;
+      this.showToast(
+        `[ OK ] 已撤销第 ${res.turnNumber} 回合的文件变更（共 ${res.revertedPaths.length} 个文件）`,
+      );
+      this.notify(true);
+      return true;
+    } catch (err) {
+      this.showToast(err instanceof Error ? err.message : String(err), 'err');
+      return false;
+    }
+  }
+
+  /* ---------------- 工作区文件树与代码预览引用 (TODOS #38) ---------------- */
+
+  openFilePreview(relPath: string): void {
+    this.filePreviewPath = relPath;
+    this.notify(true);
+  }
+
+  closeFilePreview(): void {
+    this.filePreviewPath = null;
+    this.notify(true);
+  }
+
+  /** 向 Composer 输入框插入路径或 @file:start-end 引用 */
+  insertIntoComposer(snippet: string): void {
+    this.composerInsertText = snippet;
+    this.composerInsertTick++;
+    this.notify(false);
+  }
+
+  private _noopAfterCloseGitModal(): void {
     this.gitModalOpen = false;
     this.notify();
   }
@@ -713,7 +856,11 @@ export class AppStore {
       this.taskDrawerOpen = false;
       this.taskDrawerTaskId = null;
       this.previewOpen = false;
+      this.previewOpen = false;
       this.previewTaskId = null;
+      this.checkpoints = [];
+      this.turnUndoModalTurnId = null;
+      this.filePreviewPath = null;
       if (this.sessions.length > 0) await this.selectSession(this.sessions[0].id);
     }
     this.notify(true);
@@ -1361,6 +1508,8 @@ export class AppStore {
           state.running = false;
           state.status = hadError ? 'error' : 'idle';
           this.sendDesktopNotification(hadError, sessionId);
+          void this.refreshCheckpoints(sessionId);
+          this.fileTreeRefreshTick++;
         } else {
           state.running = false;
           state.status = 'idle';

@@ -18,6 +18,10 @@ import type {
   GitStatusSummary,
   GitDiffResult,
   GitDiffOptions,
+  TurnCheckpointSummary,
+  TurnUndoPreview,
+  TurnUndoResult,
+  WorkspaceFilePreview,
 } from '@easycode/engine';
 
 export type { AgentClient };
@@ -122,8 +126,21 @@ export class IpcAgentClient implements AgentClient {
   detectShells() {
     return this.invoke<ShellInfo[]>('detect-shells');
   }
-  listWorkspaceFiles(id: string, query?: string) {
-    return this.invoke<string[]>('list-workspace-files', { id, query });
+
+  listWorkspaceFiles(id: string, query?: string, limit?: number) {
+    return this.invoke<string[]>('list-workspace-files', { id, query, limit });
+  }
+  readWorkspaceFile(id: string, relPath: string) {
+    return this.invoke<WorkspaceFilePreview>('read-workspace-file', { id, relPath });
+  }
+  listTurnCheckpoints(id: string) {
+    return this.invoke<TurnCheckpointSummary[]>('list-turn-checkpoints', { id });
+  }
+  previewTurnUndo(id: string, turnId?: string) {
+    return this.invoke<TurnUndoPreview>('preview-turn-undo', { id, turnId });
+  }
+  revertTurnCheckpoint(id: string, turnId?: string, paths?: string[]) {
+    return this.invoke<TurnUndoResult>('revert-turn-checkpoint', { id, turnId, paths });
   }
   getProjectRules(id: string) {
     return this.invoke<ProjectRuleInfo | null>('get-project-rules', { id });
@@ -272,7 +289,11 @@ export function createDemoClient(): AgentClient {
       }),
     testWebSearch: () =>
       wrap(() => ({ ok: false, latencyMs: 0, error: '演示模式无搜索后端' })),
-    listWorkspaceFiles: (id, query) => wrap(() => server.listWorkspaceFiles(id, query)),
+    listWorkspaceFiles: (id, query, limit) => wrap(() => server.listWorkspaceFiles(id, query, limit)),
+    readWorkspaceFile: (id, relPath) => wrap(() => server.readWorkspaceFile(id, relPath)),
+    listTurnCheckpoints: (id) => wrap(() => server.listTurnCheckpoints(id)),
+    previewTurnUndo: (id, turnId) => wrap(() => server.previewTurnUndo(id, turnId)),
+    revertTurnCheckpoint: (id, turnId, paths) => wrap(() => server.revertTurnCheckpoint(id, turnId, paths)),
     getProjectRules: (id) => wrap(() => server.getSessionProjectRules(id)),
     initProjectRules: (id) => wrap(() => server.initSessionProjectRules(id)),
     listCustomPrompts: (id) => wrap(() => server.listSessionCustomPrompts(id)),

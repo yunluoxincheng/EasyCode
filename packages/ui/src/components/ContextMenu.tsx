@@ -18,6 +18,7 @@ interface ContextInfo {
   userMsgId?: string;
   turnId?: string;
   turnText?: string;
+  checkpointTurnId?: string;
 }
 
 export function ContextMenu() {
@@ -58,9 +59,12 @@ export function ContextMenu() {
       const turnEl = target.closest('.turn') as HTMLElement | null;
       const turnId = turnEl?.dataset?.anchor;
       let turnText: string | undefined;
+      let checkpointTurnId: string | undefined;
       if (turnId) {
         const item = store.items.find((i) => i.id === turnId);
         if (item && item.kind === 'turn') {
+          const chk = store.getTurnCheckpointForTurn(item);
+          if (chk) checkpointTurnId = chk.turnId;
           const textBlocks = item.items
             .filter((ti): ti is Extract<typeof ti, { kind: 'assistant' }> => ti.kind === 'assistant')
             .flatMap((ai) => ai.blocks)
@@ -72,7 +76,7 @@ export function ContextMenu() {
         }
       }
 
-      setCtxInfo({ selection, codeText, userMsgText, userMsgId, turnId, turnText });
+      setCtxInfo({ selection, codeText, userMsgText, userMsgId, turnId, turnText, checkpointTurnId });
       setPos({ x: e.clientX, y: e.clientY });
     };
 
@@ -143,7 +147,11 @@ export function ContextMenu() {
   };
 
   const hasContextActions =
-    !!ctxInfo.selection || !!ctxInfo.codeText || !!ctxInfo.userMsgText || !!ctxInfo.turnText;
+    !!ctxInfo.selection ||
+    !!ctxInfo.codeText ||
+    !!ctxInfo.userMsgText ||
+    !!ctxInfo.turnText ||
+    !!ctxInfo.checkpointTurnId;
 
   return (
     <div
@@ -199,14 +207,27 @@ export function ContextMenu() {
       )}
 
       {/* 助手回合动作 */}
-      {ctxInfo.turnText && (
+      {(ctxInfo.turnText || ctxInfo.checkpointTurnId) && (
         <>
-          <button
-            className="context-menu-item"
-            onClick={() => handleCopy(ctxInfo.turnText!, '回答 Markdown')}
-          >
-            <span className="ctx-icon">⧉</span> 复制回答 Markdown
-          </button>
+          {ctxInfo.turnText && (
+            <button
+              className="context-menu-item"
+              onClick={() => handleCopy(ctxInfo.turnText!, '回答 Markdown')}
+            >
+              <span className="ctx-icon">⧉</span> 复制回答 Markdown
+            </button>
+          )}
+          {ctxInfo.checkpointTurnId && !store.running && (
+            <button
+              className="context-menu-item"
+              onClick={() => {
+                setPos(null);
+                store.openTurnUndoModal(ctxInfo.checkpointTurnId!);
+              }}
+            >
+              <span className="ctx-icon">↶</span> 撤销此回合改动
+            </button>
+          )}
           {ctxInfo.turnId && !store.running && (
             <button
               className="context-menu-item"

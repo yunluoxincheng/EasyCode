@@ -40,7 +40,9 @@ EasyCode 作为开放、可扩展的桌面 Coding Agent，目前仅提供内置�
 
 ### 36. 回合级代码改动快照与一键回退（Turn Checkpoint & Safe Undo）
 
-**状态**：⏳ 待办（规划中）
+**状态**：✅ 已完成（2026-10-12）——`write_file`/`edit_file` 执行成功后经 `onFileChange` 钩子向会话级 `CheckpointManager` 上报写前原始内容与写后新内容（同一回合内多次修改同一文件严格保留首次触碰前的原始版本，回合内改回原样自动剔除净零变更，校验失败或审批拒绝零脏快照）+ 快照持久化于用户数据目录 `${dataDir}/checkpoints/${sessionId}.json`（零工作区污染、会话删除同步清理）+ 冲突检测（识别后续回合再次修改或外部编辑器修改导致的磁盘偏离）+ 回合头部 `TurnView`「`↶ 撤销此回合改动`」按钮与右键菜单入口 + `<TurnUndoModal>` 极客确认弹窗（支持按文件勾选回退、新建文件自动删除、红绿双行号 Diff 预览与冲突告警）+ Composer `/undo` 快捷指令闭环
+
+
 
 **背景**：
 在多轮复杂编码任务中，Agent 经常跨多个文件进行大规模修改（`edit_file` / `write_file`）或执行命令。然而，当大模型的实现方向偏离预期、误删逻辑或引入回归缺陷时，用户面临极大的挽救成本：
@@ -104,7 +106,9 @@ EasyCode 作为开放、可扩展的桌面 Coding Agent，目前仅提供内置�
 
 ### 38. 工作区轻量文件树与代码行范围引用（Workspace Tree & Range Mention）
 
-**状态**：⏳ 待办（规划中）
+**状态**：✅ 已完成（2026-10-12）——Core/Engine 新增 `parseCodeRangeMentions` 与 `resolveCodeRangeMentions`（支持 `@path/to/file.ts:50-100` 区间与 `@path/to/file.ts:35` 单行引用、带引号空格路径、逆序行号自动归一化、防邮箱与 URL 端口误判；仅在请求 wire 消息中注入带行号标尺的代码切片与说明文案，保持持久化会话与气泡原文干净）+ Composer `@` 补全与 `:` 行范围语法实时提示（Tab 补全后按 `:` 自动收紧空格并保留区间后缀）+ 侧栏底部可折叠 `<WorkspaceFileTree>` 工作区目录树（纯终端标识 `[DIR]`/`[EXT]`、关键词过滤、右键菜单与行内快捷操作）+ `<FilePreviewModal>` 轻量代码预览弹窗（支持单击/Shift+单击或鼠标拖拽行号与代码框选行范围，一键生成 `@path:start-end` 插入 Composer）
+
+
 
 **背景**：
 1. **工作区结构黑盒**：用户打开一个复杂项目后，除非去系统文件管理器或 VS Code 查看，在 EasyCode 界面内无法一览当前工程的目录结构与文件组织；
