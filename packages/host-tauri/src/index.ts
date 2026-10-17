@@ -92,6 +92,13 @@ export async function createTauriHost(): Promise<Host> {
       unlink: (p) => invoke<void>('fs_unlink', { path: p }),
       rename: (from, to) => invoke<void>('fs_rename', { from, to }),
       realpath: (p) => invoke<string | null>('fs_realpath', { path: p }),
+      lstat: (p) =>
+        invoke<null | {
+          isDirectory: boolean;
+          isSymbolicLink: boolean;
+          size: number;
+          mtimeMs: number;
+        }>('fs_lstat', { path: p }),
     },
     process: {
       run: async (command, opts) => {

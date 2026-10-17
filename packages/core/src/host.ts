@@ -71,6 +71,22 @@ export interface Host {
      * 无法解析（权限不足、循环链接等）请抛出异常，由调用方保守拒绝。
      */
     realpath?(path: string): Promise<string | null>;
+    /**
+     * 不跟随符号链接的 stat（等价 `lstat`）。
+     *
+     * 必要性：`realpath()` 对「路径本身不存在」与「路径是符号链接但目标不存在（悬空链接）」
+     * 都返回 ENOENT。若把两者混为一类，守卫会把悬空链接当成「待新建的普通文件」放行，
+     * 随后 `writeFile` 跟随该链接在工作区外部创建文件（PR #9 第四轮复审 P1）。
+     * 因此必须用 lstat 识别「本身是链接」，对悬空链接保守拒绝。
+     *
+     * 返回 `null` 表示路径本身不存在；宿主不支持时为 `undefined`。
+     */
+    lstat?(path: string): Promise<null | {
+      isDirectory: boolean;
+      isSymbolicLink: boolean;
+      size: number;
+      mtimeMs: number;
+    }>;
   };
   process: {
     run(
@@ -203,6 +219,11 @@ export class MemoryHost implements Host {
       if (this.files.has(key)) return key;
       const hasChild = [...this.files.keys()].some((k) => k.startsWith(`${key}/`));
       return hasChild || key === '/' ? key : null;
+    },
+    /** 内存文件系统无符号链接：lstat 等价于 stat */
+    lstat: async (p: string) => {
+      const st = await this.fs.stat(p);
+      return st ? { ...st, isSymbolicLink: false } : null;
     },
   };
 

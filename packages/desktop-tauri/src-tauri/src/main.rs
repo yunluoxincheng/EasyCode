@@ -378,6 +378,40 @@ fn fs_readdir(path: String) -> Result<Vec<Dirent>, String> {
     Ok(out)
 }
 
+/// 不跟随符号链接的 stat：用于区分「目标不存在」与「悬空符号链接」。
+/// 二者在 realpath 下都表现为 NotFound，但后者绝不能被当作可新建的普通路径，
+/// 否则 write_file 会跟随该链接在工作区外创建文件。
+#[tauri::command]
+fn fs_lstat(path: String) -> Result<Option<LstatOut>, String> {
+    match std::fs::symlink_metadata(&path) {
+        Ok(m) => {
+            let mtime = m
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            Ok(Some(LstatOut {
+                is_directory: m.is_dir(),
+                is_symbolic_link: m.file_type().is_symlink(),
+                size: m.len(),
+                mtime_ms: mtime,
+            }))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+struct LstatOut {
+    is_directory: bool,
+    is_symbolic_link: bool,
+    size: u64,
+    mtime_ms: u64,
+}
+
 #[tauri::command]
 fn fs_stat(path: String) -> Result<Option<StatOut>, String> {
     match std::fs::metadata(&path) {
@@ -1340,6 +1374,7 @@ fn main() {
             fs_unlink,
             fs_rename,
             fs_realpath,
+            fs_lstat,
             proc_run,
             proc_kill,
             proc_spawn,

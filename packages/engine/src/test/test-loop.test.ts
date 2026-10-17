@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { MemoryHost } from '@easycode/core';
 import type { AgentEvent, PermissionRule, ProcessRunOptions, ProcessResult } from '@easycode/core';
 import { ApprovalManager, ToolRegistry, createBuiltinTools, executeTool, type Tool } from '@easycode/core';
+import { WorkspaceLockManager } from '../workspace-lock.js';
 import {
   AgentServer,
   buildTestFixPrompt,
@@ -807,6 +808,117 @@ test('【P1 复审】工作区切换与测试循环启动不得交错（TOCTOU�
     // 循环成功 → 工作区必须仍是原值（不允许中途被改）
     assert.equal(data.meta.workspaceRoot, '/ws', '循环进行中工作区不得被切走');
   }
+});
+
+test('【P2 四轮】测试命令必须与普通敏感工具共享工作区互斥', async () => {
+  const host = new ScriptedTestHost(
+    {
+      '/ws/package.json': JSON.stringify({ scripts: { test: 'vitest run' } }),
+      '/ws/pnpm-lock.yaml': '',
+    },
+    [{ code: 0, stdout: 'Tests  1 passed (1)' }],
+  );
+  const server = new AgentServer(host);
+  await server.updateSettings({
+    providers: {
+      mock: { kind: 'mock', baseURL: '', name: 'Mock', enabled: true, models: [{ name: 'mock-1', enabled: true }] },
+    },
+    defaultProvider: 'mock',
+    defaultApprovalMode: 'yolo',
+  });
+  const session = await server.createSession({
+    workspaceRoot: '/ws',
+    providerId: 'mock',
+    title: '工作区互斥',
+  });
+
+  // 先占住工作区锁（模拟另一个会话正在执行敏感写操作），
+  // 然后启动测试循环：runTests 必须排在锁后面，不能与写操作交错。
+  const locks = (server as unknown as { workspaceLocks: WorkspaceLockManager }).workspaceLocks;
+  let releaseHolder: (() => void) | undefined;
+  const holderGate = new Promise<void>((resolve) => {
+    releaseHolder = resolve;
+  });
+  let testRan = false;
+  const holding = locks.withLock('/ws', async () => {
+    await holderGate;
+  });
+
+  const originalRun = host.process.run as unknown as (
+    command: string,
+    options?: ProcessRunOptions,
+  ) => Promise<ProcessResult>;
+  host.process = {
+    ...host.process,
+    run: async (command: string, options?: ProcessRunOptions) => {
+      if (!/^\s*git\b/.test(command)) testRan = true;
+      return originalRun(command, options);
+    },
+  } as unknown as typeof host.process;
+
+  const loop = server.runTestLoop(session.id, { maxRounds: 1 });
+  await new Promise((r) => setTimeout(r, 30));
+  assert.equal(testRan, false, '工作区锁被占用时测试命令不得执行');
+
+  releaseHolder?.();
+  await holding;
+  const result = await loop;
+  assert.equal(testRan, true, '释放锁后测试命令必须执行');
+  assert.equal(result.ok, true);
+});
+
+test('【P2 四轮】跨会话：一个会话持锁时另一会话的测试循环被挡住', async () => {
+  const host = new ScriptedTestHost(
+    {
+      '/ws/package.json': JSON.stringify({ scripts: { test: 'vitest run' } }),
+      '/ws/pnpm-lock.yaml': '',
+    },
+    [{ code: 0, stdout: 'Tests  1 passed (1)' }],
+  );
+  const server = new AgentServer(host);
+  await server.updateSettings({
+    providers: {
+      mock: { kind: 'mock', baseURL: '', name: 'Mock', enabled: true, models: [{ name: 'mock-1', enabled: true }] },
+    },
+    defaultProvider: 'mock',
+    defaultApprovalMode: 'yolo',
+  });
+  const a = await server.createSession({ workspaceRoot: '/ws', providerId: 'mock', title: 'A' });
+  const b = await server.createSession({ workspaceRoot: '/ws', providerId: 'mock', title: 'B' });
+
+  const locks = (server as unknown as { workspaceLocks: WorkspaceLockManager }).workspaceLocks;
+  let releaseA: (() => void) | undefined;
+  const gateA = new Promise<void>((resolve) => {
+    releaseA = resolve;
+  });
+  const holdingA = locks.withLock('/ws', async () => {
+    await gateA;
+  });
+
+  let ranDuringHold = false;
+  const originalRun = host.process.run as unknown as (
+    command: string,
+    options?: ProcessRunOptions,
+  ) => Promise<ProcessResult>;
+  host.process = {
+    ...host.process,
+    run: async (command: string, options?: ProcessRunOptions) => {
+      if (!/^\s*git\b/.test(command)) ranDuringHold = true;
+      return originalRun(command, options);
+    },
+  } as unknown as typeof host.process;
+
+  // 会话 B 的测试循环必须等工作区锁释放（会话级锁保护不了这一点）
+  const loopB = server.runTestLoop(b.id, { maxRounds: 1 });
+  await new Promise((r) => setTimeout(r, 30));
+  assert.equal(ranDuringHold, false, '跨会话同样必须遵守工作区互斥');
+
+  releaseA?.();
+  await holdingA;
+  const result = await loopB;
+  assert.equal(ranDuringHold, true);
+  assert.equal(result.ok, true);
+  assert.equal(server.isSessionBusy(a.id), false);
 });
 
 test('【P2 统一裁决】测试命令命中 allow 时 ask 模式下免审批直接执行', async () => {

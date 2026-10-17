@@ -79,6 +79,25 @@ export class NodeHost implements Host {
         throw err;
       }
     },
+    /**
+     * 不跟随链接的 stat：用于区分「目标不存在」与「悬空符号链接」。
+     * 二者在 realpath 下都表现为 ENOENT，但后者绝不能被当作可新建的普通路径。
+     */
+    lstat: async (p: string) => {
+      try {
+        const s = await fsp.lstat(p);
+        return {
+          isDirectory: s.isDirectory(),
+          isSymbolicLink: s.isSymbolicLink(),
+          size: s.size,
+          mtimeMs: s.mtimeMs,
+        };
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException)?.code;
+        if (code === 'ENOENT' || code === 'ENOTDIR') return null;
+        throw err;
+      }
+    },
   };
   readonly process = {
     run: (command: string, opts: ProcessRunOptions) =>

@@ -1,6 +1,7 @@
 import type { Tool } from './index.js';
 import { resolveWorkspacePath } from './index.js';
 import type { Host } from '../host.js';
+import { resolveRealPathInWorkspace } from '../path-guard.js';
 
 const SKIP_DIRS = new Set([
   '.git',
@@ -115,6 +116,8 @@ export const searchFilesTool: Tool = {
     const base = resolveWorkspacePath(workspace, rel, host);
     const results: string[] = [];
     let truncated = false;
+    /** 因真实目标越出工作区（或无法确认）而跳过的文件数 */
+    let skipped = 0;
 
     const matchGlob = (name: string): boolean => {
       if (!glob) return true;
@@ -125,6 +128,17 @@ export const searchFilesTool: Tool = {
     await walk(host, base, async (filePath) => {
       if (signal.aborted) return false;
       if (!matchGlob(host.paths.basename(filePath))) return true;
+      // 逐文件校验真实目标（PR #9 第四轮复审 P1）：遍历阶段每读一个文件之前都必须
+      // 重新确认它的真实落点在工作区内。起始目录合法并不代表递归发现的每个条目合法——
+      // 工作区内一个 `leak.txt -> /outside/secret.txt` 会让 stat/readFile 跟随链接
+      // 读到工作区外内容。越界或无法确认的文件直接跳过并计数，绝不读取。
+      if (host.fs.realpath) {
+        const verdict = await resolveRealPathInWorkspace(host, workspace, filePath, host.paths);
+        if (!verdict.ok) {
+          skipped += 1;
+          return true;
+        }
+      }
       let content: string;
       try {
         content = await host.fs.readFile(filePath);
@@ -149,8 +163,13 @@ export const searchFilesTool: Tool = {
       return true;
     });
 
-    if (results.length === 0) return '无匹配结果';
+    // 越界跳过必须向用户报告：静默跳过会让人误以为「工作区里确实没有」
+    const skipNote =
+      skipped > 0
+        ? `\n（已跳过 ${skipped} 个真实目标在工作区外的符号链接文件）`
+        : '';
+    if (results.length === 0) return `无匹配结果${skipNote}`;
     const header = `共 ${results.length}${truncated ? '+（已截断）' : ''} 条匹配：`;
-    return `${header}\n${results.join('\n')}`;
+    return `${header}\n${results.join('\n')}${skipNote}`;
   },
 };

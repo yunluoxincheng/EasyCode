@@ -34,8 +34,18 @@ export interface RealPathResolution {
 
 export type RealPathOutcome =
   | { ok: true; value: RealPathResolution }
-  /** 拒绝原因：越界 escape / 无法解析 unsupported / 解析失败 failed */
-  | { ok: false; reason: 'escape' | 'unsupported' | 'failed'; message: string };
+  /**
+   * 拒绝原因：
+   * - `escape` 真实目标越出工作区
+   * - `dangling-symlink` 路径是悬空符号链接（无法确认最终落点）
+   * - `unsupported` 宿主缺少必要能力
+   * - `failed` 解析失败（权限不足、循环链接等）
+   */
+  | {
+      ok: false;
+      reason: 'escape' | 'dangling-symlink' | 'unsupported' | 'failed';
+      message: string;
+    };
 
 /** 判断两个绝对路径的包含关系（Windows 大小写不敏感） */
 function isInside(child: string, parent: string, paths: PathApi): boolean {
@@ -112,6 +122,7 @@ export async function resolveRealPathInWorkspace(
   // 已存在 → 直接消解；不存在（新建/待写）→ 回溯最近存在祖先再拼回剩余片段。
   // 后者的必要性：Agent 常写新文件，而新文件没有 realpath 可查，
   // 但它的父目录可能是指向工作区外的 symlink。
+  const lstat = host.fs.lstat;
   const pending: string[] = [];
   let cursor = lexicalTarget;
   let existed = true;
@@ -130,6 +141,37 @@ export async function resolveRealPathInWorkspace(
     if (resolved) {
       realTarget = pending.length > 0 ? joinLexical(paths, resolved, pending) : resolved;
       break;
+    }
+    // realpath 返回 null 有两种含义：路径真的不存在，或它是**悬空符号链接**。
+    // 后者绝不能被当作「待新建的普通文件」——否则 writeFile 会跟随该链接在
+    // 工作区外创建文件（PR #9 第四轮复审 P1）。用 lstat 区分并保守拒绝。
+    if (typeof lstat === 'function') {
+      let linkInfo: Awaited<ReturnType<NonNullable<typeof lstat>>>;
+      try {
+        linkInfo = await lstat(cursor);
+      } catch (err) {
+        return {
+          ok: false,
+          reason: 'failed',
+          message: `无法确认路径类型（${raw}）: ${err instanceof Error ? err.message : String(err)}`,
+        };
+      }
+      if (linkInfo?.isSymbolicLink) {
+        return {
+          ok: false,
+          reason: 'dangling-symlink',
+          message:
+            `路径是悬空符号链接（${raw} → 目标不存在），已拒绝：无法确认其最终落点是否在工作区内。` +
+            '请改用普通路径，或先修复该链接。',
+        };
+      }
+    } else if (pending.length === 0) {
+      // 宿主既无 realpath 又无 lstat 时无法区分这两种情况，保守拒绝
+      return {
+        ok: false,
+        reason: 'unsupported',
+        message: '当前宿主无法区分「不存在」与「悬空符号链接」，已保守拒绝',
+      };
     }
     existed = false;
     const parent = paths.dirname(cursor);

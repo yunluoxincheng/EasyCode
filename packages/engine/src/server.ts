@@ -1711,12 +1711,18 @@ export class AgentServer {
         emit,
         runTests: async () => {
           const started = Date.now();
-          const res = await this.host.process.run(detection.command, {
-            cwd: root,
-            timeoutMs,
-            shell: this.settings.shell ?? 'auto',
-            signal: controller.signal,
-          });
+          // 与普通敏感工具共享工作区互斥（PR #9 第四轮复审 P2）：
+          // 会话级 sessionOpLock 只能保护同一会话，无法阻止两个会话同时操作同一工作区。
+          // 锁粒度限定为「执行一次测试命令」，绝不能包住整个自愈循环——
+          // 中间的修复回合还要获取同一把锁执行 edit_file 等敏感工具，会死锁。
+          const run = () =>
+            this.host.process.run(detection.command, {
+              cwd: root,
+              timeoutMs,
+              shell: this.settings.shell ?? 'auto',
+              signal: controller.signal,
+            });
+          const res = await this.workspaceLocks.withLock(root, run, controller.signal);
           const output = [res.stdout, res.stderr]
             .filter((part) => typeof part === 'string' && part.trim().length > 0)
             .join('\n');
