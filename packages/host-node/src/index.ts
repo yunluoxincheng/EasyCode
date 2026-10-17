@@ -55,8 +55,12 @@ export class NodeHost implements Host {
       try {
         const s = await fsp.stat(p);
         return { isDirectory: s.isDirectory(), size: s.size, mtimeMs: s.mtimeMs };
-      } catch {
-        return null;
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException)?.code;
+        if (code === 'ENOENT' || code === 'ENOTDIR') {
+          return null;
+        }
+        throw err;
       }
     },
     unlink: (p: string) => fsp.unlink(p),

@@ -1242,3 +1242,154 @@ test('二轮复审回归: 多文件回退中途失败自动回滚与状态落盘
   assert.equal(previewWsA3.hasConflicts, false, '不同工作区的同名文件修改绝不能触发冲突误报');
   assert.equal(previewWsA3.files[0].modifiedInLaterTurns, false);
 });
+
+test('三轮复审回归: stat 权限异常保守拒绝、不可读文件在 force=true 下防清空、inFlight 写入失败文件的恢复与受损告警', async () => {
+  // 1. P1: stat 抛出权限异常（EACCES/EPERM）时，绝不能当成文件不存在并谎报删除成功
+  const hostStatErr = new MemoryHost({ '/ws/new.ts': 'secret_new_file' });
+  const mgrStatErr = new CheckpointManager(hostStatErr);
+  const tStatErr = mgrStatErr.beginTurn({
+    sessionId: 's_stat_err',
+    workspaceRoot: '/ws',
+    turnNumber: 1,
+    userMessageId: 'u_stat',
+  });
+  await tStatErr.recordFileChange({
+    callId: 'c_stat',
+    relPath: 'new.ts',
+    absPath: '/ws/new.ts',
+    existedBefore: false,
+    beforeContent: null,
+    afterContent: 'secret_new_file',
+  });
+  const origStat = hostStatErr.fs.stat.bind(hostStatErr.fs);
+  hostStatErr.fs.stat = async (p: string) => {
+    if (p.endsWith('/ws/new.ts')) {
+      const err = new Error('EACCES: permission denied') as NodeJS.ErrnoException;
+      err.code = 'EACCES';
+      throw err;
+    }
+    return origStat(p);
+  };
+  await assert.rejects(
+    () => mgrStatErr.revertTurn('s_stat_err', tStatErr.turnId, { force: true }),
+    /无法安全访问或读取以下文件的当前状态.*无法访问文件状态 \(stat\): EACCES/,
+  );
+  // 恢复正常 stat 后核实快照绝未被错误标记为 revertedAt
+  hostStatErr.fs.stat = origStat;
+  const statErrSummary = (await mgrStatErr.listCheckpoints('s_stat_err'))[0];
+  assert.equal(statErrSummary.revertedAt, undefined, 'stat 权限异常时绝不能将快照标记为已恢复');
+
+  // 2. P1: 文件存在但不可读（currentExists=true, currentContent=null）时，即使传 force=true 也必须在预检阶段拒绝，
+  // 杜绝后续回滚使用 ?? '' 将用户原文件清空
+  const hostUnreadable = new MemoryHost({
+    '/ws/unreadable.ts': 'CRITICAL_USER_DATA',
+    '/ws/second.ts': 'second_after',
+  });
+  const mgrUnreadable = new CheckpointManager(hostUnreadable);
+  const tUnreadable = mgrUnreadable.beginTurn({
+    sessionId: 's_unreadable',
+    workspaceRoot: '/ws',
+    turnNumber: 1,
+    userMessageId: 'u_unreadable',
+  });
+  await tUnreadable.recordFileChange({
+    callId: 'c_u1',
+    relPath: 'unreadable.ts',
+    absPath: '/ws/unreadable.ts',
+    existedBefore: true,
+    beforeContent: 'old_data',
+    afterContent: 'after_data',
+  });
+  await tUnreadable.recordFileChange({
+    callId: 'c_u2',
+    relPath: 'second.ts',
+    absPath: '/ws/second.ts',
+    existedBefore: true,
+    beforeContent: 'second_before',
+    afterContent: 'second_after',
+  });
+  const origRead = hostUnreadable.fs.readFile.bind(hostUnreadable.fs);
+  hostUnreadable.fs.readFile = async (p: string) => {
+    if (p.endsWith('/ws/unreadable.ts')) {
+      throw new Error('EACCES: read permission denied');
+    }
+    return origRead(p);
+  };
+  await assert.rejects(
+    () => mgrUnreadable.revertTurn('s_unreadable', tUnreadable.turnId, { force: true }),
+    /无法安全访问或读取以下文件的当前状态.*文件内容不可读 \(readFile\): EACCES/,
+  );
+  hostUnreadable.fs.readFile = origRead;
+  assert.equal(
+    await hostUnreadable.fs.readFile('/ws/unreadable.ts'),
+    'CRITICAL_USER_DATA',
+    '不可读文件在 force=true 下也必须被保守拒绝，原文件内容完好无损',
+  );
+
+  // 3. P2: 当前正在写入的 inFlight 文件若在部分修改磁盘后抛出 EIO，必须纳入恢复流程还原或报告受损状态
+  const hostInFlight = new MemoryHost({
+    '/ws/first.ts': 'first_after',
+    '/ws/second.ts': 'second_after',
+  });
+  const mgrInFlight = new CheckpointManager(hostInFlight);
+  const tInFlight = mgrInFlight.beginTurn({
+    sessionId: 's_inflight',
+    workspaceRoot: '/ws',
+    turnNumber: 1,
+    userMessageId: 'u_inflight',
+  });
+  await tInFlight.recordFileChange({
+    callId: 'c_f1',
+    relPath: 'first.ts',
+    absPath: '/ws/first.ts',
+    existedBefore: true,
+    beforeContent: 'first_before',
+    afterContent: 'first_after',
+  });
+  await tInFlight.recordFileChange({
+    callId: 'c_f2',
+    relPath: 'second.ts',
+    absPath: '/ws/second.ts',
+    existedBefore: true,
+    beforeContent: 'second_before',
+    afterContent: 'second_after',
+  });
+
+  // 场景 3A：writeFile 写 second.ts 时先将文件内容截断改写为 PARTIAL_TRUNCATED，然后抛出 ENOSPC；
+  // 随后逆序回滚能够成功将 second.ts 与 first.ts 均恢复为回退前内容
+  const origWriteInFlight = hostInFlight.fs.writeFile.bind(hostInFlight.fs);
+  let secondWriteAttempts = 0;
+  hostInFlight.fs.writeFile = async (p: string, data: string) => {
+    if (p.endsWith('/ws/second.ts')) {
+      secondWriteAttempts++;
+      if (secondWriteAttempts === 1) {
+        await origWriteInFlight(p, 'PARTIAL_TRUNCATED');
+        throw new Error('ENOSPC: no space left on device');
+      }
+    }
+    return origWriteInFlight(p, data);
+  };
+  await assert.rejects(
+    () => mgrInFlight.revertTurn('s_inflight', tInFlight.turnId),
+    /已自动回滚本批次前序修改的文件：second\.ts, first\.ts/,
+  );
+  assert.equal(await hostInFlight.fs.readFile('/ws/first.ts'), 'first_after');
+  assert.equal(
+    await hostInFlight.fs.readFile('/ws/second.ts'),
+    'second_after',
+    'inFlight 发生部分写入后抛错的文件也必须被纳入恢复队列还原至回退前内容',
+  );
+
+  // 场景 3B：若 inFlight 文件部分写入后抛错，且尝试恢复时继续抛错，必须明确向用户告警该文件处于受损状态
+  hostInFlight.fs.writeFile = async (p: string, data: string) => {
+    if (p.endsWith('/ws/second.ts')) {
+      await origWriteInFlight(p, 'CORRUPTED_PARTIAL_WRITE');
+      throw new Error('EIO: persistent disk write failure');
+    }
+    return origWriteInFlight(p, data);
+  };
+  await assert.rejects(
+    () => mgrInFlight.revertTurn('s_inflight', tInFlight.turnId),
+    /警告：文件写入异常后自动恢复失败，以下文件可能处于部分写入或受损状态：second\.ts/,
+  );
+});

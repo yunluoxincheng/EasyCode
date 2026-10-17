@@ -35,7 +35,7 @@ async function walk(
       if (SKIP_DIRS.has(entry.name)) continue;
       if (!(await walk(host, full, visit))) return false;
     } else {
-      const stat = await host.fs.stat(full);
+      const stat = await host.fs.stat(full).catch(() => null);
       if (!stat || stat.size > MAX_FILE_SIZE) continue;
       if (!(await visit(full))) return false;
     }

@@ -394,7 +394,8 @@ fn fs_stat(path: String) -> Result<Option<StatOut>, String> {
                 mtime_ms: mtime,
             }))
         }
-        Err(_) => Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.to_string()),
     }
 }
 

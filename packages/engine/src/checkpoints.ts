@@ -267,17 +267,22 @@ export class CheckpointManager {
     currentContent: string | null;
     alreadyReverted: boolean;
     diskDiverged: boolean;
+    inaccessible: boolean;
+    accessError?: string;
     diskFingerprint: string;
   }> {
     let abs: string;
     try {
       abs = resolveWorkspacePath(workspaceRoot, file.path, this.host);
-    } catch {
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
       return {
         currentExists: false,
         currentContent: null,
         alreadyReverted: false,
         diskDiverged: true,
+        inaccessible: true,
+        accessError: msg,
         diskFingerprint: computeContentFingerprint(false, null, 'invalid_path'),
       };
     }
@@ -285,8 +290,18 @@ export class CheckpointManager {
     let stat: { isDirectory: boolean; size: number; mtimeMs: number } | null = null;
     try {
       stat = await this.host.fs.stat(abs);
-    } catch {
-      stat = null;
+    } catch (err) {
+      // P1 修复：stat 权限异常（EACCES/EPERM 等）绝不能映射为 null 当作文件不存在处理
+      const msg = err instanceof Error ? err.message : String(err);
+      return {
+        currentExists: false,
+        currentContent: null,
+        alreadyReverted: false,
+        diskDiverged: true,
+        inaccessible: true,
+        accessError: `无法访问文件状态 (stat): ${msg}`,
+        diskFingerprint: computeContentFingerprint(false, null, `stat_error:${msg}`),
+      };
     }
 
     if (!stat) {
@@ -296,6 +311,7 @@ export class CheckpointManager {
         currentContent: null,
         alreadyReverted,
         diskDiverged: !alreadyReverted,
+        inaccessible: false,
         diskFingerprint: computeContentFingerprint(false, null),
       };
     }
@@ -306,20 +322,25 @@ export class CheckpointManager {
         currentContent: null,
         alreadyReverted: false,
         diskDiverged: true,
+        inaccessible: true,
+        accessError: '目标路径已变为目录',
         diskFingerprint: computeContentFingerprint(false, null, 'is_directory'),
       };
     }
 
-    // 文件存在：读取其当前内容；若读取抛错（如权限拒绝），绝不能误判为不存在或已回退
+    // 文件存在：读取其当前内容；若读取抛错（如权限拒绝），标记 inaccessible，严禁在回退或回滚中清空
     let currentContent: string;
     try {
       currentContent = await this.host.fs.readFile(abs);
-    } catch {
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
       return {
         currentExists: true,
         currentContent: null,
         alreadyReverted: false,
         diskDiverged: true,
+        inaccessible: true,
+        accessError: `文件内容不可读 (readFile): ${msg}`,
         diskFingerprint: computeContentFingerprint(true, null, `unreadable:${stat.size}:${stat.mtimeMs}`),
       };
     }
@@ -331,6 +352,7 @@ export class CheckpointManager {
       currentContent,
       alreadyReverted,
       diskDiverged,
+      inaccessible: false,
       diskFingerprint: computeContentFingerprint(true, currentContent),
     };
   }
@@ -668,7 +690,9 @@ export class CheckpointManager {
       throw new Error('未选择任何需要回退的文件');
     }
 
-    // P1 #3：执行前 CAS 乐观并发校验 + 预先捕获回退前状态供中途失败逆序回滚
+    // P1 修复：预检阶段无条件拦截不可访问（stat 权限错误）或不可读（currentExists && currentContent === null）的文件，
+    // 即使传入 force: true 也绝不允许执行，杜绝将 null 伪造成空字符串清空用户原文件
+    const inaccessibleDetails: string[] = [];
     const changedSincePreview: string[] = [];
     const divergedPaths: string[] = [];
     const preRevertStates = new Map<
@@ -677,7 +701,15 @@ export class CheckpointManager {
     >();
 
     for (const file of targetFiles) {
+      if (file.existedBefore && file.beforeContent === null) {
+        inaccessibleDetails.push(`${file.path}（快照缺失原始基准内容）`);
+        continue;
+      }
       const state = await this.inspectFileDiskState(record.workspaceRoot, file);
+      if (state.inaccessible || (state.currentExists && state.currentContent === null)) {
+        inaccessibleDetails.push(`${file.path}（${state.accessError ?? '当前文件内容不可读'}）`);
+        continue;
+      }
       preRevertStates.set(file, {
         currentExists: state.currentExists,
         currentContent: state.currentContent,
@@ -690,6 +722,11 @@ export class CheckpointManager {
       }
     }
 
+    if (inaccessibleDetails.length > 0) {
+      throw new Error(
+        `回退已中止：无法安全访问或读取以下文件的当前状态，拒绝执行可能破坏数据的回退操作：${inaccessibleDetails.join('；')}`,
+      );
+    }
     if (changedSincePreview.length > 0) {
       throw new Error(
         `[CONFLICT] 检测到文件在打开预览后又被修改（${changedSincePreview.join(', ')}），已中止回退以防覆盖最新改动。请重新核对刷新后的预览并再次确认。`,
@@ -703,17 +740,25 @@ export class CheckpointManager {
 
     const now = new Date().toISOString();
     const revertedPaths: string[] = [];
-    const appliedFiles: Array<{
+    type RevertBatchItem = {
       file: TurnFileSnapshot;
       abs: string;
       existedBeforeRevert: boolean;
       contentBeforeRevert: string | null;
-    }> = [];
+    };
+    const appliedFiles: RevertBatchItem[] = [];
+    let inFlight: RevertBatchItem | null = null;
 
     try {
       for (const file of targetFiles) {
         const abs = resolveWorkspacePath(record.workspaceRoot, file.path, this.host);
         const pre = preRevertStates.get(file)!;
+        inFlight = {
+          file,
+          abs,
+          existedBeforeRevert: pre.currentExists,
+          contentBeforeRevert: pre.currentContent,
+        };
         if (!file.existedBefore) {
           // P1 #2：仅当文件确实不存在时才幂等跳过；unlink 缺失或删除后文件仍存在必须抛错
           const statBefore = await this.host.fs.stat(abs);
@@ -738,18 +783,17 @@ export class CheckpointManager {
             }
           }
         } else {
+          if (file.beforeContent === null) {
+            throw new Error(`回退失败: 快照缺少原始文件内容 (${file.path})`);
+          }
           const dir = this.host.paths.dirname(abs);
           if (dir && dir !== abs) {
             await this.host.fs.mkdir(dir, { recursive: true });
           }
-          await this.host.fs.writeFile(abs, file.beforeContent ?? '');
+          await this.host.fs.writeFile(abs, file.beforeContent);
         }
-        appliedFiles.push({
-          file,
-          abs,
-          existedBeforeRevert: pre.currentExists,
-          contentBeforeRevert: pre.currentContent,
-        });
+        appliedFiles.push(inFlight);
+        inFlight = null;
         file.revertedAt = now;
         revertedPaths.push(file.path);
       }
@@ -757,29 +801,55 @@ export class CheckpointManager {
       const baseMsg = batchErr instanceof Error ? batchErr.message : String(batchErr);
       const rolledBackPaths: string[] = [];
       const stillRevertedPaths: string[] = [];
+      const damagedPaths: string[] = [];
       const rollbackErrors: string[] = [];
 
-      // 逆序回滚本批次已应用的前序文件修改
-      for (const item of [...appliedFiles].reverse()) {
+      // P2 修复：若当前正在操作的文件（inFlight）在写入/删除中途抛错且磁盘内容已发生部分变动，
+      // 必须一并纳入逆序恢复队列尝试还原回退前内容；若无法恢复则明确报告受损状态
+      const rollbackQueue: RevertBatchItem[] = [...appliedFiles].reverse();
+      if (inFlight) {
+        const postFail = await this.inspectFileDiskState(record.workspaceRoot, inFlight.file);
+        const unchanged =
+          !postFail.inaccessible &&
+          postFail.currentExists === inFlight.existedBeforeRevert &&
+          (!inFlight.existedBeforeRevert || postFail.currentContent === inFlight.contentBeforeRevert);
+        if (!unchanged) {
+          rollbackQueue.unshift(inFlight);
+        }
+      }
+
+      for (const item of rollbackQueue) {
         try {
           if (!item.existedBeforeRevert) {
             const st = await this.host.fs.stat(item.abs);
             if (st && !st.isDirectory) {
-              await this.host.fs.unlink?.(item.abs);
+              if (!this.host.fs.unlink) {
+                throw new Error('宿主不支持 unlink');
+              }
+              await this.host.fs.unlink(item.abs);
             }
           } else {
+            if (item.contentBeforeRevert === null) {
+              throw new Error(`缺少回退前原始内容 (${item.file.path})，拒绝写入空文件`);
+            }
             const dir = this.host.paths.dirname(item.abs);
             if (dir && dir !== item.abs) {
               await this.host.fs.mkdir(dir, { recursive: true });
             }
-            await this.host.fs.writeFile(item.abs, item.contentBeforeRevert ?? '');
+            await this.host.fs.writeFile(item.abs, item.contentBeforeRevert);
           }
           item.file.revertedAt = undefined;
           rolledBackPaths.push(item.file.path);
         } catch (rbErr) {
-          item.file.revertedAt = now;
-          stillRevertedPaths.push(item.file.path);
           rollbackErrors.push(rbErr instanceof Error ? rbErr.message : String(rbErr));
+          const checkAfterRb = await this.inspectFileDiskState(record.workspaceRoot, item.file);
+          if (checkAfterRb.alreadyReverted) {
+            item.file.revertedAt = now;
+            stillRevertedPaths.push(item.file.path);
+          } else {
+            item.file.revertedAt = undefined;
+            damagedPaths.push(item.file.path);
+          }
         }
       }
 
@@ -787,6 +857,11 @@ export class CheckpointManager {
       await this.syncAllFilesRevertedState(record, now);
       await this.persistSessionRecords(sessionId);
 
+      if (damagedPaths.length > 0) {
+        throw new Error(
+          `${baseMsg}（警告：文件写入异常后自动恢复失败，以下文件可能处于部分写入或受损状态：${damagedPaths.join(', ')}${stillRevertedPaths.length > 0 ? `；注意：同批次部分文件已恢复并落盘记录：${stillRevertedPaths.join(', ')}` : ''}；原因：${rollbackErrors.join('; ')}）`,
+        );
+      }
       if (stillRevertedPaths.length > 0) {
         throw new Error(
           `${baseMsg}（注意：同批次部分文件已恢复并落盘记录：${stillRevertedPaths.join(', ')}；回滚失败：${rollbackErrors.join('; ')}）`,

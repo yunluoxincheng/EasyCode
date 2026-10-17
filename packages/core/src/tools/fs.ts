@@ -343,7 +343,7 @@ export const listDirTool: Tool = {
       if (entry.isDirectory) {
         lines.push(`[目录] ${entry.name}/`);
       } else {
-        const childStat = await host.fs.stat(host.paths.join(abs, entry.name));
+        const childStat = await host.fs.stat(host.paths.join(abs, entry.name)).catch(() => null);
         lines.push(`[文件] ${entry.name}  ${childStat ? `${childStat.size}B` : ''}`);
       }
     }
