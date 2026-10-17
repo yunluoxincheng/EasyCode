@@ -6,6 +6,7 @@ import {
   describePermissionRule,
   evaluatePermission,
   normalizeShellCommand,
+  resolveApprovalRequirement,
   type PermissionRule,
 } from '../permissions.js';
 import type { BackgroundTaskManager } from '../tasks.js';
@@ -286,14 +287,16 @@ export async function executeTool(
       },
     }) : undefined;
   // 规则 allow 时免审批；规则 ask 时即使在 yolo 模式下也强制弹窗；
-  // 其余情况仅敏感工具（写文件/执行命令）在 ask 模式下需要审批，只读工具直接放行
-  const ruleAsk = permission?.decision === 'ask';
+  // 其余情况仅敏感工具（写文件/执行命令）在 ask 模式下需要审批，只读工具直接放行。
+  // 裁决语义统一收敛在 core 的 resolveApprovalRequirement，与引擎内置动作（test_loop）共用，
+  // 杜绝两条链路各写一份判断而漂移
+  const requirement = resolveApprovalRequirement(permission, registry.isSensitive(name));
+  const ruleAsk = requirement.force;
   const ruleAllow = permission?.decision === 'allow';
-  const needsApproval = ruleAsk || (!ruleAllow && registry.isSensitive(name));
-  const approved = needsApproval
+  const approved = requirement.needApproval
     ? await ctx.approval.request(name, validated.value, {
-        force: ruleAsk,
-        reason: ruleAsk ? describePermissionRule(permission.rule) : undefined,
+        force: requirement.force,
+        reason: requirement.reason,
       })
     : true;
   safetyObservation?.actual({

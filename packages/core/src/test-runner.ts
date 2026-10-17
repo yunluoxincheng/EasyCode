@@ -317,6 +317,14 @@ export function parseTestOutput(output: string): TestRunSummary {
 }
 
 /**
+ * 失败标记：`FAIL` / `FAILED` / `--- FAIL` 需要词边界（避免误命中 `FAILOVER`），
+ * 而 `✖` / `✕` / `×` / `●` 是符号类标记，**不能**加 `\b`——符号本身是非单词字符，
+ * `\b` 在「符号 + 空格」之间恒为假，会导致 `✖ broken test` 完全匹配不到
+ * （历史缺陷：长日志退回尾部 80 行，真正的失败位置被丢掉，直接拖累自愈质量）。
+ */
+const FAILURE_MARKER_RE = /(?:^|\s)(?:FAIL(?:ED)?\b|---\s+FAIL\b|[✖✕×●])/u;
+
+/**
  * 提取失败日志摘录：优先从首个失败标记处截取，否则取输出尾部；
  * 统一清理 ANSI 转义并限制长度，防止超长构建日志挤爆上下文与卡片。
  */
@@ -327,10 +335,9 @@ export function extractFailureExcerpt(
   const text = stripAnsi(output ?? '').trim();
   if (!text) return '';
   const lines = text.split(/\r?\n/);
-  const markerIdx = lines.findIndex((line) =>
-    /(?:^|\s)(?:FAIL|FAILED|✖|✕|×|---\s+FAIL|●)\b/.test(line.trim()),
-  );
-  const startLine = markerIdx > 0 ? markerIdx : Math.max(0, lines.length - 80);
+  const markerIdx = lines.findIndex((line) => FAILURE_MARKER_RE.test(line.trim()));
+  // `>= 0`：标记正好落在首行时同样从首行截取（早期写成 `> 0` 会整段丢弃开头）
+  const startLine = markerIdx >= 0 ? markerIdx : Math.max(0, lines.length - 80);
   let excerpt = lines.slice(startLine).join('\n').trim();
   if (excerpt.length > maxChars) excerpt = excerpt.slice(excerpt.length - maxChars);
   return excerpt;

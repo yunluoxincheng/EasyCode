@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { MemoryHost } from '@easycode/core';
 import type { AgentEvent, PermissionRule, ProcessRunOptions, ProcessResult } from '@easycode/core';
-import { ApprovalManager, ToolRegistry, executeTool, type Tool } from '@easycode/core';
+import { ApprovalManager, ToolRegistry, createBuiltinTools, executeTool, type Tool } from '@easycode/core';
 import {
   AgentServer,
   buildTestFixPrompt,
@@ -583,4 +583,197 @@ test('AgentServer.runTestLoop：修复回合中被用户停止时循环一并收
   assert.equal(aborted, true, '修复回合必须真正被驱动');
   assert.equal(result.reason, 'aborted');
   assert.equal(host.runs.length, 1, '中止后不得再跑下一轮测试');
+});
+
+/* ------------------------------------------------------------------ */
+/* PR #9 审查返工回归                                                  */
+/* ------------------------------------------------------------------ */
+
+test('【P1 信任边界】不可信项目自带 allow 规则不得取消用户的 ask 保护', async () => {
+  const host = new ScriptedTestHost(
+    {
+      '/ws/package.json': JSON.stringify({ scripts: { test: 'vitest run' } }),
+      '/ws/pnpm-lock.yaml': '',
+      // 克隆来的仓库试图自行放行所有命令
+      '/ws/.easycode/permissions.json': JSON.stringify({
+        rules: [
+          { tool: 'run_command', decision: 'allow' },
+          { tool: 'run_command', pattern: 'rm', decision: 'deny' },
+        ],
+      }),
+    },
+    [],
+  );
+  const server = new AgentServer(host);
+  await server.updateSettings({
+    providers: {
+      mock: { kind: 'mock', baseURL: '', name: 'Mock', enabled: true, models: [{ name: 'mock-1', enabled: true }] },
+    },
+    defaultProvider: 'mock',
+    defaultApprovalMode: 'ask',
+    permissions: { enabled: true, rules: [] },
+  });
+  const session = await server.createSession({
+    workspaceRoot: '/ws',
+    providerId: 'mock',
+    title: '信任边界',
+  });
+
+  // 默认未信任：项目级 allow 被丢弃，deny 保留
+  const rules = await server.resolvePermissionRules('/ws');
+  assert.ok(rules);
+  assert.equal(rules.some((r) => r.decision === 'allow'), false, '项目级 allow 必须被忽略');
+  assert.equal(rules.some((r) => r.decision === 'deny'), true, '项目级 deny 必须保留');
+  assert.equal(await server.countIgnoredProjectAllowRules('/ws'), 1);
+
+  // 由此在 ask 模式下调用 run_command 仍然需要审批
+  const events: AgentEvent[] = [];
+  const approval = new ApprovalManager((e) => events.push(e), 'ask');
+  const pending = executeTool(
+    createBuiltinTools(),
+    'run_command',
+    { command: 'ls' },
+    { host, workspace: '/ws', signal: new AbortController().signal, approval, permissionRules: rules },
+  );
+  const req = events.find((e) => e.type === 'approval_request');
+  assert.ok(req && req.type === 'approval_request', 'ask 模式下必须请求审批');
+  approval.resolve(req.requestId, true);
+  assert.equal((await pending).approved, true);
+
+  // 显式信任后，项目级 allow 才会参与裁决
+  await server.updateSettings({ permissions: { enabled: true, trustProjectAllow: true, rules: [] } });
+  const trusted = await server.resolvePermissionRules('/ws');
+  assert.equal(trusted?.some((r) => r.decision === 'allow'), true);
+  assert.equal(await server.countIgnoredProjectAllowRules('/ws'), 0);
+});
+
+test('【P2 统一裁决】测试命令命中 allow 时 ask 模式下免审批直接执行', async () => {
+  const host = new ScriptedTestHost(
+    {
+      '/ws/package.json': JSON.stringify({ scripts: { test: 'vitest run' } }),
+      '/ws/pnpm-lock.yaml': '',
+      '/ws/.easycode/permissions.json': JSON.stringify({
+        rules: [{ tool: 'run_command', pattern: 'pnpm test', decision: 'allow' }],
+      }),
+    },
+    [{ code: 0, stdout: 'Tests  2 passed (2)' }],
+  );
+  const server = new AgentServer(host);
+  await server.updateSettings({
+    providers: {
+      mock: { kind: 'mock', baseURL: '', name: 'Mock', enabled: true, models: [{ name: 'mock-1', enabled: true }] },
+    },
+    defaultProvider: 'mock',
+    // ask 模式：若 allow 未生效就会弹审批并卡住
+    defaultApprovalMode: 'ask',
+    // 项目级 allow 需显式信任（见上一条用例）
+    permissions: { enabled: true, trustProjectAllow: true, rules: [] },
+  });
+  const session = await server.createSession({
+    workspaceRoot: '/ws',
+    providerId: 'mock',
+    title: 'allow 免审批',
+  });
+  const approvals: AgentEvent[] = [];
+  server.onEvent((payload) => {
+    if (payload.sessionId === session.id && payload.event.type === 'approval_request') {
+      approvals.push(payload.event);
+      server.respondApproval(session.id, payload.event.requestId, true);
+    }
+  });
+  const result = await server.runTestLoop(session.id, { maxRounds: 1 });
+  assert.equal(approvals.length, 0, '命中 allow 时不得弹审批');
+  assert.equal(result.ok, true);
+  assert.equal(host.runs.length, 1);
+});
+
+test('【P1 并发】连续启动两次测试循环只有一次能进入运行态', async () => {
+  const host = new ScriptedTestHost(
+    {
+      '/ws/package.json': JSON.stringify({ scripts: { test: 'vitest run' } }),
+      '/ws/pnpm-lock.yaml': '',
+    },
+    [{ code: 0, stdout: 'Tests  1 passed (1)' }],
+  );
+  const server = new AgentServer(host);
+  await server.updateSettings({
+    providers: {
+      mock: { kind: 'mock', baseURL: '', name: 'Mock', enabled: true, models: [{ name: 'mock-1', enabled: true }] },
+    },
+    defaultProvider: 'mock',
+    defaultApprovalMode: 'yolo',
+  });
+  const session = await server.createSession({
+    workspaceRoot: '/ws',
+    providerId: 'mock',
+    title: '并发启动',
+  });
+
+  // 检查与占位之间若有 await，两次调用都会通过检查并各自启动一个循环
+  const first = server.runTestLoop(session.id, { maxRounds: 1 });
+  const second = server.runTestLoop(session.id, { maxRounds: 1 });
+  const outcomes = await Promise.allSettled([first, second]);
+  const rejected = outcomes.filter((o) => o.status === 'rejected');
+  assert.equal(rejected.length, 1, '第二次启动必须被拒绝');
+  assert.match(
+    String((rejected[0] as PromiseRejectedResult).reason?.message ?? rejected[0]),
+    /正在运行中/,
+  );
+  assert.equal(host.runs.length, 1, '测试命令只能被执行一次');
+});
+
+test('【P2 错误收敛】修复回合抛异常时循环发出唯一一次终止事件', async () => {
+  const { events, emit } = collectEvents();
+  const result = await runTestLoop({
+    command: 'pnpm test',
+    commandSource: 'pkg',
+    maxRounds: 3,
+    signal: new AbortController().signal,
+    emit,
+    runTests: async () => ({ exitCode: 1, output: 'Tests  1 failed (1)', durationMs: 5 }),
+    repair: async () => {
+      throw new Error('模型初始化失败');
+    },
+  });
+  assert.equal(result.reason, 'error');
+  assert.match(result.message ?? '', /模型初始化失败/);
+  const done = events.filter((e) => e.type === 'test_loop_done');
+  assert.equal(done.length, 1, '终止事件必须且只能发一次');
+  assert.ok(done[0].type === 'test_loop_done' && done[0].reason === 'error');
+});
+
+test('【P2 错误收敛】修复回合返回失败结果时终止循环，不再重跑测试', async () => {
+  const { events, emit } = collectEvents();
+  let runCount = 0;
+  const result = await runTestLoop({
+    command: 'pnpm test',
+    commandSource: 'pkg',
+    maxRounds: 3,
+    signal: new AbortController().signal,
+    emit,
+    runTests: async () => {
+      runCount += 1;
+      return { exitCode: 1, output: 'Tests  1 failed (1)', durationMs: 5 };
+    },
+    repair: async () => ({ ok: false, message: '回合以 error 结束' }),
+  });
+  assert.equal(result.reason, 'error');
+  assert.equal(result.rounds, 1);
+  assert.equal(runCount, 1, '修复失败后不得继续重跑测试');
+  assert.equal(events.filter((e) => e.type === 'test_loop_done').length, 1);
+});
+
+test('【P2 错误收敛】修复回合返回 aborted 时收敛为 aborted', async () => {
+  const { events, emit } = collectEvents();
+  const result = await runTestLoop({
+    command: 'pnpm test',
+    commandSource: 'pkg',
+    maxRounds: 3,
+    signal: new AbortController().signal,
+    emit,
+    runTests: async () => ({ exitCode: 1, output: 'Tests  1 failed (1)', durationMs: 5 }),
+    repair: async () => ({ ok: false, aborted: true }),
+  });
+  assert.equal(result.reason, 'aborted');
+  assert.equal(events.filter((e) => e.type === 'test_loop_done').length, 1);
 });

@@ -12,6 +12,7 @@ import {
   SessionData,
   SessionMeta,
   runAgentLoop,
+  type LoopResult,
   createBuiltinTools,
   runWebSearch,
   listFilesRecursively,
@@ -41,6 +42,7 @@ import {
   detectTestCommand,
   describePermissionRule,
   evaluatePermission,
+  resolveApprovalRequirement,
   type PermissionRule,
   type PermissionRuleSource,
   type TestCommandDetection,
@@ -223,7 +225,7 @@ export class AgentServer {
   ): Promise<SessionMeta> {
     await this.ensureSettings();
     const rt = this.requireSession(sessionId);
-    if (rt.running) {
+    if (rt.running || rt.busy) {
       throw new Error('原会话正在运行中，请等待完成或停止后再分叉');
     }
 
@@ -299,7 +301,7 @@ export class AgentServer {
   async trimSessionHistory(id: string, keepRecentTurns = 2): Promise<SessionData> {
     await this.ensureSettings();
     const rt = this.requireSession(id);
-    if (rt.running) {
+    if (rt.running || rt.busy) {
       throw new Error('会话正在运行中，请先等待完成或点击停止');
     }
 
@@ -466,8 +468,12 @@ export class AgentServer {
     await this.runTurn(rt);
   }
 
-  /** 执行一轮 Agent（消息由调用方先行构造；负责运行态与持久化） */
-  private async runTurn(rt: SessionRuntime): Promise<void> {
+  /**
+   * 执行一轮 Agent（消息由调用方先行构造；负责运行态与持久化）。
+   * 返回循环的终止原因：调用方（如测试自愈循环）需要据此区分成功、失败与中止，
+   * 不能只看事件流——事件只表达过程，不表达「这一回合是否真的完成任务」。
+   */
+  private async runTurn(rt: SessionRuntime): Promise<LoopResult> {
     const id = rt.data.meta.id;
     const lastUserMessage = [...rt.data.messages].reverse().find((m) => m.role === 'user');
     const turnId = `${id}_${lastUserMessage?.id ?? Date.now().toString(36)}`;
@@ -475,6 +481,7 @@ export class AgentServer {
     // 测试自愈循环（TODOS #39）在修复回合中复用循环持有的 controller：
     // 否则用户点停止只会打断修复回合，循环的 signal 依然存活，下一轮测试会继续跑起来。
     rt.controller = (rt.busy && rt.controller) || new AbortController();
+    let loopResult: LoopResult | undefined;
     let shadowPolicy: ShadowDecisionPolicy | undefined;
     const cleanUserMap = new Map<
       string,
@@ -596,7 +603,7 @@ export class AgentServer {
           ))
         : undefined;
 
-      const result = await runAgentLoop({
+      loopResult = await runAgentLoop({
         provider,
         tools: builtinTools,
         host: this.host,
@@ -645,8 +652,8 @@ export class AgentServer {
           ? this.workspaceLocks.getLock(rt.data.meta.workspaceRoot)
           : undefined,
       });
-      if (result.reason === 'error' && result.errorMessage) {
-        this.events.emit({ sessionId: id, event: { type: 'error', message: result.errorMessage } });
+      if (loopResult.reason === 'error' && loopResult.errorMessage) {
+        this.events.emit({ sessionId: id, event: { type: 'error', message: loopResult.errorMessage } });
       }
     } finally {
       await shadowPolicy?.drain();
@@ -672,6 +679,8 @@ export class AgentServer {
       }
       await this.persistSession(rt);
     }
+    // 理论上 finally 前一定已赋值；兜底按失败返回，避免调用方误判成功
+    return loopResult ?? { reason: 'error', errorMessage: '回合未产生结果' };
   }
 
   respondApproval(id: string, requestId: string, approved: boolean): void {
@@ -700,7 +709,9 @@ export class AgentServer {
   /** 会话级模型覆盖（'' = 跟随供应商默认，即第一个启用模型） */
   async setSessionModel(id: string, model: string): Promise<SessionMeta> {
     const rt = this.requireSession(id);
-    if (rt.running) throw new Error('会话运行中，暂不能切换模型');
+    if (rt.running || rt.busy) {
+      throw new Error('会话运行中，暂不能切换模型');
+    }
     rt.data.meta.model = model.trim();
     rt.data.meta.updatedAt = new Date().toISOString();
     await this.persistSession(rt);
@@ -1418,15 +1429,30 @@ export class AgentServer {
   /**
    * 合成参与裁决的权限规则：总开关关闭时返回 undefined（彻底回到 ask / yolo 语义）；
    * 全局规则标注 `source: 'global'`，项目规则由 loadProjectPermissions 标注。
+   *
+   * **信任边界**：项目级 `deny` / `ask` 默认生效（只会收紧权限），但项目级 `allow`
+   * 默认被丢弃——工作区代码属低信任输入，不能通过仓库内配置自行取消用户的审批保护。
+   * 只有用户显式开启 `permissions.trustProjectAllow` 后才参与裁决。
    */
   async resolvePermissionRules(workspaceRoot: string): Promise<PermissionRule[] | undefined> {
     if (this.settings.permissions?.enabled === false) return undefined;
     const globalRules = (this.settings.permissions?.rules ?? [])
       .map((rule) => normalizePermissionRule(rule, 'global'))
       .filter((rule): rule is PermissionRule => rule !== null);
-    const projectRules = await this.loadProjectPermissions(workspaceRoot);
+    const trustProjectAllow = this.settings.permissions?.trustProjectAllow === true;
+    const projectRules = (await this.loadProjectPermissions(workspaceRoot)).filter(
+      (rule) => trustProjectAllow || rule.decision !== 'allow',
+    );
     const rules = [...globalRules, ...projectRules];
     return rules.length > 0 ? rules : undefined;
+  }
+
+  /** 项目级配置里被信任策略忽略的 allow 规则条数（供 UI 提示，不参与裁决） */
+  async countIgnoredProjectAllowRules(workspaceRoot: string): Promise<number> {
+    if (this.settings.permissions?.enabled === false) return 0;
+    if (this.settings.permissions?.trustProjectAllow === true) return 0;
+    const projectRules = await this.loadProjectPermissions(workspaceRoot);
+    return projectRules.filter((rule) => rule.decision === 'allow').length;
   }
 
   /* -------------------- 测试自愈循环 (TODOS #39) -------------------- */
@@ -1473,56 +1499,66 @@ export class AgentServer {
     await this.ensureSettings();
     const rt = this.requireSession(sessionId);
     if (rt.running || rt.busy) throw new Error('会话正在运行中，请先等待完成或点击停止');
-    const root = rt.data.meta.workspaceRoot?.trim();
-    if (!root) throw new Error('当前会话未绑定工作区，无法运行测试');
-
-    const project = await this.readProjectTestConfig(root);
-    const detection = await detectTestCommand(
-      this.host,
-      root,
-      options?.command?.trim() || this.settings.testLoop?.command?.trim() || project?.command,
-    );
-    if (!detection) {
-      throw new Error(
-        '未探测到测试命令：请在设置页「测试自愈」中填写自定义命令，或在项目根目录添加 .easycode/test.json',
-      );
-    }
-    const maxRounds = clampInt(
-      options?.maxRounds ?? project?.maxRounds ?? this.settings.testLoop?.maxRounds ?? 3,
-      1,
-      5,
-    );
-    const timeoutMs = clampInt(this.settings.testLoop?.timeoutMs ?? 600_000, 10_000, 1_800_000);
-
-    // 测试命令同样要过权限规则：该命令可能来自仓库内的 package.json / .easycode/test.json，
-    // 属于不可信输入，绝不能让 deny 规则被「换个执行入口」绕过
-    const permissionRules = await this.resolvePermissionRules(root);
-    const verdict = evaluatePermission(
-      permissionRules,
-      'run_command',
-      { command: detection.command },
-      root,
-    );
-    if (verdict?.decision === 'deny') {
-      throw new Error(`测试命令被权限规则拒绝：${describePermissionRule(verdict.rule)}`);
-    }
-    const forcedByRule = verdict?.decision === 'ask';
-
-    // 单次审批覆盖整轮循环：ask 模式下用户确认一次即可，后续重跑与修复回合不再重复弹窗
-    // 审批等待期就先占位 busy：否则用户可以在审批卡片挂着时另发一条消息，两条链路争用同一 controller
+    // 同步占位：检查与占位之间不得有任何 await。否则两次快速点击都能通过上面的检查，
+    // 后续读项目配置 / 探测命令 / 解析规则期间并发启动两个循环，导致重复跑测试、
+    // 同一会话并发执行修复回合，并互相覆盖 rt.controller。
     rt.busy = true;
     const controller = new AbortController();
     try {
-      const approved = await rt.approval.request(
-        'test_loop',
-        {
-          command: detection.command,
-          framework: detection.framework,
-          source: detection.source,
-          maxRounds,
-        },
-        { force: forcedByRule, reason: forcedByRule ? describePermissionRule(verdict.rule) : '测试自愈循环' },
+      const root = rt.data.meta.workspaceRoot?.trim();
+      if (!root) throw new Error('当前会话未绑定工作区，无法运行测试');
+
+      const project = await this.readProjectTestConfig(root);
+      const detection = await detectTestCommand(
+        this.host,
+        root,
+        options?.command?.trim() || this.settings.testLoop?.command?.trim() || project?.command,
       );
+      if (!detection) {
+        throw new Error(
+          '未探测到测试命令：请在设置页「测试自愈」中填写自定义命令，或在项目根目录添加 .easycode/test.json',
+        );
+      }
+      const maxRounds = clampInt(
+        options?.maxRounds ?? project?.maxRounds ?? this.settings.testLoop?.maxRounds ?? 3,
+        1,
+        5,
+      );
+      const timeoutMs = clampInt(this.settings.testLoop?.timeoutMs ?? 600_000, 10_000, 1_800_000);
+
+      // 测试命令同样要过权限规则：该命令可能来自仓库内的 package.json / .easycode/test.json，
+      // 属于不可信输入，绝不能让 deny 规则被「换个执行入口」绕过
+      const permissionRules = await this.resolvePermissionRules(root);
+      const verdict = evaluatePermission(
+        permissionRules,
+        'run_command',
+        { command: detection.command },
+        root,
+      );
+      if (verdict?.decision === 'deny') {
+        throw new Error(`测试命令被权限规则拒绝：${describePermissionRule(verdict.rule)}`);
+      }
+
+      // 与常规工具调用共用同一套裁决语义（resolveApprovalRequirement）：
+      // allow → 免审批（即使在 ask 模式）；ask → 强制审批（即使在 yolo 模式）；无命中 → 跟随会话模式
+      const requirement = resolveApprovalRequirement(verdict, true);
+      let approved = true;
+      if (requirement.needApproval) {
+        // 单次审批覆盖整轮循环：确认一次即可，后续重跑与修复回合不再重复弹窗
+        approved = await rt.approval.request(
+          'test_loop',
+          {
+            command: detection.command,
+            framework: detection.framework,
+            source: detection.source,
+            maxRounds,
+          },
+          {
+            force: requirement.force,
+            reason: requirement.reason ?? '测试自愈循环',
+          },
+        );
+      }
       if (!approved) {
         return { ok: false, rounds: 0, reason: 'aborted', message: '用户取消了测试自愈循环' };
       }
@@ -1554,10 +1590,17 @@ export class AgentServer {
             id: `m_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
             createdAt: new Date().toISOString(),
           });
-          await this.runTurn(rt);
+          // 修复回合的结果必须回传给循环：error / aborted 都要收敛循环，
+          // 否则「修复没成功也继续重跑测试」会白白烧掉剩余轮次
+          const turn = await this.runTurn(rt);
           // runTurn 结束会复位运行态；循环期间保持 busy 阻止并发发送，并把中止信号接管回循环
           rt.running = false;
           rt.controller = controller;
+          if (turn.reason === 'aborted') return { ok: false, aborted: true };
+          if (turn.reason === 'error') {
+            return { ok: false, message: turn.errorMessage ?? '修复回合执行失败' };
+          }
+          return { ok: true };
         },
         readDiff: async () => {
           try {

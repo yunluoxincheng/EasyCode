@@ -352,6 +352,9 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
           content: execution.content,
           isError: execution.isError,
           durationMs: execution.durationMs,
+          // 结构化传递「是否被批准」：权限规则拒绝也必须让 UI 显示拒绝态，
+          // 不能靠匹配提示文本（TODOS #47）
+          approved: execution.approved,
         });
         const resultMessage: ToolResultMessage = {
           role: 'tool_result',

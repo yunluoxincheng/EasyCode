@@ -205,3 +205,45 @@ test('extractFailureExcerpt：无失败标记时取尾部并受长度上限约�
   assert.ok(excerpt.length <= 40);
   assert.ok(excerpt.includes('line 49'));
 });
+
+test('【P2 日志摘录】符号类失败标记（✖ / ✕ / × / ●）必须命中，不能退回尾部', () => {
+  // `\b` 在「符号 + 空格」之间恒为假，早期正则导致 ✖ 完全匹配不到
+  const lines = [
+    ...Array.from({ length: 200 }, (_, i) => `padding line ${i}`),
+    '✖ add(2, 3) 应等于 5 (1.2ms)',
+    '  AssertionError: -1 !== 5',
+    ...Array.from({ length: 200 }, (_, i) => `trailing line ${i}`),
+  ];
+  const excerpt = extractFailureExcerpt(lines.join('\n'), 60000);
+  assert.ok(excerpt.startsWith('✖ add(2, 3)'), `实际开头: ${excerpt.slice(0, 40)}`);
+  assert.ok(excerpt.includes('AssertionError'));
+
+  for (const marker of ['✕ broken case', '× broken case', '● broken case']) {
+    const output = [
+      'padding line',
+      ...Array.from({ length: 150 }, (_, i) => `noise ${i}`),
+      marker,
+      'ERR',
+    ].join('\n');
+    const cut = extractFailureExcerpt(output, 60000);
+    assert.ok(cut.startsWith(marker), `${marker} 未命中，实际: ${cut.slice(0, 30)}`);
+  }
+});
+
+test('【P2 日志摘录】标记正好落在首行时同样从首行截取', () => {
+  const output = ['FAIL  src/a.test.ts', ...Array.from({ length: 200 }, (_, i) => `noise ${i}`)].join(
+    '\n',
+  );
+  const excerpt = extractFailureExcerpt(output, 60000);
+  assert.ok(excerpt.startsWith('FAIL  src/a.test.ts'));
+});
+
+test('【P2 日志摘录】不把 FAILOVER 这类词误判为失败标记', () => {
+  const output = [
+    'FAILOVER cluster ready',
+    ...Array.from({ length: 120 }, (_, i) => `noise ${i}`),
+  ].join('\n');
+  const excerpt = extractFailureExcerpt(output, 200);
+  // 未命中失败标记 → 走尾部截取，不应从首行开始
+  assert.ok(!excerpt.startsWith('FAILOVER'));
+});

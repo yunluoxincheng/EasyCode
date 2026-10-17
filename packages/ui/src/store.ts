@@ -1460,7 +1460,13 @@ export class AppStore {
             ) ??
             turn.items.find((i): i is ToolItem => i.kind === 'tool' && i.callId === event.callId);
           if (tool) {
-            tool.status = event.isError ? 'error' : event.content.includes('用户拒绝') ? 'denied' : 'ok';
+            // 结构化优先：权限规则拒绝 / 用户拒绝都以 approved=false 表达，
+            // 不再依赖匹配中文提示文本（文本一改就会把拒绝误判成成功）
+            tool.status = event.isError
+              ? 'error'
+              : event.approved === false || event.content.includes('用户拒绝')
+                ? 'denied'
+                : 'ok';
             tool.result = event.content;
             tool.durationMs = event.durationMs;
             if (tool.name === 'todo_write' && !event.isError) {
@@ -1482,6 +1488,10 @@ export class AppStore {
         if (isActive) this.flushPendingNotify();
         this.flushAssistantInState(state);
         state.status = 'waiting';
+        // 测试自愈循环（TODOS #39）的审批发生在任何测试事件之前：必须先建立回合容器，
+        // 否则审批卡片落到顶层，与随后的测试轮次/修复过程分离成两条时间线，
+        // 且 approval_resolved 找不到它（卡片永远停在「等待批准」）
+        if (event.toolName === 'test_loop') this.ensureWritableTurnInState(state);
         this.pushToTurnInState(state, {
           kind: 'approval',
           id: this.nextId(),
@@ -1504,13 +1514,16 @@ export class AppStore {
 
       case 'approval_resolved': {
         if (isActive) this.flushPendingNotify();
-        const turn = state.currentTurn;
-        if (turn) {
-          const approval = turn.items.find(
+        // 同时兼容回合内与顶层条目：旧会话或异常时序下审批卡片可能不在当前回合里，
+        // 只查 currentTurn 会让卡片永远停在「等待批准」
+        const approval =
+          state.currentTurn?.items.find(
+            (i): i is ApprovalItem => i.kind === 'approval' && i.requestId === event.requestId,
+          ) ??
+          state.items.find(
             (i): i is ApprovalItem => i.kind === 'approval' && i.requestId === event.requestId,
           );
-          if (approval) approval.status = event.approved ? 'approved' : 'denied';
-        }
+        if (approval) approval.status = event.approved ? 'approved' : 'denied';
         if (state.running) {
           state.status = 'running';
         }

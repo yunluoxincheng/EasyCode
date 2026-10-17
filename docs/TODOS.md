@@ -137,7 +137,7 @@ EasyCode 作为开放、可扩展的桌面 Coding Agent，目前仅提供内置�
 
 ### 39. 自主测试运行与排错自愈循环（Auto Test-and-Fix Loop）
 
-**状态**：✅ 已完成（2026-10-17，真实环境 30 项端到端验证通过）——Core 新增 `detectTestCommand`（`package.json` `scripts.test` 按锁文件推断 pnpm / yarn / bun / npm → `Cargo.toml` → `go.mod` → `pyproject.toml` 等 Python 标记，设置项与项目级 `.easycode/test.json` 可覆盖）+ `parseTestOutput` / `extractFailureExcerpt`（vitest / jest / pytest / cargo / go + **Node 内置 `node --test` 的 spec（`ℹ tests/pass/fail` 跨行聚合）与 TAP（`# …` + `not ok N -`，`# TODO` / `# SKIP` 不计失败）**；用例名剥离 reporter 追加的耗时后缀并跳过 `✖ failing tests:` 分节标题；解析不到保持 `undefined` 绝不估算）+ Engine `runTestLoop` 状态机（失败用例 + 日志摘录 + 当前 git diff 组成修复提示词驱动完整 Agent 回合，轮次 1~5 默认 3）+ 测试命令受权限规则约束（`deny` 直接拒绝、`ask` 在 YOLO 下强制审批）+ 停止信号贯穿修复回合 + `/test-loop [聚焦范围]` 与 Git 检视面板「▷ 运行测试并自愈」双入口 + 回合内 `[ TEST n/m ]` 卡片与四态收敛提示
+**状态**：✅ 已完成（2026-10-17，经 PR #9 审查返工并真实环境 23 项端到端验证通过）——Core 新增 `detectTestCommand`（`package.json` `scripts.test` 按锁文件推断 pnpm / yarn / bun / npm → `Cargo.toml` → `go.mod` → `pyproject.toml` 等 Python 标记，设置项与项目级 `.easycode/test.json` 可覆盖）+ `parseTestOutput` / `extractFailureExcerpt`（vitest / jest / pytest / cargo / go + **Node 内置 `node --test` 的 spec（`ℹ tests/pass/fail` 跨行聚合）与 TAP（`# …` + `not ok N -`，`# TODO` / `# SKIP` 不计失败）**；用例名剥离 reporter 追加的耗时后缀并跳过 `✖ failing tests:` 分节标题；解析不到保持 `undefined` 绝不估算）+ Engine `runTestLoop` 状态机（失败用例 + 日志摘录 + 当前 git diff 组成修复提示词驱动完整 Agent 回合，轮次 1~5 默认 3）+ 测试命令受权限规则约束（`deny` 直接拒绝、`ask` 在 YOLO 下强制审批、`allow` 免审批）+ 停止信号贯穿修复回合 + `/test-loop [聚焦范围]` 与 Git 检视面板「▷ 运行测试并自愈」双入口 + 回合内 `[ TEST n/m ]` 卡片与四态收敛提示。**审查返工加固**：`busy` 在同步检查后立即占位（杜绝并发启动两个循环，`fork`/`trim`/切换模型同步补校验）、修复回合结果与 `runTurn` 终止原因结构化回传（error/aborted 均收敛，`test_loop_done` 只发一次、修复失败不再白跑重试）、`test_loop` 审批前先行建立 UI 回合（审批与测试同时间线，卡片状态正确更新）、`extractFailureExcerpt` 修正符号类标记（`✖`/`✕`/`×`/`●`）的边界判断并修复首行标记被丢弃
 
 **背景**：
 编写代码只是开发的第一步，确保代码正确无误才是工程交付的根本。目前用户在让 Agent 完成代码修改后，通常需要手动打字让模型运行测试、等待模型报出测试错误、再人工提示模型“根据报错继续修改”，多次反复交互，沟通成本高且容易遗漏测试用例。
@@ -305,7 +305,7 @@ EasyCode 作为开放、可扩展的桌面 Coding Agent，目前仅提供内置�
 
 ### 47. 工具权限规则引擎（Allow / Deny / Ask Policy Rules）
 
-**状态**：✅ 已完成（2026-10-17）——Core 新增 `permissions.ts`（命令前缀匹配自带词边界、路径 glob 单段 / 跨目录、`deny > ask > allow` 顺序无关裁决、`normalizeShellCommand` 与 #40 结构化事实共用实现防前缀绕过）+ `executeTool` 三态短路（`deny` 不执行且不弹审批、`allow` 在 ask 模式免审批、`ask` 在 yolo 模式强制审批并标注规则来源）+ `ApprovalManager.request` 支持 `force` / `reason` + 全局 `Settings.permissions` 与项目级 `.easycode/permissions.json` 并集裁决（3 秒 TTL、非法条目跳过）+ 设置页「权限规则」可视化面板
+**状态**：✅ 已完成（2026-10-17，经 PR #9 审查返工）——Core 新增 `permissions.ts`（命令前缀匹配自带词边界、路径 glob 单段 / 跨目录、`deny > ask > allow` 顺序无关裁决、`normalizeShellCommand` 与 #40 结构化事实共用实现防前缀绕过）+ `executeTool` 三态短路（`deny` 不执行且不弹审批、`allow` 在 ask 模式免审批、`ask` 在 yolo 模式强制审批并标注规则来源）+ `ApprovalManager.request` 支持 `force` / `reason` + 全局 `Settings.permissions` 与项目级 `.easycode/permissions.json` 并集裁决（3 秒 TTL、非法条目跳过）+ 设置页「权限规则」可视化面板。**审查返工加固**：① 信任边界——项目级 `allow` 默认被忽略（`trustProjectAllow` 显式开启才生效），工作区代码不得自行放宽审批；② 路径绕过——`normalizePathSegments` 词法解析 `.`/`..`，`list_dir`/`search_files` 按真实默认作用域求值且递归搜索做「只收紧不放宽」子树推断；③ 命令绕过——环境变量前缀改为词法解析（支持 `FOO="a b"` 引号含空格），不可解析写法原样返回不谎称已清洗；④ 统一裁决——抽出 `resolveApprovalRequirement` 供工具调用与引擎内置动作共用；⑤ UI 状态——`tool_result` 显式携带 `approved`，拒绝态不再靠匹配提示文本。**边界**：命令前缀规则是命令级审批策略而非进程级沙箱，不覆盖 `scripts` 间接执行与复合命令（已在设置页与 README 明示）
 
 **背景**：
 目前的审批只有 `ask` / `yolo` 二元开关（`packages/core/src/approval.ts`）：`ask` 模式下每一次写文件与执行命令都要人工点一次批准，高频任务里极其打断心流；`yolo` 模式全量放行，连 `rm -rf` / `git push --force` 这类破坏性命令也毫无阻拦。用户被迫在「逐步审批」与「完全放手」之间二选一，这正是 #36 回合快照想普及 yolo 却仍难落地的关键缺口。

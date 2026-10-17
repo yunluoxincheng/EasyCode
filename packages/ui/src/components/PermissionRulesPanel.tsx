@@ -41,10 +41,11 @@ export function PermissionRulesPanel({
   patch: (p: Partial<Settings>) => void;
 }) {
   const enabled = draft.permissions?.enabled !== false;
+  const trustProjectAllow = draft.permissions?.trustProjectAllow === true;
   const rules = draft.permissions?.rules ?? [];
 
   const update = (next: PermissionRule[]): void => {
-    patch({ permissions: { enabled, rules: next } });
+    patch({ permissions: { enabled, trustProjectAllow, rules: next } });
   };
 
   const setRule = (index: number, changes: Partial<PermissionRule>): void => {
@@ -68,13 +69,37 @@ export function PermissionRulesPanel({
             className={`switch ${enabled ? 'on' : ''}`}
             title={enabled ? '已开启（点击关闭，回到纯 ask / yolo 语义）' : '已关闭（点击开启）'}
             onClick={() =>
-              patch({ permissions: { enabled: !enabled, rules } })
+              patch({ permissions: { enabled: !enabled, trustProjectAllow, rules } })
             }
           >
             <span className="knob" />
           </button>
           <span className="auto-scroll-text">
             {enabled ? '开启（规则优先于审批模式）' : '关闭（仅按审批模式放行）'}
+          </span>
+        </div>
+      </div>
+
+      <div className="field">
+        <span>信任项目级 allow 规则</span>
+        <div className="auto-scroll-row">
+          <button
+            className={`switch ${trustProjectAllow ? 'on' : ''}`}
+            title={
+              trustProjectAllow
+                ? '已信任（项目配置可免审批，仅在你确认仓库可信时开启）'
+                : '未信任（项目级 allow 规则被忽略）'
+            }
+            onClick={() =>
+              patch({ permissions: { enabled, trustProjectAllow: !trustProjectAllow, rules } })
+            }
+          >
+            <span className="knob" />
+          </button>
+          <span className="auto-scroll-text">
+            {trustProjectAllow
+              ? '已信任：项目自带 allow 规则会生效'
+              : '未信任（推荐）：项目级 deny / ask 生效，allow 被忽略'}
           </span>
         </div>
       </div>
@@ -137,12 +162,24 @@ export function PermissionRulesPanel({
 
       <p className="hint">
         裁决语义：任一命中规则为「拒绝」即拒绝；否则任一「询问」即在 YOLO 模式下也强制弹窗；
-        否则任一「放行」即跳过审批。命令匹配会先剥离 <code>FOO=1</code> 环境变量前缀并解包
-        <code> powershell -c</code> / <code>cmd /c</code> 包装，无法用前缀绕过拒绝规则。
+        否则任一「放行」即跳过审批。命令匹配会先剥离 <code>FOO=1</code> /{' '}
+        <code>FOO="a b"</code> 环境变量前缀并解包 <code>powershell -c</code> /{' '}
+        <code>cmd /c</code> 包装，无法用前缀绕过拒绝规则；路径匹配前会解析 <code>..</code>{' '}
+        等路径段，无法用 <code>src/tmp/../private</code> 绕过 glob。
       </p>
       <p className="hint">
         项目级规则可放在工作区根的 <code>.easycode/permissions.json</code>
         （<code>{'{ "rules": [ ... ] }'}</code>），与全局规则取并集裁决；非法条目会被跳过而不会让整份配置失效。
+        出于信任边界考虑，项目级 <code>deny</code> / <code>ask</code> 默认生效（只会收紧权限），
+        项目级 <code>allow</code> 默认<strong>被忽略</strong>——克隆来的仓库不得自行取消你的审批保护，
+        需要显式开启上方「信任项目级 allow 规则」才会生效。
+      </p>
+      <p className="hint">
+        <strong>边界说明：</strong>这里配置的是<strong>命令级审批策略</strong>，不是进程级安全沙箱。
+        它按命令前缀做匹配，无法阻止间接执行——例如 <code>package.json</code> 的{' '}
+        <code>scripts.test</code> 内部可以跑任意命令，此时被检查的是 <code>pnpm test</code> 而不是
+        展开后的每条语句；<code>a &amp;&amp; b</code>、管道与脚本同样不在匹配范围内。
+        需要强隔离请依赖操作系统级沙箱。
       </p>
     </div>
   );

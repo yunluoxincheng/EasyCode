@@ -129,6 +129,15 @@ export interface Settings {
 export interface PermissionSettings {
   /** 总开关：关闭时彻底回到纯 ask / yolo 模式语义（默认开） */
   enabled?: boolean;
+  /**
+   * 是否信任项目级 `.easycode/permissions.json` 里的 `allow` 规则（默认 **false**）。
+   *
+   * 工作区内的代码属低信任输入：一个克隆下来的项目若自带
+   * `{"tool":"run_command","decision":"allow"}`，就等于把用户的 ask 审批保护
+   * 自行取消。因此项目级 `deny` / `ask` 默认生效（只收紧、不放宽），
+   * 而项目级 `allow` 必须由用户显式开启信任后才参与裁决。
+   */
+  trustProjectAllow?: boolean;
   /** 全局规则；与项目级 `.easycode/permissions.json` 取并集裁决 */
   rules?: PermissionRule[];
 }
@@ -205,7 +214,7 @@ export const DEFAULT_SETTINGS: Settings = {
   webSearch: { enabled: false, backend: 'searxng', maxResults: 5 },
   shell: 'auto',
   reflexShadowMode: false,
-  permissions: { enabled: true, rules: [] },
+  permissions: { enabled: true, trustProjectAllow: false, rules: [] },
   testLoop: { maxRounds: 3, timeoutMs: 600_000 },
 };
 

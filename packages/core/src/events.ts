@@ -16,6 +16,11 @@ export type AgentEvent =
       content: string;
       isError: boolean;
       durationMs: number;
+      /**
+       * 是否被批准执行（TODOS #47）：`false` 表示被用户拒绝或被权限规则拒绝。
+       * UI 必须据此渲染「拒绝」状态，**不得**通过匹配中文提示文本判断执行结果。
+       */
+      approved?: boolean;
     }
   | {
       type: 'approval_request';

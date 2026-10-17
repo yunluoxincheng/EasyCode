@@ -17,6 +17,15 @@ export interface TestRunExecution {
   durationMs: number;
 }
 
+/** 修复回合的结果：显式区分成功 / 失败 / 中止，避免「修复没成功也继续重跑」 */
+export interface RepairOutcome {
+  ok: boolean;
+  /** 是否因用户中止而结束 */
+  aborted?: boolean;
+  /** 失败原因说明（收敛时回传给 UI） */
+  message?: string;
+}
+
 export interface RunTestLoopOptions {
   /** 实际执行的测试命令（已探知或用户指定） */
   command: string;
@@ -30,8 +39,12 @@ export interface RunTestLoopOptions {
   emit(event: AgentEvent): void;
   /** 执行一次测试命令 */
   runTests(): Promise<TestRunExecution>;
-  /** 让 Agent 依据失败信息修一轮代码（内部通常驱动一次完整的 Agent 回合） */
-  repair(prompt: string): Promise<void>;
+  /**
+   * 让 Agent 依据失败信息修一轮代码（内部通常驱动一次完整的 Agent 回合）。
+   * 返回 `void` 视为成功；返回 `RepairOutcome` 时按其中状态收敛循环；
+   * 抛出的异常同样会被捕获并收敛为 `error`（绝不静默退出、绝不重复发 done）。
+   */
+  repair(prompt: string): Promise<RepairOutcome | void>;
   /** 获取当前工作区未提交改动的 diff 摘要（可选，用于给模型提供改动上下文） */
   readDiff?(): Promise<string | undefined>;
 }
@@ -194,7 +207,38 @@ export async function runTestLoop(options: RunTestLoopOptions): Promise<TestLoop
       excerpt: extractFailureExcerpt(output, PROMPT_EXCERPT_CHARS),
       diff,
     });
-    await repair(prompt);
+    // 修复回合可能因模型初始化、快照或持久化故障而抛错；
+    // 必须就地收敛为 error 并发出唯一一次 done，否则循环会静默退出、UI 永远停在「运行中」
+    let outcome: RepairOutcome | void;
+    try {
+      outcome = await repair(prompt);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const aborted = signal.aborted || /abort/i.test(message);
+      emit({
+        type: 'test_loop_done',
+        ok: false,
+        rounds,
+        reason: aborted ? 'aborted' : 'error',
+        message,
+      });
+      return {
+        ok: false,
+        rounds,
+        reason: aborted ? 'aborted' : 'error',
+        message,
+        lastSummary,
+      };
+    }
+    if (outcome?.aborted) {
+      emit({ type: 'test_loop_done', ok: false, rounds, reason: 'aborted' });
+      return { ok: false, rounds, reason: 'aborted', lastSummary };
+    }
+    if (outcome && outcome.ok === false) {
+      const message = outcome.message ?? '修复回合执行失败';
+      emit({ type: 'test_loop_done', ok: false, rounds, reason: 'error', message });
+      return { ok: false, rounds, reason: 'error', message, lastSummary };
+    }
   }
 
   emit({ type: 'test_loop_done', ok: false, rounds, reason: 'max_rounds' });
