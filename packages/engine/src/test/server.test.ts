@@ -1607,3 +1607,254 @@ test('四轮复审回归: onFileChange 持久化失败自动回滚文件、renam
   runComposerMountEffect();
   assert.equal(composerInputValue, '请分析 @src/app.ts ', 'Composer 重新挂载后绝不能重复插入已消费的旧路径');
 });
+
+test('五轮复审回归: 首次快照 rename 失败后重启不复活虚假快照、Undo 落盘失败补偿回滚、单回合 8MB 硬上限与后续部分撤销冲突消除', async () => {
+  const { writeFileTool, editFileTool } = await import('@easycode/core');
+  const signal = new AbortController().signal;
+
+  // 1. P1: 首次保存快照时 writeFile(.tmp) 成功但 rename 失败 -> 工作区补偿删除 new.ts -> 重启后新 CheckpointManager 绝不恢复虚假快照
+  const hostGhost = new MemoryHost({});
+  const mgrGhost1 = new CheckpointManager(hostGhost);
+  const trackerGhost = mgrGhost1.beginTurn({
+    sessionId: 's_ghost',
+    workspaceRoot: '/ws',
+    turnNumber: 1,
+    userMessageId: 'u_ghost_1',
+  });
+  const origRenameGhost = hostGhost.fs.rename!.bind(hostGhost.fs);
+  hostGhost.fs.rename = async () => {
+    throw new Error('EACCES: rename to target checkpoint json denied');
+  };
+
+  await assert.rejects(
+    () =>
+      writeFileTool.execute(
+        { path: 'new.ts', content: 'created_then_aborted' },
+        {
+          host: hostGhost,
+          workspace: '/ws',
+          signal,
+          readFiles: new Set(),
+          callId: 'c_ghost',
+          onFileChange: (ev) => trackerGhost.recordFileChange(ev),
+        },
+      ),
+    /文件快照记录或持久化失败，已自动回滚工作区文件 \(new\.ts\) 至修改前状态.*EACCES/,
+  );
+  assert.equal(await hostGhost.fs.stat('/ws/new.ts'), null, '工作区新建文件已被补偿删除');
+  assert.equal(
+    await hostGhost.fs.stat('/easycode-demo/checkpoints/s_ghost.json.tmp'),
+    null,
+    'rename 失败时必须立即清理未提交的 .tmp 文件',
+  );
+
+  // 进一步模拟极端崩溃：即使进程在清理前强退导致磁盘上残留了未提交的 .tmp（而正式 s_ghost.json 从未生成），
+  // 重启后新实例化的 CheckpointManager 也绝不能将该未提交 .tmp 晋升为正式快照
+  await hostGhost.fs.writeFile(
+    '/easycode-demo/checkpoints/s_ghost.json.tmp',
+    JSON.stringify([
+      {
+        turnId: 'chk_aborted',
+        sessionId: 's_ghost',
+        workspaceRoot: '/ws',
+        turnNumber: 1,
+        userMessageId: 'u_ghost_1',
+        toolCallIds: ['c_ghost'],
+        createdAt: new Date().toISOString(),
+        files: [
+          {
+            path: 'new.ts',
+            existedBefore: false,
+            beforeContent: null,
+            afterContent: 'created_then_aborted',
+            insertions: 1,
+            deletions: 0,
+          },
+        ],
+      },
+    ]),
+  );
+  hostGhost.fs.rename = origRenameGhost;
+  const mgrGhostRestarted = new CheckpointManager(hostGhost);
+  const ghostList = await mgrGhostRestarted.listCheckpoints('s_ghost');
+  assert.equal(ghostList.length, 0, '正式快照不存在时，残留的未提交 .tmp 绝不能在重启后被复活为虚假快照');
+
+  // 2. P2: Undo (revertTurn) 恢复工作区文件成功，但最后的快照状态持久化失败 -> 自动逆序回滚工作区文件至 Undo 前状态
+  const hostUndoFail = new MemoryHost({
+    '/ws/app.ts': 'v1_before',
+  });
+  const mgrUndoFail = new CheckpointManager(hostUndoFail);
+  const trackerUndo = mgrUndoFail.beginTurn({
+    sessionId: 's_undo_persist_fail',
+    workspaceRoot: '/ws',
+    turnNumber: 1,
+    userMessageId: 'u_undo_1',
+  });
+  await editFileTool.execute(
+    { path: 'app.ts', old_string: 'v1_before', new_string: 'v2_after' },
+    {
+      host: hostUndoFail,
+      workspace: '/ws',
+      signal,
+      readFiles: new Set(['/ws/app.ts']),
+      callId: 'c_undo_edit',
+      onFileChange: (ev) => trackerUndo.recordFileChange(ev),
+    },
+  );
+  assert.equal(await hostUndoFail.fs.readFile('/ws/app.ts'), 'v2_after');
+
+  // 2A: 模拟 revertTurn 最后一步 persistSessionRecords 抛错，工作区文件回滚成功
+  const origRenameUndo = hostUndoFail.fs.rename!.bind(hostUndoFail.fs);
+  hostUndoFail.fs.rename = async () => {
+    throw new Error('ENOSPC: disk full when persisting revertedAt');
+  };
+  await assert.rejects(
+    () => mgrUndoFail.revertTurn('s_undo_persist_fail', trackerUndo.turnId),
+    /ENOSPC.*已自动回滚本批次前序修改的文件：app\.ts/,
+  );
+  assert.equal(
+    await hostUndoFail.fs.readFile('/ws/app.ts'),
+    'v2_after',
+    'Undo 状态持久化失败时，工作区文件必须被补偿还原至 Undo 前状态 (v2_after)',
+  );
+  hostUndoFail.fs.rename = origRenameUndo;
+  const summaryAfterUndoRb = (await mgrUndoFail.listCheckpoints('s_undo_persist_fail'))[0];
+  assert.equal(summaryAfterUndoRb.revertedAt, undefined, '快照状态保持未回退，与工作区真实内容严格一致');
+
+  // 2B: 若 Undo 状态持久化失败，且补偿还原工作区文件也失败 -> 明确报告部分完成与持久化失败详情
+  const origWriteUndo = hostUndoFail.fs.writeFile.bind(hostUndoFail.fs);
+  hostUndoFail.fs.rename = async () => {
+    throw new Error('ENOSPC: disk full when persisting revertedAt');
+  };
+  hostUndoFail.fs.writeFile = async (p: string, data: string) => {
+    if (p.endsWith('/ws/app.ts') && data === 'v2_after') {
+      throw new Error('EIO: failed to restore v2_after');
+    }
+    return origWriteUndo(p, data);
+  };
+  await assert.rejects(
+    () => mgrUndoFail.revertTurn('s_undo_persist_fail', trackerUndo.turnId),
+    /注意：同批次部分文件已恢复；且快照状态持久化失败.*工作区文件已完成回退但快照状态未能落盘：app\.ts/,
+  );
+  hostUndoFail.fs.rename = origRenameUndo;
+  hostUndoFail.fs.writeFile = origWriteUndo;
+
+  // 3. P2: 单个活跃回合突破 8MB 会话快照容量硬上限时，拒绝记录并触发文件与内存双重回滚
+  const chunk1_6MB = 'x'.repeat(1.6 * 1024 * 1024);
+  const hostQuota = new MemoryHost({
+    '/ws/f1.ts': chunk1_6MB,
+    '/ws/f2.ts': chunk1_6MB,
+    '/ws/f3.ts': chunk1_6MB,
+  });
+  const mgrQuota = new CheckpointManager(hostQuota);
+  const trackerQuota = mgrQuota.beginTurn({
+    sessionId: 's_quota_8mb',
+    workspaceRoot: '/ws',
+    turnNumber: 1,
+    userMessageId: 'u_quota_1',
+  });
+  const readQuotaFiles = new Set(['/ws/f1.ts', '/ws/f2.ts', '/ws/f3.ts']);
+
+  // f1: before 1.6MB + after 1.6MB = 3.2MB (<= 8MB) -> 成功
+  await writeFileTool.execute(
+    { path: 'f1.ts', content: `${chunk1_6MB}_mod1` },
+    {
+      host: hostQuota,
+      workspace: '/ws',
+      signal,
+      readFiles: readQuotaFiles,
+      callId: 'c_q1',
+      onFileChange: (ev) => trackerQuota.recordFileChange(ev),
+    },
+  );
+  // f2: 累计 6.4MB (<= 8MB) -> 成功
+  await writeFileTool.execute(
+    { path: 'f2.ts', content: `${chunk1_6MB}_mod2` },
+    {
+      host: hostQuota,
+      workspace: '/ws',
+      signal,
+      readFiles: readQuotaFiles,
+      callId: 'c_q2',
+      onFileChange: (ev) => trackerQuota.recordFileChange(ev),
+    },
+  );
+  // f3: 累计 9.6MB (> 8MB 硬上限) -> 拒绝并自动回滚 f3.ts 工作区内容及内存快照
+  await assert.rejects(
+    () =>
+      writeFileTool.execute(
+        { path: 'f3.ts', content: `${chunk1_6MB}_mod3` },
+        {
+          host: hostQuota,
+          workspace: '/ws',
+          signal,
+          readFiles: readQuotaFiles,
+          callId: 'c_q3',
+          onFileChange: (ev) => trackerQuota.recordFileChange(ev),
+        },
+      ),
+    /超过会话快照总容量硬上限 \(8MB\)/,
+  );
+  assert.equal(await hostQuota.fs.readFile('/ws/f3.ts'), chunk1_6MB, '超 8MB 失败后 f3.ts 必须自动回滚至原内容');
+  const quotaSummaries = await mgrQuota.listCheckpoints('s_quota_8mb');
+  assert.equal(quotaSummaries.length, 1);
+  assert.deepEqual(
+    quotaSummaries[0].files.map((f) => f.path),
+    ['f1.ts', 'f2.ts'],
+    '容量超限回滚后，内存与磁盘快照应完整保留前两个合法文件记录',
+  );
+
+  // 4. P3: 后续回合修改 A、B 两文件并仅部分撤销 A 后，预览更早回合的 A 不再误报 modifiedInLaterTurns
+  const hostPartialLater = new MemoryHost({
+    '/ws/a.ts': 'a_v0',
+    '/ws/b.ts': 'b_v0',
+  });
+  const mgrPartialLater = new CheckpointManager(hostPartialLater);
+  // 第 1 回合修改 a.ts: a_v0 -> a_v1
+  const t1 = mgrPartialLater.beginTurn({
+    sessionId: 's_p3',
+    workspaceRoot: '/ws',
+    turnNumber: 1,
+    userMessageId: 'u1',
+  });
+  await hostPartialLater.fs.writeFile('/ws/a.ts', 'a_v1');
+  await t1.recordFileChange({
+    callId: 'c1',
+    relPath: 'a.ts',
+    absPath: '/ws/a.ts',
+    existedBefore: true,
+    beforeContent: 'a_v0',
+    afterContent: 'a_v1',
+  });
+  // 第 2 回合同时修改 a.ts (a_v1 -> a_v2) 和 b.ts (b_v0 -> b_v2)
+  const t2 = mgrPartialLater.beginTurn({
+    sessionId: 's_p3',
+    workspaceRoot: '/ws',
+    turnNumber: 2,
+    userMessageId: 'u2',
+  });
+  await hostPartialLater.fs.writeFile('/ws/a.ts', 'a_v2');
+  await t2.recordFileChange({
+    callId: 'c2_a',
+    relPath: 'a.ts',
+    absPath: '/ws/a.ts',
+    existedBefore: true,
+    beforeContent: 'a_v1',
+    afterContent: 'a_v2',
+  });
+  await hostPartialLater.fs.writeFile('/ws/b.ts', 'b_v2');
+  await t2.recordFileChange({
+    callId: 'c2_b',
+    relPath: 'b.ts',
+    absPath: '/ws/b.ts',
+    existedBefore: true,
+    beforeContent: 'b_v0',
+    afterContent: 'b_v2',
+  });
+  // 仅部分撤销第 2 回合中的 a.ts（此时 a.ts 恢复为 a_v1，b.ts 仍为 b_v2，因此第 2 回合整体未完全撤销）
+  await mgrPartialLater.revertTurn('s_p3', t2.turnId, ['a.ts']);
+  // 预览第 1 回合：由于第 2 回合对 a.ts 的修改已被单独撤销，预览第 1 回合的 a.ts 不应再报冲突
+  const previewT1 = await mgrPartialLater.previewUndo('s_p3', t1.turnId);
+  assert.equal(previewT1.files[0].modifiedInLaterTurns, false, '后续回合中已单独撤销的文件不应再误报为后续修改冲突');
+  assert.equal(previewT1.hasConflicts, false);
+});

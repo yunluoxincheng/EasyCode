@@ -317,10 +317,13 @@ export class CheckpointManager {
       }
     }
 
-    const recovered = await this.tryRecoverFromTmpFile(sessionId, tmpFile, targetFile);
-    if (recovered) {
-      this.cache.set(sessionId, recovered);
-      return recovered;
+    // 正式文件不存在（targetStat === null）：
+    // 在 .tmp -> rename 原子提交机制下，若正式文件尚不存在，任何残留的 .tmp 均属于未完成提交或已中止回滚的事务，
+    // 绝不能将其晋升为正式快照（否则会把已补偿回滚的失败操作复活为虚假快照，P1 修复）
+    try {
+      await this.host.fs.unlink?.(tmpFile);
+    } catch {
+      // 忽略残留临时文件清理异常
     }
 
     const empty: TurnCheckpointRecord[] = [];
@@ -338,17 +341,31 @@ export class CheckpointManager {
         await this.host.fs.mkdir(this.checkpointsDir(), { recursive: true });
         const targetFile = this.sessionCheckpointFile(sessionId);
         const tmpFile = `${targetFile}.tmp`;
-        // P1 修复：先完整写入同目录临时文件 .tmp，再通过宿主 rename 执行原子文件替换提交
-        await this.host.fs.writeFile(tmpFile, payload);
-        if (this.host.fs.rename) {
-          await this.host.fs.rename(tmpFile, targetFile);
-        } else {
-          await this.host.fs.writeFile(targetFile, payload);
+        // P1 修复：先完整写入同目录临时文件 .tmp，再通过宿主 rename 执行原子文件替换提交；
+        // 若写入或 rename 失败，立即清理本次未提交的 .tmp（若 unlink 也失败则覆写中止标记），杜绝重启后错误恢复已回滚的事务
+        try {
+          await this.host.fs.writeFile(tmpFile, payload);
+          if (this.host.fs.rename) {
+            await this.host.fs.rename(tmpFile, targetFile);
+          } else {
+            await this.host.fs.writeFile(targetFile, payload);
+            try {
+              await this.host.fs.unlink?.(tmpFile);
+            } catch {
+              // 忽略临时文件清理异常
+            }
+          }
+        } catch (err) {
           try {
             await this.host.fs.unlink?.(tmpFile);
           } catch {
-            // 忽略临时文件清理异常
+            try {
+              await this.host.fs.writeFile(tmpFile, '{"aborted":true}');
+            } catch {
+              // 忽略清理异常
+            }
           }
+          throw err;
         }
       });
     this.writeQueues.set(sessionId, next);
@@ -489,6 +506,11 @@ export class CheckpointManager {
       const evicted = records.shift();
       if (evicted) totalBytes -= recordStorageBytes(evicted);
     }
+    if (totalBytes > MAX_SESSION_CHECKPOINT_BYTES) {
+      throw new Error(
+        `当前回合累计快照体积 (${(totalBytes / (1024 * 1024)).toFixed(1)}MB) 超过会话快照总容量硬上限 (${Math.round(MAX_SESSION_CHECKPOINT_BYTES / 1024 / 1024)}MB)，已拒绝记录并中止本次文件修改`,
+      );
+    }
   }
 
   /**
@@ -594,18 +616,18 @@ export class CheckpointManager {
           }
         }
 
-        if (record.files.length === 0) {
-          const idx = records.indexOf(record);
-          if (idx !== -1) records.splice(idx, 1);
-          record = null;
-        } else {
-          this.enforceStorageQuota(records, record);
-        }
-
         try {
+          if (record.files.length === 0) {
+            const idx = records.indexOf(record);
+            if (idx !== -1) records.splice(idx, 1);
+            record = null;
+          } else {
+            this.enforceStorageQuota(records, record);
+          }
+
           await this.persistSessionRecords(ctx.sessionId);
         } catch (persistErr) {
-          // 落盘失败时回滚内存缓存与当前回合追踪器状态，杜绝内存态与磁盘态分裂
+          // 容量超限或落盘失败时回滚内存缓存与当前回合追踪器状态，杜绝内存态与磁盘态分裂
           this.cache.set(ctx.sessionId, prevRecordsSnapshot);
           record = hadRecordBefore
             ? (prevRecordsSnapshot.find((r) => r.turnId === turnId) ?? null)
@@ -728,7 +750,7 @@ export class CheckpointManager {
     for (const file of record.files) {
       const key = this.pathKey(file.path);
       const laterTurnNumbers = laterRecords
-        .filter((r) => r.files.some((f) => this.pathKey(f.path) === key))
+        .filter((r) => r.files.some((f) => this.pathKey(f.path) === key && !f.revertedAt))
         .map((r) => r.turnNumber);
       const modifiedInLaterTurns = laterTurnNumbers.length > 0;
 
@@ -861,6 +883,7 @@ export class CheckpointManager {
       abs: string;
       existedBeforeRevert: boolean;
       contentBeforeRevert: string | null;
+      prevRevertedAt?: string;
     };
     const appliedFiles: RevertBatchItem[] = [];
     let inFlight: RevertBatchItem | null = null;
@@ -874,6 +897,7 @@ export class CheckpointManager {
           abs,
           existedBeforeRevert: pre.currentExists,
           contentBeforeRevert: pre.currentContent,
+          prevRevertedAt: file.revertedAt,
         };
         if (!file.existedBefore) {
           // P1 #2：仅当文件确实不存在时才幂等跳过；unlink 缺失或删除后文件仍存在必须抛错
@@ -913,6 +937,11 @@ export class CheckpointManager {
         file.revertedAt = now;
         revertedPaths.push(file.path);
       }
+
+      // 将 revertedAt 状态同步与持久化纳入同一事务保护块：
+      // 若工作区文件已回退但最终持久化快照状态失败，同样触发下方逆序补偿回滚，杜绝磁盘已回退但快照显示未回退的状态分裂
+      await this.syncAllFilesRevertedState(record, now);
+      await this.persistSessionRecords(sessionId);
     } catch (batchErr) {
       const baseMsg = batchErr instanceof Error ? batchErr.message : String(batchErr);
       const rolledBackPaths: string[] = [];
@@ -954,7 +983,7 @@ export class CheckpointManager {
             }
             await this.host.fs.writeFile(item.abs, item.contentBeforeRevert);
           }
-          item.file.revertedAt = undefined;
+          item.file.revertedAt = item.prevRevertedAt;
           rolledBackPaths.push(item.file.path);
         } catch (rbErr) {
           rollbackErrors.push(rbErr instanceof Error ? rbErr.message : String(rbErr));
@@ -963,15 +992,20 @@ export class CheckpointManager {
             item.file.revertedAt = now;
             stillRevertedPaths.push(item.file.path);
           } else {
-            item.file.revertedAt = undefined;
+            item.file.revertedAt = item.prevRevertedAt;
             damagedPaths.push(item.file.path);
           }
         }
       }
 
-      // 同步真实磁盘状态并落盘
+      // 同步真实磁盘状态并尽力落盘（若因持久化本身故障进入此分支，忽略二次落盘异常以保留明确回滚/部分完成错误报告）
       await this.syncAllFilesRevertedState(record, now);
-      await this.persistSessionRecords(sessionId);
+      let persistAfterRbFailed: string | null = null;
+      try {
+        await this.persistSessionRecords(sessionId);
+      } catch (pErr) {
+        persistAfterRbFailed = pErr instanceof Error ? pErr.message : String(pErr);
+      }
 
       if (damagedPaths.length > 0) {
         throw new Error(
@@ -979,8 +1013,11 @@ export class CheckpointManager {
         );
       }
       if (stillRevertedPaths.length > 0) {
+        const persistNote = persistAfterRbFailed
+          ? `；且快照状态持久化失败 (${persistAfterRbFailed})，工作区文件已完成回退但快照状态未能落盘`
+          : '并落盘记录';
         throw new Error(
-          `${baseMsg}（注意：同批次部分文件已恢复并落盘记录：${stillRevertedPaths.join(', ')}；回滚失败：${rollbackErrors.join('; ')}）`,
+          `${baseMsg}（注意：同批次部分文件已恢复${persistNote}：${stillRevertedPaths.join(', ')}；回滚失败：${rollbackErrors.join('; ')}）`,
         );
       }
       if (rolledBackPaths.length > 0) {
@@ -989,8 +1026,6 @@ export class CheckpointManager {
       throw batchErr;
     }
 
-    await this.syncAllFilesRevertedState(record, now);
-    await this.persistSessionRecords(sessionId);
     return { record, revertedPaths };
   }
 
