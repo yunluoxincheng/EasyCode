@@ -58,6 +58,8 @@ export interface SessionMeta {
   model: string;
   /** 思考强度；'' = 跟随供应商默认。生效与否取决于供应商是否支持 reasoning_effort */
   reasoningEffort?: string;
+  /** 会话级单调递增回合序号（不受上下文压缩裁剪消息影响，TODOS #36） */
+  turnSeq?: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -78,6 +80,8 @@ export interface SessionData {
   usage?: { input: number; output: number; steps: number; cached?: number };
   /** 当前任务清单（由 todo_write 工具维护） */
   todos?: TodoItem[];
+  /** 会话单调递增的回合执行计数器（不受上下文压缩或历史裁剪影响，TODOS #36） */
+  turnCounter?: number;
 }
 
 /** 会话审批模式：ask=写文件/执行命令需人工批准；yolo=自动放行 */

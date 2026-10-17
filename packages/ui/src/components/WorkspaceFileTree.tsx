@@ -280,7 +280,7 @@ export function WorkspaceFileTree() {
           </div>
           {files.length >= 1500 && (
             <div className="ws-tree-trunc-hint">
-              [ INFO ] 已展示前 1,500 项文件；深层文件可在输入框用 @关键词 检索
+              [ INFO ] 工作区文件较多，当前仅索引并展示前 1,500 项；未索引的深层文件可直接在输入框手写 @相对路径 引用
             </div>
           )}
           <div className="ws-tree-scroll">

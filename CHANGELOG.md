@@ -6,12 +6,12 @@
 
 ### 新增
 - 回合级代码改动快照与一键回退（Turn Checkpoint & Safe Undo，经审查返工）：`write_file` 与 `edit_file` 接入 `onFileChange` 原子回调，由会话级 `CheckpointManager` 记录回合 Pre-edit 原始状态（若 `write_file` 读取原文件基准失败则立即中止覆盖以保护原文件，绝不伪造空字符串基准）；同一回合内多次修改同一文件严格以该回合首次修改前的原始版本为基准，回合内改回原样自动消除净零变更，校验失败或审批拒绝绝不产生脏快照；编辑最后一条提问（`editLastUserMessage`）时自动分配新消息身份并清理被截断回合残留快照，UI 严格按实际执行的写文件 `toolCallIds` 关联快照；快照独立存储于 `${dataDir}/checkpoints/${sessionId}.json`（带单文件 2MB 与单会话 30 回合上限，删除会话同步清理，零工作区污染）（TODOS #36）
-- `<TurnUndoModal>` 撤销确认弹窗、CAS 乐观并发校验与多入口闭环：在回合头部（`TurnView`）、回合右键菜单及 Composer `/undo` 快捷指令提供一键回退入口；执行回退时严格按快照自身记录的 `workspaceRoot` 获取工作区互斥锁并失效对应缓存（杜绝会话中途切换工作区后锁错项目）；回退写入前执行 CAS 乐观并发校验（防止打开预览弹窗后用户在外部编辑器修改文件却被静默覆盖，存在冲突时必须经用户显式勾选 `force` 强制覆盖）；新建文件回退经 `unlink` 删除并通过后置 `stat` 探活验证，删除失败如实抛错绝不谎报成功；支持分多次部分回退并在全部文件恢复后自动标记整回合 `revertedAt`（TODOS #36）
+- `<TurnUndoModal>` 撤销确认弹窗、双层 CAS 乐观并发校验与多文件异常回滚：在回合头部（`TurnView`）、回合右键菜单及 Composer `/undo` 快捷指令提供一键回退入口；执行回退时严格按快照自身记录的 `workspaceRoot` 获取工作区互斥锁并失效对应缓存（杜绝会话中途切换工作区后锁错项目，且跨工作区同名文件不误报后续冲突）；回退写入前执行双层 CAS 乐观并发校验（对比预览时刻磁盘指纹 `expectedFingerprints` 与回合结束快照，若预览后磁盘文件被改写则即使 `force=true` 亦拦截并刷新预览）；新建文件回退经 `unlink` 删除并通过后置 `stat` 探活验证；多文件回退中途发生异常时自动逆序回滚本批次已修改的前序文件（若回滚也失败则按真实磁盘状态持久化 `revertedAt`）；支持分多次部分回退、动态复核已恢复文件是否被再次修改（TODOS #36）
 - 代码行号范围引用语法与发送时静态固化（Code Range Mention，经审查返工）：支持在 Composer 输入 `@path/to/file.ts:50-100` 或单行 `@path/to/file.ts:35`（新增 `formatFileMention` 统一对含空格路径加双引号转义 `@"path with space.ts":10-12`）；在 `@` 补全后按 `:` 自动收紧空格并弹出 `[ : 行范围切片 ]` 语法提示；行范围切片仅在消息首次发送时解析并固化至 `UserMessage.rangeContext`，后续轮次直接复用发送时的静态切片快照，根除跨轮次重复磁盘读取与历史上下文漂移；读取前先经 `stat.size`（2MB 上限）前置拦截大文件，并限制单行（2,000 字符）与单片段总长度（24KB）（TODOS #38）
 - 工作区轻量文件树与代码框选预览（`<WorkspaceFileTree>` & `<FilePreviewModal>`）：侧栏底部新增可折叠 `[TREE] 工作区文件树` 面板（超过 1,500 项时显示截断提示）；支持关键词过滤、右键菜单与悬停快捷操作；单击文件呼出轻量暗黑代码预览弹窗（前置 2MB 体积拦截），支持点击/Shift+点击或鼠标拖拽行号与代码行框选任意行区间，一键将 `@path:start-end`（含空格自动引号包裹）插入 Composer（TODOS #38）
 
 ### 测试
-- engine 新增 4 项综合与审查回归单元测试（全仓 69 项测试通过）：覆盖 `CheckpointManager` 同回合多次修改基准保持、新建文件回退删除、跨回合冲突与 CAS 乐观并发拦截、跨工作区切换后回退互斥锁目标一致性、`unlink` 失败探活定性上报、分多次部分回退后整回合完成标记、`write_file` 原文件读取失败保护、`editLastUserMessage` 截断快照清理、`rangeContext` 防历史漂移、含空格路径引号转义闭环，以及真实 `NodeHost` 临时目录端到端回退验证（TODOS #36, #38）
+- engine 新增 5 项综合与两轮审查回归单元测试（全仓 70 项测试通过）：覆盖 `CheckpointManager` 同回合多次修改基准保持、新建文件回退删除、跨回合冲突与双层 CAS（含预览后磁盘指纹 `expectedFingerprints` 变动拦截）、跨工作区切换后回退互斥锁目标一致性与同名文件零误报、`unlink` 失败探活定性上报、多文件回退中途失败逆序自动回滚与回滚失败真实状态落盘、分多次部分回退后整回合完成标记与再次修改动态复位、`write_file` 原文件读取失败保护、上下文压缩后单调 `turnSeq` 与 `pruneCheckpointsByIds` 精确裁剪、非 System 模型零污染、`rangeContext` 防历史漂移、含空格路径引号转义闭环，以及真实 `NodeHost` 临时目录端到端回退验证（TODOS #36, #38）
 
 ## [0.1.23] - 2026-10-12
 

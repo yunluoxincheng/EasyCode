@@ -816,6 +816,26 @@ test('审查回归 (P1 #1/#2/#3 & P2 #4/#5/#6/#7/#8/#9): 跨工作区锁一致�
   const finalPartial = (await mgrPartial.listCheckpoints('s_partial'))[0];
   assert.ok(finalPartial.revertedAt, '所有文件分批恢复完成后，整回合必须标记 revertedAt');
 
+  // 若恢复后文件又被外部修改，listCheckpoints 动态复核时应自动清除已失效的 revertedAt 标记
+  await hostPartial.fs.writeFile('/ws/a.ts', 'MODIFIED_AGAIN_AFTER_REVERT');
+  const afterReModify = (await mgrPartial.listCheckpoints('s_partial'))[0];
+  assert.equal(afterReModify.revertedAt, undefined, '恢复后文件再次被修改时，不应继续维持已撤销标记');
+
+  // P1 #3 进阶验证：即使传入 force: true，若打开预览后磁盘指纹又发生变化（expectedFingerprints 不匹配），同样必须拦截
+  const previewBeforeEdit = await mgrPartial.previewUndo('s_partial', tPartial.turnId);
+  const fpMap: Record<string, string> = {};
+  for (const f of previewBeforeEdit.files) fpMap[f.path] = f.diskFingerprint;
+  await hostPartial.fs.writeFile('/ws/a.ts', 'CHANGED_WHILE_MODAL_OPEN');
+  await assert.rejects(
+    () =>
+      mgrPartial.revertTurn('s_partial', tPartial.turnId, {
+        paths: ['a.ts'],
+        force: true,
+        expectedFingerprints: fpMap,
+      }),
+    /检测到文件在打开预览后又被修改/,
+  );
+
   // 4. P2 #9: write_file 在读取原文件快照失败时中止覆盖写入，绝不伪造空字符串基准
   const hostReadFail = new MemoryHost({ '/ws/important.ts': 'PRECIOUS_CONTENT' });
   const readFiles = new Set<string>(['/ws/important.ts']);
@@ -847,6 +867,13 @@ test('审查回归 (P1 #1/#2/#3 & P2 #4/#5/#6/#7/#8/#9): 跨工作区锁一致�
     '/wsB/other.ts': 'lineB1\n',
   });
   const server = new AgentServer(hostServer);
+  // 注入零延迟测试 Provider 避免 MockProvider 打字机模拟耗时
+  (server as any).createProvider = () => ({
+    id: 'instant-mock',
+    async stream() {
+      return { blocks: [{ type: 'text' as const, text: 'ok' }] };
+    },
+  });
   await server.updateSettings({
     providers: {
       mock: {
@@ -941,6 +968,27 @@ test('审查回归 (P1 #1/#2/#3 & P2 #4/#5/#6/#7/#8/#9): 跨工作区锁一致�
   );
   assert.equal(await hostServer.fs.readFile('/wsA/main.ts'), 'ORIG_WSA');
 
+  // P2 #8: 超大文件 (> 2MB) 在 stat 阶段即被前置拦截，不调用 readFile 读入内存
+  let hugeReadCalled = false;
+  const origStat = hostServer.fs.stat.bind(hostServer.fs);
+  const origRead = hostServer.fs.readFile.bind(hostServer.fs);
+  hostServer.fs.stat = async (p: string) => {
+    if (p.endsWith('huge.log')) return { isDirectory: false, size: 5 * 1024 * 1024, mtimeMs: 0 };
+    return origStat(p);
+  };
+  hostServer.fs.readFile = async (p: string) => {
+    if (p.endsWith('huge.log')) hugeReadCalled = true;
+    return origRead(p);
+  };
+  const hugeRangeRes = await resolveCodeRangeMentions(hostServer, '/wsB', '查看 @huge.log:1-10');
+  assert.equal(hugeRangeRes.snippets.length, 0);
+  assert.equal(hugeReadCalled, false, '超过 2MB 的文件在 resolveCodeRangeMentions 中必须在 stat 阶段前置跳过，不触发 readFile');
+  await assert.rejects(
+    () => server.readWorkspaceFile(sSwitch.id, 'huge.log'),
+    /文件体积过大/,
+  );
+  assert.equal(hugeReadCalled, false, '超过 2MB 的文件在 readWorkspaceFile 中必须在 stat 阶段前置拒绝，不触发 readFile');
+
   // 6. 真实 NodeHost 临时目录端到端验证（落盘快照、预览与回退删除新建文件）
   const tmpRoot = await fsp.mkdtemp(path.join(os.tmpdir(), 'easycode-chk-test-'));
   try {
@@ -982,4 +1030,215 @@ test('审查回归 (P1 #1/#2/#3 & P2 #4/#5/#6/#7/#8/#9): 跨工作区锁一致�
   } finally {
     await fsp.rm(tmpRoot, { recursive: true, force: true });
   }
+});
+
+test('二轮复审回归: 多文件回退中途失败自动回滚与状态落盘、压缩后单调回合号与精确裁剪、非 System 模型零污染、跨工作区零误报冲突', async () => {
+  // 1. P1: 多文件回退中途失败时，逆序自动回滚已修改的前序文件；若回滚也失败则按真实磁盘状态持久化记录
+  const hostRollback = new MemoryHost({
+    '/ws/A.ts': 'A_after',
+    '/ws/B.ts': 'B_created',
+    '/ws/C.ts': 'C_after',
+  });
+  const mgrRollback = new CheckpointManager(hostRollback);
+  const tRollback = mgrRollback.beginTurn({
+    sessionId: 's_rb',
+    workspaceRoot: '/ws',
+    turnNumber: 1,
+    userMessageId: 'u_rb',
+  });
+  await tRollback.recordFileChange({
+    callId: 'c_a',
+    relPath: 'A.ts',
+    absPath: '/ws/A.ts',
+    existedBefore: true,
+    beforeContent: 'A_before',
+    afterContent: 'A_after',
+  });
+  await tRollback.recordFileChange({
+    callId: 'c_b',
+    relPath: 'B.ts',
+    absPath: '/ws/B.ts',
+    existedBefore: false,
+    beforeContent: null,
+    afterContent: 'B_created',
+  });
+  await tRollback.recordFileChange({
+    callId: 'c_c',
+    relPath: 'C.ts',
+    absPath: '/ws/C.ts',
+    existedBefore: true,
+    beforeContent: 'C_before',
+    afterContent: 'C_after',
+  });
+
+  // 令 B.ts 的 unlink 失败：A.ts 先被写为 A_before，随后 B.ts 报错触发逆序回滚 A.ts -> A_after
+  const origUnlink = hostRollback.fs.unlink.bind(hostRollback.fs);
+  hostRollback.fs.unlink = async (p: string) => {
+    if (p.endsWith('B.ts')) throw new Error('EPERM: locked file');
+    return origUnlink(p);
+  };
+  await assert.rejects(
+    () => mgrRollback.revertTurn('s_rb', tRollback.turnId),
+    /已自动回滚本批次前序修改的文件：A\.ts/,
+  );
+  assert.equal(await hostRollback.fs.readFile('/ws/A.ts'), 'A_after', '中途失败后前序 A.ts 必须被自动回滚至回退前内容');
+  const rbSummary1 = (await mgrRollback.listCheckpoints('s_rb'))[0];
+  assert.equal(rbSummary1.files.find((f) => f.path === 'A.ts')?.revertedAt, undefined);
+
+  // 若回滚写回 A.ts 时也遭遇磁盘写入失败（A.ts 停留在 A_before），则 A.ts 的已恢复状态必须真实落盘并明确报错告知用户
+  const origWrite = hostRollback.fs.writeFile.bind(hostRollback.fs);
+  let aWriteCount = 0;
+  hostRollback.fs.writeFile = async (p: string, data: string) => {
+    if (p.endsWith('/ws/A.ts')) {
+      aWriteCount++;
+      if (aWriteCount === 2) throw new Error('EIO: rollback write failed');
+    }
+    return origWrite(p, data);
+  };
+  await assert.rejects(
+    () => mgrRollback.revertTurn('s_rb', tRollback.turnId),
+    /注意：同批次部分文件已恢复并落盘记录：A\.ts/,
+  );
+  assert.equal(await hostRollback.fs.readFile('/ws/A.ts'), 'A_before');
+  const rbSummary2 = (await mgrRollback.listCheckpoints('s_rb'))[0];
+  assert.ok(rbSummary2.files.find((f) => f.path === 'A.ts')?.revertedAt, '无法回滚的文件必须如实标记并持久化 revertedAt');
+  assert.equal(rbSummary2.revertedAt, undefined, 'B.ts 与 C.ts 未恢复，整回合 revertedAt 必须保持未完成');
+
+  // 2. P2: 历史压缩 (/compact) 后回合号单调递增，且 editLastUserMessage 只精确删除被截断消息对应的快照
+  const hostCompact = new MemoryHost({
+    '/wsA/app.ts': 'line1\nline2\nline3\n',
+    '/wsB/app.ts': 'wsB_line1\n',
+  });
+  const server = new AgentServer(hostCompact);
+  (server as any).createProvider = () => ({
+    id: 'instant-mock-compact',
+    async stream() {
+      return { blocks: [{ type: 'text' as const, text: 'ok' }] };
+    },
+  });
+  // 配置 capabilities 不含 'system' 的模型，同时验证二轮复审 P2（非 System 模型不污染历史与 rangeContext）
+  await server.updateSettings({
+    providers: {
+      mock: {
+        kind: 'mock',
+        baseURL: '',
+        name: 'Mock',
+        enabled: true,
+        models: [{ name: 'mock-no-sys', enabled: true, capabilities: [] }],
+      },
+    },
+    defaultProvider: 'mock',
+  });
+  const session = await server.createSession({
+    workspaceRoot: '/wsA',
+    providerId: 'mock',
+    model: 'mock-no-sys',
+    title: '压缩与非System测试',
+  });
+
+  // Turn 1: 带 @app.ts:1-2 引用，且模型不支持 system 消息（走 mergeSystemIntoUser）
+  await server.sendMessage(session.id, '第一轮提问 @app.ts:1-2');
+  const sAfter1 = await server.getSession(session.id);
+  assert.equal(sAfter1.meta.turnSeq, 1);
+  const u1 = sAfter1.messages.find((m) => m.role === 'user');
+  assert.ok(u1 && u1.role === 'user');
+  assert.equal(u1.content, '第一轮提问 @app.ts:1-2', '非 System 模型的系统提示词与代码切片绝不能污染持久化 msg.content');
+  assert.ok(u1.id, '非 System 模型合入系统提示词后仍必须保留首条用户消息 id');
+  assert.match(u1.rangeContext ?? '', /line1/, '非 System 模型仍必须完整保留静态 rangeContext');
+
+  // Turn 2 & Turn 3
+  await server.sendMessage(session.id, '第二轮提问');
+  await server.sendMessage(session.id, '第三轮提问');
+  const sAfter3 = await server.getSession(session.id);
+  assert.equal(sAfter3.meta.turnSeq, 3);
+
+  // 为第 2 回合和第 3 回合分别登记快照
+  const userMsgsBeforeCompact = sAfter3.messages.filter((m) => m.role === 'user');
+  const internalMgr = (server as any).checkpoints as CheckpointManager;
+  const chkTurn2 = internalMgr.beginTurn({
+    sessionId: session.id,
+    workspaceRoot: '/wsA',
+    turnNumber: 2,
+    userMessageId: userMsgsBeforeCompact[1].id!,
+  });
+  await chkTurn2.recordFileChange({
+    callId: 'tc_turn2',
+    relPath: 'app.ts',
+    absPath: '/wsA/app.ts',
+    existedBefore: true,
+    beforeContent: 'v1',
+    afterContent: 'line1\nline2\nline3\n',
+  });
+  const chkTurn3 = internalMgr.beginTurn({
+    sessionId: session.id,
+    workspaceRoot: '/wsA',
+    turnNumber: 3,
+    userMessageId: userMsgsBeforeCompact[2].id!,
+  });
+  await chkTurn3.recordFileChange({
+    callId: 'tc_turn3',
+    relPath: 'app.ts',
+    absPath: '/wsA/app.ts',
+    existedBefore: true,
+    beforeContent: 'v2',
+    afterContent: 'line1\nline2\nline3\n',
+  });
+
+  // 执行上下文压缩（仅保留最近 1 轮，消息数组中的 user 消息数缩减为 2 条：归档摘要 + 第 3 轮）
+  await server.trimSessionHistory(session.id, 1);
+
+  // 压缩后发送第 4 轮：turnSeq 必须单调递增为 4（绝不因消息数缩水而倒退为 3）
+  await server.sendMessage(session.id, '压缩后的第四轮提问');
+  const sAfter4 = await server.getSession(session.id);
+  assert.equal(sAfter4.meta.turnSeq, 4, '压缩后新回合序号必须单调递增为 4');
+
+  // 为第 4 轮登记快照，然后调用 editLastUserMessage 编辑第 4 轮：
+  // 必须只清理第 4 轮的快照，绝不能误删压缩前第 2、3 轮的快照！
+  const lastUser4 = [...sAfter4.messages].reverse().find((m) => m.role === 'user')!;
+  const chkTurn4 = internalMgr.beginTurn({
+    sessionId: session.id,
+    workspaceRoot: '/wsA',
+    turnNumber: 4,
+    userMessageId: lastUser4.id!,
+  });
+  await chkTurn4.recordFileChange({
+    callId: 'tc_turn4',
+    relPath: 'app.ts',
+    absPath: '/wsA/app.ts',
+    existedBefore: true,
+    beforeContent: 'v3',
+    afterContent: 'line1\nline2\nline3\n',
+  });
+  assert.equal((await server.listTurnCheckpoints(session.id)).length, 3);
+
+  await server.editLastUserMessage(session.id, '编辑重发第四轮提问');
+  const remainingChks = await server.listTurnCheckpoints(session.id);
+  assert.deepEqual(
+    remainingChks.map((c) => c.turnNumber),
+    [2, 3],
+    '压缩后编辑最后一条消息，仅清理被截断的第 4 轮快照，第 2、3 轮快照完好保留',
+  );
+
+  // 3. P2: 跨工作区同名文件不产生错误冲突
+  // 将会话切换至 /wsB 并记录修改 /wsB/app.ts 的第 6 轮快照
+  await server.setSessionWorkspace(session.id, '/wsB');
+  const chkWsB = internalMgr.beginTurn({
+    sessionId: session.id,
+    workspaceRoot: '/wsB',
+    turnNumber: 6,
+    userMessageId: 'u_wsb_6',
+  });
+  await chkWsB.recordFileChange({
+    callId: 'tc_wsb',
+    relPath: 'app.ts',
+    absPath: '/wsB/app.ts',
+    existedBefore: true,
+    beforeContent: 'wsB_old',
+    afterContent: 'wsB_line1\n',
+  });
+
+  // 预览 /wsA 的第 3 轮快照：虽然第 6 轮也改了相对路径同名的 app.ts，但因属于 /wsB，绝不能误报为第 3 轮的后续冲突
+  const previewWsA3 = await server.previewTurnUndo(session.id, chkTurn3.turnId);
+  assert.equal(previewWsA3.hasConflicts, false, '不同工作区的同名文件修改绝不能触发冲突误报');
+  assert.equal(previewWsA3.files[0].modifiedInLaterTurns, false);
 });

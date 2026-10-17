@@ -660,7 +660,9 @@ export class AppStore {
   /** 执行回合快照回退并刷新会话时间线（支持 CAS 冲突返回供弹窗二次确认，P1 #3） */
   async executeTurnUndo(
     turnId: string,
-    optionsOrPaths?: { paths?: string[]; force?: boolean } | string[],
+    optionsOrPaths?:
+      | { paths?: string[]; force?: boolean; expectedFingerprints?: Record<string, string> }
+      | string[],
   ): Promise<{ ok: boolean; conflict?: boolean; error?: string }> {
     if (!this.activeId || !this.client.revertTurnCheckpoint) {
       return { ok: false, error: '当前环境不支持快照回退' };
@@ -1000,6 +1002,18 @@ export class AppStore {
     state.items = state.items
       .slice(0, idx + 1)
       .map((i) => (i.id === userItemId && i.kind === 'user' ? { ...i, text: text.trim() } : i));
+    // P2 #6：截断后续回合时，立即从前端视图状态移除属于被截断回合的快照
+    const retainedCallIds = new Set<string>();
+    for (const it of state.items) {
+      if (it.kind === 'turn') {
+        for (const sub of it.items) {
+          if (sub.kind === 'tool' && sub.callId) retainedCallIds.add(sub.callId);
+        }
+      }
+    }
+    state.checkpoints = state.checkpoints.filter((c) =>
+      c.toolCallIds.some((cid) => retainedCallIds.has(cid)),
+    );
     const turn: TurnItem = {
       kind: 'turn',
       id: this.nextId(),

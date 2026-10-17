@@ -421,13 +421,21 @@ export class AgentServer {
       createdAt?: string;
     };
     const newUserMsgId = `m_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-    const removedIds = rt.data.messages
-      .slice(idx)
-      .filter((m): m is Extract<ChatMessage, { role: 'user' }> => m.role === 'user')
-      .map((m) => m.id)
-      .filter((x): x is string => Boolean(x));
-    const retainedUserTurns = rt.data.messages.slice(0, idx).filter((m) => m.role === 'user').length;
-    await this.checkpoints.pruneCheckpointsFromTurn(id, retainedUserTurns + 1, removedIds);
+    const discardedSlice = rt.data.messages.slice(idx);
+    const removedUserIds: string[] = [];
+    const removedToolCallIds: string[] = [];
+    for (const m of discardedSlice) {
+      if (m.role === 'user' && m.id) {
+        removedUserIds.push(m.id);
+      } else if (m.role === 'assistant') {
+        for (const b of m.blocks) {
+          if (b.type === 'tool_call' && b.id) {
+            removedToolCallIds.push(b.id);
+          }
+        }
+      }
+    }
+    await this.checkpoints.pruneCheckpointsByIds(id, removedUserIds, removedToolCallIds);
     rt.data.messages[idx] = {
       role: 'user',
       content,
@@ -447,13 +455,25 @@ export class AgentServer {
     rt.running = true;
     rt.controller = new AbortController();
     let shadowPolicy: ShadowDecisionPolicy | undefined;
-    const originalUserContents = new Map<string, string>();
+    const cleanUserMap = new Map<
+      string,
+      { content: string; createdAt?: string; rangeContext?: string }
+    >();
     const userMessagesCount = rt.data.messages.filter((m) => m.role === 'user').length;
+    const turnNumber = await this.checkpoints.allocateTurnNumber(
+      id,
+      rt.data.meta.turnSeq,
+      Math.max(1, userMessagesCount),
+    );
+    rt.data.meta.turnSeq = turnNumber;
+    if (lastUserMessage && !lastUserMessage.id) {
+      lastUserMessage.id = `m_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+    }
     const turnTracker = this.checkpoints.beginTurn({
       sessionId: id,
       workspaceRoot: rt.data.meta.workspaceRoot,
-      turnNumber: Math.max(1, userMessagesCount),
-      userMessageId: lastUserMessage?.id ?? `u_${userMessagesCount}`,
+      turnNumber,
+      userMessageId: lastUserMessage?.id ?? `u_${turnNumber}`,
     });
     let wireMessages: ChatMessage[] | undefined;
     try {
@@ -502,6 +522,9 @@ export class AgentServer {
       let anyEnriched = false;
       for (const msg of rt.data.messages) {
         if (msg.role === 'user') {
+          if (!msg.id) {
+            msg.id = `m_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+          }
           if (msg.rangeContext === undefined) {
             if (rt.data.meta.workspaceRoot && parseCodeRangeMentions(msg.content).length > 0) {
               const { enrichedText, snippets } = await resolveCodeRangeMentions(
@@ -514,10 +537,12 @@ export class AgentServer {
               msg.rangeContext = '';
             }
           }
+          cleanUserMap.set(msg.id, {
+            content: msg.content,
+            createdAt: msg.createdAt,
+            rangeContext: msg.rangeContext,
+          });
           if (msg.rangeContext) {
-            const msgId = msg.id ?? `m_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
-            msg.id = msgId;
-            originalUserContents.set(msgId, msg.content);
             cloned.push({ ...msg, content: `${msg.content}${msg.rangeContext}` });
             anyEnriched = true;
             continue;
@@ -604,10 +629,13 @@ export class AgentServer {
       if (wireMessages && wireMessages !== rt.data.messages) {
         rt.data.messages = wireMessages;
       }
-      if (originalUserContents.size > 0) {
+      if (cleanUserMap.size > 0) {
         for (const msg of rt.data.messages) {
-          if (msg.role === 'user' && msg.id && originalUserContents.has(msg.id)) {
-            msg.content = originalUserContents.get(msg.id)!;
+          if (msg.role === 'user' && msg.id && cleanUserMap.has(msg.id)) {
+            const clean = cleanUserMap.get(msg.id)!;
+            msg.content = clean.content;
+            if (clean.createdAt !== undefined) msg.createdAt = clean.createdAt;
+            if (clean.rangeContext !== undefined) msg.rangeContext = clean.rangeContext;
           }
         }
       }
@@ -1462,7 +1490,7 @@ function mergeSystemIntoUser(messages: ChatMessage[], system: string): ChatMessa
   const first = messages[idx];
   const out = [...messages];
   if (first.role === 'user') {
-    out[idx] = { role: 'user', content: `${system}\n\n---\n\n${first.content}` };
+    out[idx] = { ...first, content: `${system}\n\n---\n\n${first.content}` };
   }
   return out;
 }

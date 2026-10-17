@@ -235,8 +235,12 @@ export const writeFileTool: Tool = {
       throw new Error(`覆盖已有文件前请先 read_file: ${rel}（防盲改保护）`);
     }
     const existedBefore = Boolean(stat && !stat.isDirectory);
+    const canSnapshot =
+      Boolean(onFileChange) &&
+      (!existedBefore || (stat?.size ?? 0) <= MAX_RANGE_FILE_BYTES) &&
+      content.length <= MAX_RANGE_FILE_BYTES;
     let beforeContent: string | null = null;
-    if (existedBefore && onFileChange) {
+    if (existedBefore && canSnapshot) {
       try {
         beforeContent = await host.fs.readFile(abs);
       } catch (err) {
@@ -248,7 +252,7 @@ export const writeFileTool: Tool = {
     const dir = host.paths.dirname(abs);
     if (dir && dir !== abs) await host.fs.mkdir(dir, { recursive: true });
     await host.fs.writeFile(abs, content);
-    if (onFileChange) {
+    if (canSnapshot && onFileChange) {
       await onFileChange({
         callId,
         relPath: rel,

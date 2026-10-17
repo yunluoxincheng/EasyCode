@@ -94,11 +94,18 @@ export function TurnUndoModal() {
   const handleConfirm = async () => {
     if (!preview || checkedPaths.size === 0 || submitting) return;
     if (selectedHasConflicts && !forceConfirmed) return;
+    const expectedFingerprints: Record<string, string> = {};
+    for (const f of preview.files) {
+      if (checkedPaths.has(f.path)) {
+        expectedFingerprints[f.path] = f.diskFingerprint;
+      }
+    }
     setSubmitting(true);
     try {
       const res = await store.executeTurnUndo(preview.turnId, {
         paths: [...checkedPaths],
         force: selectedHasConflicts && forceConfirmed,
+        expectedFingerprints,
       });
       // P1 #3：若打开弹窗期间文件被外部编辑器改动，Engine CAS 校验拦截返回 conflict，
       // 自动重新拉取最新冲突状态并要求用户二次确认强制覆盖

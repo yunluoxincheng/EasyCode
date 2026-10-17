@@ -40,7 +40,7 @@ EasyCode 作为开放、可扩展的桌面 Coding Agent，目前仅提供内置�
 
 ### 36. 回合级代码改动快照与一键回退（Turn Checkpoint & Safe Undo）
 
-**状态**：✅ 已完成（2026-10-12，经审查返工）——`write_file`/`edit_file` 执行成功后经 `onFileChange` 钩子向会话级 `CheckpointManager` 上报写前原始内容与写后新内容（`write_file` 读取原文件基准失败时中止覆盖以保护原文件；同一回合内多次修改同一文件严格保留首次触碰前的原始版本，回合内改回原样自动剔除净零变更，校验失败或审批拒绝零脏快照）+ 快照持久化于用户数据目录 `${dataDir}/checkpoints/${sessionId}.json`（单文件 2MB / 单会话 30 回合上限、会话删除同步清理、编辑最后一条提问截断时自动清理残留快照）+ 执行回退时严格按快照自身的 `workspaceRoot` 加锁并执行 CAS 乐观并发校验（偏离时需显式确认 `force` 强制覆盖，新建文件 `unlink` 经后置 `stat` 探活确认消亡，分多次部分回退全部恢复后自动标记整回合完成）+ 回合头部 `TurnView`「`↶ 撤销此回合改动`」按钮、右键菜单、`<TurnUndoModal>` 弹窗与 Composer `/undo` 快捷指令闭环
+**状态**：✅ 已完成（2026-10-12，两轮审查返工）——`write_file`/`edit_file` 执行成功后经 `onFileChange` 钩子向会话级 `CheckpointManager` 上报写前原始内容与写后新内容（`write_file` 读取原文件基准失败时中止覆盖以保护原文件；同一回合内多次修改同一文件严格保留首次触碰前的原始版本，回合内改回原样自动剔除净零变更，校验失败或审批拒绝零脏快照）+ 快照持久化于用户数据目录 `${dataDir}/checkpoints/${sessionId}.json`（单文件 2MB / 单会话 30 回合 / 总量 8MB 上限与临时文件安全写入、会话删除同步清理、会话级单调 `turnSeq` 防压缩后序号倒退、`editLastUserMessage` 按被截断消息与工具 ID 精确清理 `pruneCheckpointsByIds`）+ 执行回退时严格按快照自身的 `workspaceRoot` 加锁并执行双层 CAS 乐观并发校验（对比预览时刻磁盘指纹 `expectedFingerprints` 与回合结束快照；新建文件 `unlink` 经后置 `stat` 探活确认消亡；多文件回退中途失败逆序自动回滚已修改文件，回滚也失败则按真实磁盘状态落盘；支持分多次部分回退与恢复后再次修改动态复位）+ 回合头部 `TurnView`「`↶ 撤销此回合改动`」按钮、右键菜单、`<TurnUndoModal>` 弹窗与 Composer `/undo` 快捷指令闭环
 
 
 
