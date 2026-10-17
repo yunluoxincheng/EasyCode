@@ -388,7 +388,9 @@ export async function createTauriClient(options?: { reflexPolicy?: DecisionPolic
     reviewDecision: (sessionId, recordId, label) => server.reviewDecision(sessionId, recordId, label),
     runTestLoop: (id, options) => server.runTestLoop(id, options),
     detectSessionTestCommand: (id) => server.detectSessionTestCommand(id),
-    isProjectTrusted: async (workspaceRoot) => server.isProjectTrusted(workspaceRoot),
+    // 与 Electron / 浏览器 Demo 一致：走异步物理身份查询，
+    // 避免符号链接改指后设置页显示过期授权状态（PR #9 第九轮复审 P2）
+    isProjectTrusted: async (workspaceRoot) => server.getProjectTrust(workspaceRoot),
     setProjectTrust: (workspaceRoot, trusted) => server.setProjectTrust(workspaceRoot, trusted),
     countIgnoredProjectAllowRules: (workspaceRoot) =>
       server.countIgnoredProjectAllowRules(workspaceRoot),

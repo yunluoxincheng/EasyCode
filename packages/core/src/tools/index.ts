@@ -3,6 +3,7 @@ import { validateToolInput, type JsonSchema } from '../jsonschema.js';
 import type { ApprovalManager } from '../approval.js';
 import { startDecisionObservation, type DecisionPolicy, type DecisionOutcome } from '../policy.js';
 import {
+  describeCommandParseRisk,
   describePermissionRule,
   evaluatePermission,
   normalizeShellCommand,
@@ -330,7 +331,15 @@ export async function executeTool(
   // 其余情况仅敏感工具（写文件/执行命令）在 ask 模式下需要审批，只读工具直接放行。
   // 裁决语义统一收敛在 core 的 resolveApprovalRequirement，与引擎内置动作（test_loop）共用，
   // 杜绝两条链路各写一份判断而漂移
-  const requirement = resolveApprovalRequirement(permission, registry.isSensitive(name));
+  // 命令含无法可靠解析的结构时，归一化结果不可信（可能漏判 deny），
+  // 必须走保守审批而不是当作安全放行（PR #9 第九轮复审 P1）
+  const commandParseRisk =
+    name === 'run_command'
+      ? describeCommandParseRisk((validated.value as { command?: unknown }).command)
+      : null;
+  const requirement = resolveApprovalRequirement(permission, registry.isSensitive(name), {
+    parseRisk: commandParseRisk,
+  });
   const ruleAsk = requirement.force;
   const ruleAllow = permission?.decision === 'allow';
   // 审批请求展示真实目标：用户看到的是实际会被写入/读取的位置，而不是可能被替换的链接

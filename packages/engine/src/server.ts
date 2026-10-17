@@ -40,6 +40,7 @@ import {
   resolveCodeRangeMentions,
   parseCodeRangeMentions,
   detectTestCommand,
+  describeCommandParseRisk,
   describePermissionRule,
   evaluatePermission,
   resolveApprovalRequirement,
@@ -1898,7 +1899,10 @@ export class AgentServer {
 
       // 与常规工具调用共用同一套裁决语义（resolveApprovalRequirement）：
       // allow → 免审批（即使在 ask 模式）；ask → 强制审批（即使在 yolo 模式）；无命中 → 跟随会话模式
-      const requirement = resolveApprovalRequirement(verdict, true);
+      // 测试命令含无法可靠解析的结构时按保守策略强制审批（与 executeTool 同一语义）
+      const requirement = resolveApprovalRequirement(verdict, true, {
+        parseRisk: describeCommandParseRisk(detection.command),
+      });
       let approved = true;
       if (requirement.needApproval) {
         // 审批请求一旦发出，UI 就会建立运行态回合

@@ -61,13 +61,108 @@ const ENV_ASSIGN_HEAD_RE = /^[A-Za-z_][A-Za-z0-9_]*=/;
  * 绝不假装已经清洗干净——调用方不得把前缀匹配当作危险命令筛查的保证。
  */
 /**
+ * 消费一段 `$( ... )` 命令替换：返回结束位置（右括号之后），无法闭合返回 -1。
+ *
+ * 命令替换内部是完整的 Shell 上下文：可再嵌套 `$( )`、反引号与引号，且**允许空格**。
+ * 按空格截断会把 `FOO=$(printf x) rm -rf build` 归一化成 `x) rm -rf build`，
+ * 从而绕过针对 `rm` 的 deny 规则（PR #9 第九轮复审 P1）。
+ */
+function consumeCommandSubstitution(input: string, start: number): number {
+  // start 指向 `$`，其后必为 `(`
+  let i = start + 2;
+  let depth = 1;
+  while (i < input.length) {
+    const ch = input[i];
+    if (ch === '\\') {
+      i += 2;
+      continue;
+    }
+    if (ch === "'") {
+      const end = input.indexOf("'", i + 1);
+      if (end < 0) return -1;
+      i = end + 1;
+      continue;
+    }
+    if (ch === '"') {
+      i += 1;
+      let closed = false;
+      while (i < input.length) {
+        if (input[i] === '\\' && i + 1 < input.length) {
+          i += 2;
+          continue;
+        }
+        if (input[i] === '$' && input[i + 1] === '(') {
+          const nested = consumeCommandSubstitution(input, i);
+          if (nested < 0) return -1;
+          i = nested;
+          continue;
+        }
+        if (input[i] === '`') {
+          const nested = consumeBacktick(input, i);
+          if (nested < 0) return -1;
+          i = nested;
+          continue;
+        }
+        if (input[i] === '"') {
+          i += 1;
+          closed = true;
+          break;
+        }
+        i += 1;
+      }
+      if (!closed) return -1;
+      continue;
+    }
+    if (ch === '`') {
+      const end = consumeBacktick(input, i);
+      if (end < 0) return -1;
+      i = end;
+      continue;
+    }
+    if (ch === '$' && input[i + 1] === '(') {
+      const nested = consumeCommandSubstitution(input, i);
+      if (nested < 0) return -1;
+      i = nested;
+      continue;
+    }
+    if (ch === '(') {
+      depth += 1;
+      i += 1;
+      continue;
+    }
+    if (ch === ')') {
+      depth -= 1;
+      i += 1;
+      if (depth === 0) return i;
+      continue;
+    }
+    i += 1;
+  }
+  return -1;
+}
+
+/** 消费一段反引号命令替换：返回结束位置（闭合反引号之后），无法闭合返回 -1 */
+function consumeBacktick(input: string, start: number): number {
+  let i = start + 1;
+  while (i < input.length) {
+    if (input[i] === '\\' && i + 1 < input.length) {
+      i += 2;
+      continue;
+    }
+    if (input[i] === '`') return i + 1;
+    i += 1;
+  }
+  return -1;
+}
+
+/**
  * 从 `start` 开始消费一个完整的 Shell word，返回结束位置（指向分隔空白或字符串结尾）。
  *
- * Shell 中同一个 word 可以由引号片段与裸文本**拼接**而成：`FOO="a"b`、`FOO=x"a b"`
- * 都是一个赋值单词，赋值之后紧跟的才是命令。只识别「整段引号」或「整段裸值」会让
- * 这类写法漏过归一化（PR #9 第七轮复审 P1）。
+ * Shell 中同一个 word 可以由引号片段、命令替换与裸文本**拼接**而成：`FOO="a"b`、
+ * `FOO=$(printf x)`、`FOO=x"a b"` 都是一个赋值单词，赋值之后紧跟的才是命令。
+ * 只识别「整段引号」或「整段裸值」会让这类写法漏过归一化（PR #9 第七/九轮复审）。
  *
- * 返回 -1 表示引号未闭合：视为不可解析，调用方应原样返回而不声称已清洗。
+ * 返回 -1 表示不可解析（引号或命令替换未闭合）：调用方应原样返回而不声称已清洗。
  */
 function consumeShellWord(input: string, start: number): number {
   let i = start;
@@ -77,6 +172,18 @@ function consumeShellWord(input: string, start: number): number {
     if (ch === '\\') {
       // 裸文本或双引号内的反斜杠转义：连转义字符一起吞掉
       i += 2;
+      continue;
+    }
+    if (ch === '$' && input[i + 1] === '(') {
+      const end = consumeCommandSubstitution(input, i);
+      if (end < 0) return -1;
+      i = end;
+      continue;
+    }
+    if (ch === '`') {
+      const end = consumeBacktick(input, i);
+      if (end < 0) return -1;
+      i = end;
       continue;
     }
     if (ch === "'") {
@@ -93,6 +200,19 @@ function consumeShellWord(input: string, start: number): number {
       while (i < input.length) {
         if (input[i] === '\\' && i + 1 < input.length) {
           i += 2;
+          continue;
+        }
+        // 双引号内可以嵌套命令替换（内部允许空格）
+        if (input[i] === '$' && input[i + 1] === '(') {
+          const end = consumeCommandSubstitution(input, i);
+          if (end < 0) return -1;
+          i = end;
+          continue;
+        }
+        if (input[i] === '`') {
+          const end = consumeBacktick(input, i);
+          if (end < 0) return -1;
+          i = end;
           continue;
         }
         if (input[i] === '"') {
@@ -139,6 +259,85 @@ export function normalizeShellCommand(raw: unknown): string {
     cmd = stripEnvAssignments(wrapped[1].trim()).trim();
   }
   return cmd;
+}
+
+/**
+ * 扫描整条命令的引号 / 命令替换配平情况，返回人类可读的问题描述（无问题返回 null）。
+ *
+ * 归一化只处理「前缀可解析」的命令。一旦命令本身存在无法闭合的引号或 `$( )` /
+ * 反引号，任何归一化结果都不可信；把不可信的归一化当成「未命中规则」，
+ * 等于把危险命令当作安全放行（PR #9 第九轮复审 P1）。
+ */
+function scanShellBalance(input: string): string | null {
+  let i = 0;
+  while (i < input.length) {
+    const ch = input[i];
+    if (ch === '\\') {
+      i += 2;
+      continue;
+    }
+    if (ch === "'") {
+      const end = input.indexOf("'", i + 1);
+      if (end < 0) return '单引号未闭合';
+      i = end + 1;
+      continue;
+    }
+    if (ch === '"') {
+      i += 1;
+      let closed = false;
+      while (i < input.length) {
+        if (input[i] === '\\' && i + 1 < input.length) {
+          i += 2;
+          continue;
+        }
+        if (input[i] === '$' && input[i + 1] === '(') {
+          const end = consumeCommandSubstitution(input, i);
+          if (end < 0) return '命令替换 $( ) 未闭合';
+          i = end;
+          continue;
+        }
+        if (input[i] === '`') {
+          const end = consumeBacktick(input, i);
+          if (end < 0) return '反引号命令替换未闭合';
+          i = end;
+          continue;
+        }
+        if (input[i] === '"') {
+          i += 1;
+          closed = true;
+          break;
+        }
+        i += 1;
+      }
+      if (!closed) return '双引号未闭合';
+      continue;
+    }
+    if (ch === '$' && input[i + 1] === '(') {
+      const end = consumeCommandSubstitution(input, i);
+      if (end < 0) return '命令替换 $( ) 未闭合';
+      i = end;
+      continue;
+    }
+    if (ch === '`') {
+      const end = consumeBacktick(input, i);
+      if (end < 0) return '反引号命令替换未闭合';
+      i = end;
+      continue;
+    }
+    i += 1;
+  }
+  return null;
+}
+
+/**
+ * 命令是否无法被可靠归一化；无法解析时返回原因，可解析返回 null。
+ *
+ * 调用方必须对返回非 null 的命令走**保守审批**：不能因为归一化没命中规则就放行。
+ */
+export function describeCommandParseRisk(raw: unknown): string | null {
+  const cmd = typeof raw === 'string' ? raw.trim() : '';
+  if (!cmd) return null;
+  return scanShellBalance(cmd);
 }
 
 /** 转义正则元字符（单字符） */
@@ -451,7 +650,19 @@ export interface ApprovalRequirement {
 export function resolveApprovalRequirement(
   evaluation: PermissionEvaluation | null,
   sensitive: boolean,
+  options?: { parseRisk?: string | null },
 ): ApprovalRequirement {
+  // 命令含无法可靠解析的结构（未闭合引号 / 命令替换）时，归一化结果不可信：
+  // 此时「没命中 allow 规则」不代表安全，必须按保守策略强制审批。
+  // 优先级高于 allow——基于不可信归一化得出的免审批结论不能被采信。
+  const parseRisk = options?.parseRisk?.trim();
+  if (parseRisk && evaluation?.decision !== 'deny') {
+    return {
+      needApproval: true,
+      force: true,
+      reason: `命令含无法可靠解析的结构（${parseRisk}），已按保守策略要求审批`,
+    };
+  }
   if (evaluation?.decision === 'allow') return { needApproval: false, force: false };
   if (evaluation?.decision === 'ask') {
     return { needApproval: true, force: true, reason: describePermissionRule(evaluation.rule) };

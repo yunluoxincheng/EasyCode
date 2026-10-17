@@ -246,7 +246,10 @@ const handlers: Record<string, Handler> = {
   'review-decision': (args) => server.reviewDecision(args.sessionId, args.recordId, args.label),
   'run-test-loop': (args) => server.runTestLoop(args.id as string, args.options),
   'detect-session-test-command': (args) => server.detectSessionTestCommand(args.id as string),
-  'is-project-trusted': (args) => server.isProjectTrusted(args.workspaceRoot as string),
+  'is-project-trusted': (args) =>
+    // 必须用异步的物理身份查询：符号链接改指后词法路径不变，
+    // 同步版本只读缓存，设置页会显示过期的授权状态（PR #9 第九轮复审 P2）
+    server.getProjectTrust(args.workspaceRoot as string),
   'set-project-trust': (args) =>
     server.setProjectTrust(args.workspaceRoot as string, args.trusted as boolean),
   'count-ignored-project-allow': (args) =>

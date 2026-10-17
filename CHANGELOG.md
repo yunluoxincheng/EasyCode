@@ -13,6 +13,9 @@
 - 回合内 `[ TEST n/m ]` 测试卡片：展示命令与探测来源、用时、通过 / 失败 / 总数与失败用例清单，可展开查看原始输出尾部；收敛时按 `passed` / `max_rounds` / `aborted` / `error` 四态给出明确 toast（TODOS #39）
 
 ### 修复
+- **第九轮复审返工（P1 一项 + P2 一项）**：
+  - **Shell 命令替换仍能绕过 `deny` 前缀（P1）**：`consumeShellWord()` 处理了引号拼接，但不认识 `$( )` / 反引号，会把 `FOO=$(printf x) rm -rf build` 在命令替换内部的空格处截断，归一化成 `x) rm -rf build`，`deny rm` 因此不命中（真实 shell 确实执行 `rm`）。现新增 `consumeCommandSubstitution()` / `consumeBacktick()`：按嵌套深度完整消费命令替换（内部允许空格、可再嵌套、双引号内同样生效），反引号按闭合反引号消费。另新增 `describeCommandParseRisk()` 扫描整条命令的引号/替换配平；**无法可靠解析时不再当作「未命中即安全」**，`resolveApprovalRequirement()` 新增 `parseRisk` 入参，对这类命令强制审批（`executeTool` 与测试循环共用同一语义），`deny` 仍优先短路
+  - **桌面端信任查询仍用同步接口（P2）**：`desktop/main.ts` 的 `is-project-trusted` IPC 仍直接调用 `server.isProjectTrusted()`（只读缓存），Browser Demo 早已切到异步的 `getProjectTrust()`。工作区链接从 A 改指 B 后，设置页可能继续显示 A 的旧授权状态。现 Electron IPC 改调 `getProjectTrust()`；同类缺陷在主力壳 **Tauri 宿主适配层**同样存在，一并修正
 - **第八轮复审返工（P1 一项 + P2 两项）**：
   - **项目信任绑定词法路径，链接改指会转移授权（P1）**：`workspaceTrustKey()` 只做字符串归一，`isProjectTrusted()` 又是同步比较。于是 `ws-link -> projectA` 被授权后，链接改指 `projectB` 时词法键不变，给 A 的免审批权限被 B 继承，B 自带的项目级 `allow` 直接生效。现信任记录绑定 **`Host.fs.realpath()` 解析出的物理工作区身份**：授予/撤销时存物理路径，裁决入口 `resolvePermissionRules()` 先刷新身份再判定；同步 `isProjectTrusted()` 只读缓存，面向用户的查询改走新增的异步 `getProjectTrust()`（UI IPC 已切换）。改动中发现 `workspaceTrustKey` 未统一分隔符（`\` vs `/`）导致缓存索引与白名单永不相等，已统一到同一套归一化
   - **多个并发持久化任务时删除仍会复活（P2）**：`persistSession()` 用单个 `rt.persisting` 字段记录在途写入，第二个任务会覆盖第一个的引用，删除只等到最后一个，早先的写入随后完成又把文件创建回来。现改为**按会话串行化落盘**（`persistQueue` 链）+ 登记**全部**在途任务（`persisting` Set），删除时循环等待集合清空；任务轮到自己时再复核 `deleted`，排队期间被删也不会写回
@@ -72,7 +75,8 @@
 命令前缀权限规则是**命令级审批策略，不是进程级安全沙箱**：它按命令前缀匹配，无法阻止间接执行——`package.json` 的 `scripts.test` 内部可执行任意命令，此时被检查的是 `pnpm test` 而非展开后的每条语句；`a && b`、管道与脚本同样不在匹配范围内。该限制已在设置页「权限规则」面板与 README「安全设计」中明示，不将前缀匹配表述为沙箱防护。
 
 ### 测试
-- 全仓 **178 项测试通过**（约 4.8s）：新增权限规则单测（命令前缀词边界、环境变量前缀与 shell 包装解包、路径 glob 单段/跨目录、`deny > ask > allow` 裁决、非法条目跳过）、`executeTool` 三态短路（deny 不弹审批、allow 在 ask 模式免审批、ask 在 yolo 模式强制审批并携带规则来源）、测试输出解析与失败摘录（含 Node spec / TAP 两种 reporter 与 `# TODO`/`# SKIP` 排除）、自愈循环五态（首轮全绿、失败→修复→重跑、轮次耗尽、中止、异常收敛）、`AgentServer.runTestLoop` 集成（项目级 `.easycode/test.json` + `permissions.json`、不可信测试命令被 deny 拦截、ask 规则在 YOLO 下强制审批、修复回合被停止后不再跑下一轮）、审批时序四项回归（同步应答不丢失、同步拒绝、`force` 语义、`denyAll` 中止路径、订阅者抛错不悬挂）
+- 全仓 **185 项测试通过**（约 4.8s）：新增权限规则单测（命令前缀词边界、环境变量前缀与 shell 包装解包、路径 glob 单段/跨目录、`deny > ask > allow` 裁决、非法条目跳过）、`executeTool` 三态短路（deny 不弹审批、allow 在 ask 模式免审批、ask 在 yolo 模式强制审批并携带规则来源）、测试输出解析与失败摘录（含 Node spec / TAP 两种 reporter 与 `# TODO`/`# SKIP` 排除）、自愈循环五态（首轮全绿、失败→修复→重跑、轮次耗尽、中止、异常收敛）、`AgentServer.runTestLoop` 集成（项目级 `.easycode/test.json` + `permissions.json`、不可信测试命令被 deny 拦截、ask 规则在 YOLO 下强制审批、修复回合被停止后不再跑下一轮）、审批时序四项回归（同步应答不丢失、同步拒绝、`force` 语义、`denyAll` 中止路径、订阅者抛错不悬挂）
+- **第九轮复审新增 7 项回归**：`$( )` / 反引号 / 嵌套 / 双引号内 / 拼接尾随等赋值前缀全部归一化为真实命令并被 `deny` 命中，且不被误判为不可解析（反证：退回第八轮实现时三项失败）；`describeCommandParseRisk` 识别未闭合引号与未闭合命令替换，`resolveApprovalRequirement` 对其强制审批、`deny` 仍优先（反证：`executeTool` 忽略 `parseRisk` 时该用例失败）；`executeTool` 在 yolo 模式下仍对不可解析命令弹审批、可解析命令不额外弹窗；真实 `bash -c` 确认命令替换写法执行的是赋值后的程序；桌面端/主力端信任查询源码级断言必须走 `getProjectTrust`（反证：Electron IPC 退回同步方法时失败）；链接改指后 `getProjectTrust` 立即返回未信任
 - **第八轮复审新增 5 项回归（真实文件系统 + 确定性闸门）**：信任链接的 A 后改指 B → B 的 `getProjectTrust` 为 false 且项目级 `allow` 不生效、对 B 显式授权后恢复生效（反证：不刷新物理身份时该用例失败）；撤销信任落到物理项目且不误伤其它项目；**多并发落盘 + 删除** → 用「只放行后进入的写入」构造乱序完成，断言删除落定后不再有任何会话写入、文件不存在（反证：退回单槽登记 + 无串行化 + 无 deleted 复核时文件被重新创建）；**权限规则加载期间点停止**不得再发审批且不执行测试（反证：去掉复核后会挂起至超时）；`ApprovalManager` 感知 `signal`——中止按拒绝收敛、已中止不新建请求
 - **第七轮复审新增 5 项回归**：拼接式赋值前缀（`FOO="a"b` / `FOO=x"a b"` / 三段拼接 / 转义引号）全部归一化为真实命令并被 `deny` 命中（已实测反证：退回旧逻辑时该用例必然失败）、词边界与未闭合引号语义不变；**修复回合落盘等待期间点停止**——用可控闸门精确卡在 `persistSession` 内再 `abort()`，断言结果为 `aborted` 且测试只执行过一轮（反证：不继承循环 controller 时会跑完并报 passed）；**启动阶段删除会话**——断言会话不回到会话表、文件不被写回、循环不再执行测试；**运行中删除会话**——断言文件不复活（反证：去掉 `deleted` 守卫与在途落盘等待后文件会被重新创建）
 - **第六轮复审新增 4 项回归（真实文件系统）**：`AGENTS.md -> 工作区外` 被忽略而普通 `AGENTS.md` 正常加载、`.easycode/prompts/*.md` 越界模板被跳过而正常模板仍可用、信任撤销后全量保存其它设置不恢复授权（授权只经 `setProjectTrust` 变更）、**工作区根本身是符号链接**时审批期间改指到另一项目必须拒绝（已实测反证：仅比相对路径时该用例必然失败，另一个项目文件保持原样）
@@ -90,6 +94,7 @@
 - **第六轮复审证据复验（17/17 通过，真实 Runtime + 真实符号链接）**：① `AGENTS.md -> 工作区外` 被 `getProjectRules()` 忽略（返回 null），独立工作区的普通 `AGENTS.md` 仍正常加载且不含外部内容；② `.easycode/prompts/leak.md -> 工作区外` 被跳过，只剩正常模板且不含外部内容；③ 信任 → 撤销 → 全量保存其它设置后 `isProjectTrusted` 仍为 `false`、`maxSteps` 正常更新、项目 `allow` 仍被忽略；④ 工作区根为 junction 时，审批期间改指到另一项目后写入被拒绝，**另一个项目的文件原样保留**；⑤ 真实 `node --test` 两轮自愈链路不受影响
 - **第七轮复审证据复验（16/16 通过，真实 `bash` + 真实 Runtime）**：① 三种拼接前缀写法先用真实 `bash -c` 确认确实执行赋值后的程序，再断言归一化为 `rm -rf build` 且 `deny` 端点裁决生效；② 真实 `node --test` 两轮自愈链路不受影响、无内部 `done` 外泄、`test_loop_done` 唯一、会话回到空闲；③ 运行中 `abort()` 后结果为 `aborted` 且会话空闲；④ 删除正在运行的测试循环后会话文件不存在、会话不在列表
 - **第八轮复审证据复验（18/18 通过，真实 Runtime + 真实符号链接）**：① 对链接路径授予信任后设置里存的是**物理路径**（`.../projA`），A 的项目级 `allow` 生效；② 链接改指 `projB` 后 `getProjectTrust` 为 `false` 且 B 的项目级 `allow` **不生效**（规则集为空数组）；③ 按物理路径直接查询 A 仍为信任（授权确实落在 A 上，不是被整体废掉）；④ 撤销信任落到物理项目 B、A 不受影响；⑤ 真实 `node --test` 两轮自愈链路不受影响、无内部 `done` 外泄、`test_loop_done` 唯一；⑥ 运行中 `abort()` 结果为 `aborted` 且会话空闲；⑦ 删除运行中的会话后文件不存在、会话不在列表
+- **第九轮复审证据复验（22/22 通过，真实 Runtime + 真实 `bash` + 真实符号链接）**：①–③ 四类命令替换前缀（`$( )`、含空格、嵌套、反引号）先用真实 `bash -c` 确认执行的是赋值后的程序，再断言归一化为 `rm -rf build` 且 `deny` 命中；④ 未闭合引号被识别为不可解析，yolo 模式下仍强制弹审批、拒绝后不执行，而可解析命令不额外弹窗；⑤ 真实 `node --test` 两轮自愈链路不受影响、无内部 `done` 外泄、`test_loop_done` 唯一；⑥ 链接改指后 `getProjectTrust` 立即返回未信任（不依赖其它刷新动作）
 
 ## [0.1.24] - 2026-10-12
 
