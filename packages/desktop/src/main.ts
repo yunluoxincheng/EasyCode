@@ -209,7 +209,21 @@ const handlers: Record<string, Handler> = {
   'list-provider-models': (args) => server.listProviderModels(args.id),
   'test-provider-model': (args) => server.testProviderModel(args.id, args.model),
   'test-web-search': () => server.testWebSearch(),
-  'list-workspace-files': (args) => server.listWorkspaceFiles(args.id as string, args.query as string | undefined),
+  'list-workspace-files': (args) =>
+    server.listWorkspaceFiles(
+      args.id as string,
+      args.query as string | undefined,
+      args.limit as number | undefined,
+    ),
+  'read-workspace-file': (args) => server.readWorkspaceFile(args.id as string, args.relPath as string),
+  'list-turn-checkpoints': (args) => server.listTurnCheckpoints(args.id as string),
+  'preview-turn-undo': (args) => server.previewTurnUndo(args.id as string, args.turnId as string | undefined),
+  'revert-turn-checkpoint': (args) =>
+    server.revertTurnCheckpoint(
+      args.id as string,
+      args.turnId as string | undefined,
+      (args.options ?? args.paths) as any,
+    ),
   'get-project-rules': (args) => server.getSessionProjectRules(args.id as string),
   'init-project-rules': (args) => server.initSessionProjectRules(args.id as string),
   'list-custom-prompts': (args) => server.listSessionCustomPrompts(args.id as string),

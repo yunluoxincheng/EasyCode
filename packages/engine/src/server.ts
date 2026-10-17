@@ -35,6 +35,9 @@ import {
   BackgroundTaskManager,
   type BackgroundTaskInfo,
   type SpawnedProcessInfo,
+  resolveWorkspacePath,
+  resolveCodeRangeMentions,
+  parseCodeRangeMentions,
 } from '@easycode/core';
 import { Settings, DEFAULT_SETTINGS, PROVIDER_PRESETS } from './settings.js';
 import type { ModelTestResult, ProviderEntry, ProviderModel, ProviderModelInfo } from './settings.js';
@@ -43,6 +46,33 @@ import { buildSystemPrompt } from './prompts.js';
 import { WorkspaceLockManager } from './workspace-lock.js';
 import { DecisionStatsManager } from './stats.js';
 import { ShadowDecisionPolicy } from './shadow.js';
+import {
+  CheckpointManager,
+  type TurnCheckpointSummary,
+  type TurnUndoPreview,
+  type TurnUndoFilePreview,
+  type RevertTurnOptions,
+} from './checkpoints.js';
+
+export type { TurnCheckpointSummary, TurnUndoPreview, TurnUndoFilePreview, RevertTurnOptions };
+
+/** 回合快照回退执行结果（TODOS #36） */
+export interface TurnUndoResult {
+  turnId: string;
+  turnNumber: number;
+  revertedPaths: string[];
+  checkpoints: TurnCheckpointSummary[];
+  session: SessionData;
+}
+
+/** 工作区文件轻量预览结果（TODOS #38） */
+export interface WorkspaceFilePreview {
+  path: string;
+  content: string;
+  totalLines: number;
+  size: number;
+  truncated: boolean;
+}
 
 export interface CreateSessionOptions {
   /** 可选：不填则创建纯对话会话，之后可随时绑定 */
@@ -94,12 +124,14 @@ export class AgentServer {
   /** 会话绑定的后台任务池（TODOS #37）：懒创建，会话删除/应用退出统一清场 */
   private readonly bgManagers = new Map<string, BackgroundTaskManager>();
   private readonly decisionStats: DecisionStatsManager;
+  private readonly checkpoints: CheckpointManager;
   private reflexPolicy: DecisionPolicy = new NoopDecisionPolicy();
   private settings: Settings = structuredClone(DEFAULT_SETTINGS);
   private settingsLoaded = false;
 
   constructor(private readonly host: Host) {
     this.decisionStats = new DecisionStatsManager(host);
+    this.checkpoints = new CheckpointManager(host);
   }
 
   /** 注入端侧真实决策推理策略（如 WebOnnxPolicy 或 LocalOnnxPolicy） */
@@ -333,6 +365,7 @@ export class AgentServer {
     try {
       await this.host.fs.unlink?.(this.sessionFile(id));
       await this.decisionStats.deleteSessionRecords(id);
+      await this.checkpoints.deleteSessionCheckpoints(id);
     } catch {
       // 忽略
     }
@@ -387,7 +420,28 @@ export class AgentServer {
       id?: string;
       createdAt?: string;
     };
-    rt.data.messages[idx] = { role: 'user', content, id: old.id, createdAt: old.createdAt };
+    const newUserMsgId = `m_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    const discardedSlice = rt.data.messages.slice(idx);
+    const removedUserIds: string[] = [];
+    const removedToolCallIds: string[] = [];
+    for (const m of discardedSlice) {
+      if (m.role === 'user' && m.id) {
+        removedUserIds.push(m.id);
+      } else if (m.role === 'assistant') {
+        for (const b of m.blocks) {
+          if (b.type === 'tool_call' && b.id) {
+            removedToolCallIds.push(b.id);
+          }
+        }
+      }
+    }
+    await this.checkpoints.pruneCheckpointsByIds(id, removedUserIds, removedToolCallIds);
+    rt.data.messages[idx] = {
+      role: 'user',
+      content,
+      id: newUserMsgId,
+      createdAt: new Date().toISOString(),
+    };
     rt.data.messages = rt.data.messages.slice(0, idx + 1);
     rt.data.meta.updatedAt = new Date().toISOString();
     await this.runTurn(rt);
@@ -401,6 +455,26 @@ export class AgentServer {
     rt.running = true;
     rt.controller = new AbortController();
     let shadowPolicy: ShadowDecisionPolicy | undefined;
+    const cleanUserMap = new Map<
+      string,
+      { content: string; createdAt?: string; rangeContext?: string }
+    >();
+    const userMessagesCount = rt.data.messages.filter((m) => m.role === 'user').length;
+    const turnNumber = await this.checkpoints.allocateTurnNumber(
+      id,
+      rt.data.meta.turnSeq,
+      Math.max(1, userMessagesCount),
+    );
+    rt.data.meta.turnSeq = turnNumber;
+    if (lastUserMessage && !lastUserMessage.id) {
+      lastUserMessage.id = `m_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+    }
+    const turnTracker = this.checkpoints.beginTurn({
+      sessionId: id,
+      workspaceRoot: rt.data.meta.workspaceRoot,
+      turnNumber,
+      userMessageId: lastUserMessage?.id ?? `u_${turnNumber}`,
+    });
     let wireMessages: ChatMessage[] | undefined;
     try {
       const entry = this.settings.providers[rt.data.meta.providerId];
@@ -441,10 +515,48 @@ export class AgentServer {
           globalRules: this.settings.globalRules,
         },
       });
-      wireMessages =
-        caps.includes('system') || !systemPrompt
-          ? rt.data.messages
-          : mergeSystemIntoUser(rt.data.messages, systemPrompt);
+      // TODOS #38 (P2 #7 修复)：代码行范围引用仅在消息首次发送时解析并固化至 msg.rangeContext，
+      // 后续轮次直接复用发送时的静态切片快照，杜绝跨轮次重复磁盘读取与历史上下文漂移
+      let baseMessages: ChatMessage[] = rt.data.messages;
+      const cloned: ChatMessage[] = [];
+      let anyEnriched = false;
+      for (const msg of rt.data.messages) {
+        if (msg.role === 'user') {
+          if (!msg.id) {
+            msg.id = `m_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+          }
+          if (msg.rangeContext === undefined) {
+            if (rt.data.meta.workspaceRoot && parseCodeRangeMentions(msg.content).length > 0) {
+              const { enrichedText, snippets } = await resolveCodeRangeMentions(
+                this.host,
+                rt.data.meta.workspaceRoot,
+                msg.content,
+              );
+              msg.rangeContext = snippets.length > 0 ? enrichedText.slice(msg.content.length) : '';
+            } else {
+              msg.rangeContext = '';
+            }
+          }
+          cleanUserMap.set(msg.id, {
+            content: msg.content,
+            createdAt: msg.createdAt,
+            rangeContext: msg.rangeContext,
+          });
+          if (msg.rangeContext) {
+            cloned.push({ ...msg, content: `${msg.content}${msg.rangeContext}` });
+            anyEnriched = true;
+            continue;
+          }
+        }
+        cloned.push(msg);
+      }
+      if (anyEnriched) baseMessages = cloned;
+      wireMessages = (!systemPrompt || caps.includes('system'))
+          ? baseMessages
+          : mergeSystemIntoUser(baseMessages, systemPrompt);
+
+
+
 
       // 装配微型决策策略（TODOS #40：Shadow Mode 旁路观测）
       // 门控：仅当用户开启 reflexShadowMode 开关时挂载，关闭时 policy 为 undefined（零 CPU 额外计算、零日志写入）
@@ -472,6 +584,12 @@ export class AgentServer {
         approval: rt.approval,
         policy,
         backgroundTasks: await this.bgManagerFor(id),
+        onFileChange: async (change) => {
+          if (rt.data.meta.workspaceRoot) {
+            this.workspaceFilesCache.delete(rt.data.meta.workspaceRoot);
+          }
+          await turnTracker.recordFileChange(change);
+        },
         emit: (event) => {
           if (event.type === 'step_end') {
             // 累计会话用量并随事件下发（持久化在会话文件中）
@@ -510,6 +628,16 @@ export class AgentServer {
       await shadowPolicy?.drain();
       if (wireMessages && wireMessages !== rt.data.messages) {
         rt.data.messages = wireMessages;
+      }
+      if (cleanUserMap.size > 0) {
+        for (const msg of rt.data.messages) {
+          if (msg.role === 'user' && msg.id && cleanUserMap.has(msg.id)) {
+            const clean = cleanUserMap.get(msg.id)!;
+            msg.content = clean.content;
+            if (clean.createdAt !== undefined) msg.createdAt = clean.createdAt;
+            if (clean.rangeContext !== undefined) msg.rangeContext = clean.rangeContext;
+          }
+        }
       }
       rt.running = false;
       rt.controller = undefined;
@@ -1234,6 +1362,121 @@ export class AgentServer {
   ): Promise<void> {
     return this.decisionStats.reviewDecision(sessionId, recordId, label);
   }
+
+  /* -------------------- 回合级代码改动快照与一键回退 (TODOS #36) -------------------- */
+
+  /** 列出会话内所有包含代码改动的回合快照摘要 */
+  async listTurnCheckpoints(sessionId: string): Promise<TurnCheckpointSummary[]> {
+    this.requireSession(sessionId);
+    return this.checkpoints.listCheckpoints(sessionId);
+  }
+
+  /** 生成回合撤销预览与冲突检测报告（供 <TurnUndoModal> 渲染对比 Diff 与冲突告警） */
+  async previewTurnUndo(sessionId: string, turnId?: string): Promise<TurnUndoPreview> {
+    this.requireSession(sessionId);
+    return this.checkpoints.previewUndo(sessionId, turnId);
+  }
+
+  /**
+   * 撤销指定回合（或最近一个改动回合）的代码修改，将文件恢复至该回合修改前状态，
+   * 并自动向当前会话追加一条系统回退通知消息。
+   */
+  async revertTurnCheckpoint(
+    sessionId: string,
+    turnId?: string,
+    optionsOrPaths?: RevertTurnOptions | string[],
+  ): Promise<TurnUndoResult> {
+    const rt = this.requireSession(sessionId);
+    if (rt.running) {
+      throw new Error('会话正在运行中，请先等待完成或点击停止');
+    }
+
+    // P1 #1：先解析目标快照，严格按快照记录的 workspaceRoot 加锁并失效缓存
+    const targetRecord = await this.checkpoints.getTargetRecord(sessionId, turnId);
+    const targetWorkspace = targetRecord.workspaceRoot?.trim();
+    const doRevert = () =>
+      this.checkpoints.revertTurn(sessionId, targetRecord.turnId, optionsOrPaths);
+    const { record, revertedPaths } = targetWorkspace
+      ? await this.workspaceLocks.getLock(targetWorkspace).withLock(doRevert)
+      : await doRevert();
+
+    if (targetWorkspace) {
+      this.workspaceFilesCache.delete(targetWorkspace);
+    }
+    if (rt.data.meta.workspaceRoot && rt.data.meta.workspaceRoot !== targetWorkspace) {
+      this.workspaceFilesCache.delete(rt.data.meta.workspaceRoot);
+    }
+
+    const pathListStr = revertedPaths.map((p) => `\`${p}\``).join('、');
+    const noticeText = `> **[系统通知 · 快照回退]** 已撤销第 ${record.turnNumber} 回合的文件变更（恢复至修改前状态）：${pathListStr}`;
+    const lastMsg = rt.data.messages[rt.data.messages.length - 1];
+    if (lastMsg && lastMsg.role === 'assistant') {
+      lastMsg.blocks.push({
+        type: 'text',
+        text: `\n\n${noticeText}`,
+      });
+    } else {
+      rt.data.messages.push({
+        role: 'assistant',
+        blocks: [{ type: 'text', text: noticeText }],
+        id: `m_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+        createdAt: new Date().toISOString(),
+      });
+    }
+
+    rt.data.meta.updatedAt = new Date().toISOString();
+    await this.persistSession(rt);
+    const checkpoints = await this.checkpoints.listCheckpoints(sessionId);
+    return {
+      turnId: record.turnId,
+      turnNumber: record.turnNumber,
+      revertedPaths,
+      checkpoints,
+      session: rt.data,
+    };
+  }
+
+  /* -------------------- 工作区文件轻量预览 (TODOS #38) -------------------- */
+
+  /** 读取工作区指定相对路径文件内容（供工作区文件树单击预览与行范围框选引用） */
+  async readWorkspaceFile(sessionId: string, relPath: string): Promise<WorkspaceFilePreview> {
+    const rt = this.requireSession(sessionId);
+    const root = rt.data.meta.workspaceRoot?.trim();
+    if (!root) throw new Error('当前会话未绑定工作区');
+    const cleanRel = relPath.replace(/\\/g, '/').replace(/^\.\//, '');
+    const abs = resolveWorkspacePath(root, cleanRel, this.host);
+    const stat = await this.host.fs.stat(abs);
+    if (!stat) throw new Error(`文件不存在: ${cleanRel}`);
+    if (stat.isDirectory) throw new Error(`目标是目录，无法作为文件预览: ${cleanRel}`);
+    const maxFileBytes = 2 * 1024 * 1024;
+    if (stat.size > maxFileBytes) {
+      throw new Error(
+        `文件体积过大 (${(stat.size / 1024 / 1024).toFixed(2)} MB > 2 MB)，请使用外部编辑器打开: ${cleanRel}`,
+      );
+    }
+    let raw = await this.host.fs.readFile(abs);
+    if (raw.includes('\u0000')) {
+      throw new Error(`疑似二进制文件，无法以文本预览: ${cleanRel}`);
+    }
+    const maxBytes = 128 * 1024;
+    let truncated = false;
+    if (raw.length > maxBytes) {
+      raw = raw.slice(0, maxBytes);
+      truncated = true;
+    }
+    const content = raw.replace(/\r\n/g, '\n');
+    const totalLines = content.split('\n').length;
+    return {
+      path: cleanRel,
+      content,
+      totalLines,
+      size: stat.size,
+      truncated,
+    };
+  }
+
+  private _noopReviewEnd(): void {
+  }
 }
 
 function num(v: unknown): number | undefined {
@@ -1247,7 +1490,7 @@ function mergeSystemIntoUser(messages: ChatMessage[], system: string): ChatMessa
   const first = messages[idx];
   const out = [...messages];
   if (first.role === 'user') {
-    out[idx] = { role: 'user', content: `${system}\n\n---\n\n${first.content}` };
+    out[idx] = { ...first, content: `${system}\n\n---\n\n${first.content}` };
   }
   return out;
 }

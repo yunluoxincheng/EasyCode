@@ -60,6 +60,14 @@ export const BUILTIN_SLASH_COMMANDS: SlashCommand[] = [
 
   // 动作执行类（前端直接触发，零 Token 消耗）
   {
+    id: 'undo',
+    name: '/undo',
+    description: '撤销最近一个回合的代码改动（恢复修改前快照）',
+    kind: 'action',
+    category: 'code',
+    badge: '[回退]',
+  },
+  {
     id: 'compact',
     name: '/compact',
     description: '立即压缩上下文并归档早期历史',

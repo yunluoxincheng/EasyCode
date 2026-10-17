@@ -90,6 +90,7 @@ export async function createTauriHost(): Promise<Host> {
       readdir: (p) => invoke<FsDirent[]>('fs_readdir', { path: p }),
       stat: (p) => invoke<FsDirent extends never ? never : { isDirectory: boolean; size: number; mtimeMs: number } | null>('fs_stat', { path: p }),
       unlink: (p) => invoke<void>('fs_unlink', { path: p }),
+      rename: (from, to) => invoke<void>('fs_rename', { from, to }),
     },
     process: {
       run: async (command, opts) => {
@@ -350,7 +351,12 @@ export async function createTauriClient(options?: { reflexPolicy?: DecisionPolic
     listProviderModels: (id) => server.listProviderModels(id),
     testProviderModel: (id, model) => server.testProviderModel(id, model),
     testWebSearch: () => server.testWebSearch(),
-    listWorkspaceFiles: (id, query) => server.listWorkspaceFiles(id, query),
+    listWorkspaceFiles: (id, query, limit) => server.listWorkspaceFiles(id, query, limit),
+    readWorkspaceFile: (id, relPath) => server.readWorkspaceFile(id, relPath),
+    listTurnCheckpoints: (id) => server.listTurnCheckpoints(id),
+    previewTurnUndo: (id, turnId) => server.previewTurnUndo(id, turnId),
+    revertTurnCheckpoint: (id, turnId, optionsOrPaths) =>
+      server.revertTurnCheckpoint(id, turnId, optionsOrPaths),
     getProjectRules: (id) => server.getSessionProjectRules(id),
     initProjectRules: (id) => server.initSessionProjectRules(id),
     listCustomPrompts: (id) => server.listSessionCustomPrompts(id),

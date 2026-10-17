@@ -732,6 +732,7 @@ function TurnView({ turn }: { turn: TurnItem }) {
     .slice()
     .reverse()
     .find((i): i is ToolItem => i.kind === 'tool' && i.name === 'todo_write');
+  const checkpoint = !live ? store.getTurnCheckpointForTurn(turn) : undefined;
   const turnTodos = (() => {
     if (!latestTodoTool) return null;
     const i = (latestTodoTool.input ?? {}) as { todos?: TodoItem[] };
@@ -762,6 +763,24 @@ function TurnView({ turn }: { turn: TurnItem }) {
           </span>
         </button>
         <span className="spacer" />
+        {checkpoint && !live && (
+          <button
+            className={`turn-undo-btn ${checkpoint.revertedAt ? 'reverted' : ''}`}
+            title={
+              checkpoint.revertedAt
+                ? `该回合 ${checkpoint.files.length} 个文件改动已回退（点击可检视详情）`
+                : `撤销此回合修改的 ${checkpoint.files.length} 个文件（安全恢复至回合前快照）`
+            }
+            onClick={(e) => {
+              e.stopPropagation();
+              store.openTurnUndoModal(checkpoint.turnId);
+            }}
+          >
+            {checkpoint.revertedAt
+              ? `[ 已撤销 · ${checkpoint.files.length} ]`
+              : `↶ 撤销此回合改动 (${checkpoint.files.length})`}
+          </button>
+        )}
         {!live && (
           <button
             className="turn-fork-btn"

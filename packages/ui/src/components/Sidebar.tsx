@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { useStore } from '../useStore.js';
 import { UpdateBadge } from './UpdateBadge.js';
+import { WorkspaceFileTree } from './WorkspaceFileTree.js';
 
 type SessionMetaLite = {
   id: string;
@@ -479,6 +480,8 @@ export function Sidebar() {
           </div>
         )}
       </nav>
+
+      <WorkspaceFileTree />
 
       <div className="sidebar-bottom">
         <div className="sidebar-bottom-row">

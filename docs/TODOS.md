@@ -40,7 +40,9 @@ EasyCode 作为开放、可扩展的桌面 Coding Agent，目前仅提供内置�
 
 ### 36. 回合级代码改动快照与一键回退（Turn Checkpoint & Safe Undo）
 
-**状态**：⏳ 待办（规划中）
+**状态**：✅ 已完成（2026-10-12，五轮审查返工）——`write_file`/`edit_file` 执行成功后经 `onFileChange` 钩子向会话级 `CheckpointManager` 上报写前原始内容与写后新内容（`write_file` 读取原文件基准失败时中止覆盖以保护原文件；若工作区写入后 `onFileChange` 快照落盘或单回合 8MB 容量校验失败则立即自动回滚工作区文件与内存缓存，绝不留下未受保护的改动；同一回合内多次修改同一文件严格保留首次触碰前的原始版本，回合内改回原样自动剔除净零变更，校验失败或审批拒绝零脏快照）+ 快照持久化于用户数据目录 `${dataDir}/checkpoints/${sessionId}.json`（通过同目录 `.tmp` + `host.fs.rename` 原子替换提交，写入或 `rename` 失败时清理未提交 `.tmp` 且无正式文件时拒绝晋升残留未提交 `.tmp`；`loadSessionRecords` 严格区分不存在/读取失败/JSON 损坏并拒绝静默清空；单文件 2MB / 单会话 30 回合 / 单回合及总容量 8MB 硬上限、会话删除同步清理、会话级单调 `turnSeq` 防压缩后序号倒退、`editLastUserMessage` 按被截断消息与工具 ID 精确清理 `pruneCheckpointsByIds`）+ 双宿主 `stat()` 仅在明确不存在（`ENOENT`/`NotFound`）时返回 `null`，其余权限异常向上抛出；`revertTurn` 预检无条件拒绝不可访问或不可读文件（即使 `force=true` 亦拒绝，彻底移除 `?? ''` 兜底防清空），执行回退严格按快照自身的 `workspaceRoot` 加锁并执行双层 CAS 乐观并发校验（对比预览时刻磁盘指纹 `expectedFingerprints` 与回合结束快照，且排除后续回合中已单独撤销的文件不误报冲突；新建文件 `unlink` 经后置 `stat` 探活确认消亡；多文件回退中途失败或最终持久化 `revertedAt` 失败时将当前 `inFlight` 部分写入文件与已修改前序文件一并纳入逆序补偿恢复，无法恢复时明确告警受损或部分完成状态）+ 回合头部 `TurnView`「`↶ 撤销此回合改动`」按钮、右键菜单、`<TurnUndoModal>` 弹窗与 Composer `/undo` 快捷指令闭环
+
+
 
 **背景**：
 在多轮复杂编码任务中，Agent 经常跨多个文件进行大规模修改（`edit_file` / `write_file`）或执行命令。然而，当大模型的实现方向偏离预期、误删逻辑或引入回归缺陷时，用户面临极大的挽救成本：
@@ -104,7 +106,9 @@ EasyCode 作为开放、可扩展的桌面 Coding Agent，目前仅提供内置�
 
 ### 38. 工作区轻量文件树与代码行范围引用（Workspace Tree & Range Mention）
 
-**状态**：⏳ 待办（规划中）
+**状态**：✅ 已完成（2026-10-12，经审查返工）——Core/Engine 新增 `parseCodeRangeMentions`、`resolveCodeRangeMentions` 与 `formatFileMention`（支持 `@path/to/file.ts:50-100` 区间与 `@path/to/file.ts:35` 单行引用、含空格路径统一自动加双引号转义、逆序行号自动归一化、防邮箱与 URL 端口误判；前置 2MB `stat.size` 拦截与单行/单片段字符上限；在消息首次发送时将切片固化至 `UserMessage.rangeContext`，杜绝跨轮次重复磁盘读取与历史上下文漂移，同时保持 UI 用户气泡原文干净）+ Composer `@` 补全与 `:` 行范围语法实时提示 + 侧栏底部可折叠 `<WorkspaceFileTree>` 工作区目录树（含 1,500 项截断提示）+ `<FilePreviewModal>` 轻量代码预览与行区间框选引用弹窗
+
+
 
 **背景**：
 1. **工作区结构黑盒**：用户打开一个复杂项目后，除非去系统文件管理器或 VS Code 查看，在 EasyCode 界面内无法一览当前工程的目录结构与文件组织；
