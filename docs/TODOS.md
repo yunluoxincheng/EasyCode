@@ -4,6 +4,25 @@
 
 ## 待办需求
 
+### 48. 跨平台 CI 纳入全量单元测试（CI Unit Test Matrix）
+
+**状态**：⏳ 待办（规划中）
+
+**背景**：
+当前 `.github/workflows` 的 Release 工作流只负责三平台（Windows / macOS / Ubuntu）安装包构建，**不执行 `pnpm test`**。
+PR #9 复审期间已发现一处测试可移植性缺陷：真实 Shell 语义验证曾硬编码 `C:\Program Files\Git\bin\bash.exe`，在 macOS / Linux 必然失败。
+该处现已改为按平台发现 POSIX Shell（找不到时跳过而非失败），但同类问题缺乏 CI 兜底——只要单测不在多平台运行，写死路径、平台相关时序等问题就会持续潜伏。
+
+**设计方案**：
+1. 新增 `test.yml` 工作流：矩阵 `windows-latest` / `macos-latest` / `ubuntu-latest`，Node 版本与 `engines.node` 对齐；
+2. 步骤：`pnpm install` → `pnpm -r run build` → `pnpm test`；
+3. 触发条件：`pull_request`（所有分支）与 `push` 到 `master`；Release 工作流保持不变，避免打包流程被单测拖慢；
+4. 已知需要留意的平台差异：Unix 进程组生命周期、路径分隔符与大小写语义、`node --test` 的 `--test-force-exit` 行为、外部工具（bash / git）可用性——缺失外部依赖的用例应显式 skip 而不是失败。
+
+**涉及改动**：`.github/workflows/test.yml`（新建）、`package.json`（如需调整 test 脚本）。
+
+---
+
 ### 35. MCP (Model Context Protocol) 协议客户端接入（Stdio / SSE）
 
 **状态**：⏳ 待办（规划中）

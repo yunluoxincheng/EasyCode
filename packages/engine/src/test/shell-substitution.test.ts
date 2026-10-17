@@ -3,6 +3,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -22,6 +23,54 @@ import {
 } from '@easycode/core';
 import { NodeHost } from '@easycode/host-node';
 import { AgentServer } from '../index.js';
+
+/**
+ * 发现本机可用的 POSIX Shell（真实语义验证需要它才能执行）。
+ *
+ * 不能写死安装路径：Git Bash 在 Windows 上可能装在 `Program Files`、`Program Files (x86)`、
+ * `%LOCALAPPDATA%\Programs\Git` 或仅存在于 `PATH`；macOS / Linux 则是 `/bin/bash` 等。
+ * 找不到时返回 null，由调用方跳过该用例（纯函数层已覆盖同一语义）。
+ * 可用 `EASYCODE_TEST_SHELL` 显式指定。
+ */
+function findPosixShell(): string | null {
+  // 候选必须是 POSIX Shell：`--version` 能正常退出且不报错即可视为可用
+  const usable = (candidate: string): boolean => {
+    try {
+      execFileSync(candidate, ['-c', 'printf OK'], { encoding: 'utf8', timeout: 10_000 });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const explicit = process.env.EASYCODE_TEST_SHELL?.trim();
+  if (explicit) return usable(explicit) ? explicit : null;
+
+  const candidates: string[] = [];
+  if (process.platform === 'win32') {
+    const roots = [
+      process.env.ProgramFiles,
+      process.env['ProgramFiles(x86)'],
+      process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Programs') : undefined,
+    ];
+    for (const root of roots) {
+      if (!root) continue;
+      candidates.push(path.join(root, 'Git', 'bin', 'bash.exe'));
+      candidates.push(path.join(root, 'Git', 'usr', 'bin', 'bash.exe'));
+    }
+    // 仅靠 PATH 解析：交给 execFileSync 尝试，存在即可用
+    candidates.push('bash.exe', 'bash');
+  } else {
+    candidates.push('/bin/bash', '/usr/bin/bash', '/usr/local/bin/bash', 'bash', 'sh');
+  }
+
+  for (const candidate of candidates) {
+    // 绝对路径先做存在性预筛，避免逐个 spawn 拖慢测试
+    if (path.isAbsolute(candidate) && !fs.existsSync(candidate)) continue;
+    if (usable(candidate)) return candidate;
+  }
+  return null;
+}
 
 /* -------------------- P1：$() / 反引号命令替换 -------------------- */
 
@@ -139,13 +188,20 @@ test('【P1 九轮】executeTool 对不可解析命令强制审批（即使 yolo
   assert.equal(ok.approved, true);
 });
 
-test('【P1 九轮】真实 bash 确认命令替换写法执行的是赋值后的程序', () => {
-  const sh = 'C:\\Program Files\\Git\\bin\\bash.exe';
+test('【P1 九轮】真实 bash 确认命令替换写法执行的是赋值后的程序', (t) => {
+  const shell = findPosixShell();
+  if (!shell) {
+    // 依赖宿主机安装的 POSIX Shell：缺失时跳过而不是失败，
+    // 语义正确性已由上方的纯函数用例保证（Windows/macOS/Linux 均可跑）
+    t.skip('未发现可用的 POSIX Shell（可用 EASYCODE_TEST_SHELL 指定）');
+    return;
+  }
+  t.diagnostic(`使用 POSIX Shell: ${shell}`);
   const probe = (command: string): boolean => {
     // 用 printf 替代 rm，保证无破坏性
     const safe = command.replace('rm -rf build', 'printf EXEC');
     try {
-      return execFileSync(sh, ['-c', safe], { encoding: 'utf8' }).includes('EXEC');
+      return execFileSync(shell, ['-c', safe], { encoding: 'utf8' }).includes('EXEC');
     } catch {
       return false;
     }
