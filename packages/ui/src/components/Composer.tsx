@@ -239,6 +239,11 @@ export function Composer() {
             store.openTurnUndoModal('latest');
             return;
           }
+          if (matched.id === 'test-loop') {
+            const focus = raw.slice(token.length).trim();
+            void store.runTestLoop(focus ? { focus } : undefined);
+            return;
+          }
           if (matched.id === 'clear') {
             store.showToast('已清空当前输入内容');
             return;
@@ -405,6 +410,12 @@ export function Composer() {
 
       if (cmd.id === 'undo') {
         store.openTurnUndoModal('latest');
+        return;
+      }
+      if (cmd.id === 'test-loop') {
+        // 动作类指令：忽略补全残留文本，直接启动自愈循环（聚焦范围用 /test-loop <目标> 手写）
+        const rest = text.slice(caret).trim();
+        void store.runTestLoop(rest ? { focus: rest } : undefined);
         return;
       }
       if (cmd.id === 'clear') {

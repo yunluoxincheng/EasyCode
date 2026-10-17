@@ -7,6 +7,7 @@ import { ApprovalManager } from './approval.js';
 import { executeTool, getToolExecutionOutcome, ToolRegistry, type FileChangeEvent } from './tools/index.js';
 import { compactHistoryMessages, pruneHistoricalToolResults } from './compaction.js';
 import { startDecisionObservation, type DecisionPolicy, type DecisionObservation } from './policy.js';
+import type { PermissionRule } from './permissions.js';
 import type { BackgroundTaskManager } from './tasks.js';
 
 export interface LoopOptions {
@@ -37,6 +38,8 @@ export interface LoopOptions {
   backgroundTasks?: BackgroundTaskManager;
   /** 文件写操作完成后的快照回调（TODOS #36）：供上层记录回合级 Pre-edit 快照 */
   onFileChange?: (change: FileChangeEvent) => Promise<void> | void;
+  /** 权限规则（TODOS #47）：全局 + 项目级规则并集，命中即优先于审批模式 */
+  permissionRules?: PermissionRule[];
 }
 
 export interface LoopResult {
@@ -146,6 +149,7 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
     policy,
     backgroundTasks,
     onFileChange,
+    permissionRules,
   } = options;
 
   let pendingRecoveries: Array<{ observation: DecisionObservation; name: string; input: unknown }> = [];
@@ -304,6 +308,7 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
           backgroundTasks,
           callId: call.id,
           onFileChange,
+          permissionRules,
         });
         const toolOutcome = getToolExecutionOutcome(call.name, execution);
         if (toolRoutingFollowup && call === calls[0]) {

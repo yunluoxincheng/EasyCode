@@ -38,6 +38,12 @@ import {
   resolveWorkspacePath,
   resolveCodeRangeMentions,
   parseCodeRangeMentions,
+  detectTestCommand,
+  describePermissionRule,
+  evaluatePermission,
+  type PermissionRule,
+  type PermissionRuleSource,
+  type TestCommandDetection,
 } from '@easycode/core';
 import { Settings, DEFAULT_SETTINGS, PROVIDER_PRESETS } from './settings.js';
 import type { ModelTestResult, ProviderEntry, ProviderModel, ProviderModelInfo } from './settings.js';
@@ -46,6 +52,7 @@ import { buildSystemPrompt } from './prompts.js';
 import { WorkspaceLockManager } from './workspace-lock.js';
 import { DecisionStatsManager } from './stats.js';
 import { ShadowDecisionPolicy } from './shadow.js';
+import { runTestLoop, type TestLoopResult } from './test-loop.js';
 import {
   CheckpointManager,
   type TurnCheckpointSummary,
@@ -54,7 +61,7 @@ import {
   type RevertTurnOptions,
 } from './checkpoints.js';
 
-export type { TurnCheckpointSummary, TurnUndoPreview, TurnUndoFilePreview, RevertTurnOptions };
+export type { TurnCheckpointSummary, TurnUndoPreview, TurnUndoFilePreview, RevertTurnOptions, TestLoopResult };
 
 /** 回合快照回退执行结果（TODOS #36） */
 export interface TurnUndoResult {
@@ -72,6 +79,16 @@ export interface WorkspaceFilePreview {
   totalLines: number;
   size: number;
   truncated: boolean;
+}
+
+/** 测试自愈循环启动参数（TODOS #39） */
+export interface RunTestLoopRequest {
+  /** 显式指定测试命令（覆盖自动探测与设置项） */
+  command?: string;
+  /** 最大自愈轮次（1~5，默认取设置或 3） */
+  maxRounds?: number;
+  /** 聚焦目标（/test-loop 参数），仅注入修复提示词，不改变测试命令 */
+  focus?: string;
 }
 
 export interface CreateSessionOptions {
@@ -105,6 +122,8 @@ interface SessionRuntime {
   approval: ApprovalManager;
   controller?: AbortController;
   running: boolean;
+  /** 测试自愈循环执行中（TODOS #39）：与 running 一同阻止并发发送 */
+  busy?: boolean;
 }
 
 export interface SessionEventPayload {
@@ -384,7 +403,7 @@ export class AgentServer {
 
   async sendMessage(id: string, text: string): Promise<void> {
     const rt = this.requireSession(id);
-    if (rt.running) throw new Error('会话正在运行中，请先等待完成或点击停止');
+    if (rt.running || rt.busy) throw new Error('会话正在运行中，请先等待完成或点击停止');
     const content = text.trim();
     if (!content) throw new Error('消息为空');
     if (rt.data.messages.length === 0) {
@@ -403,7 +422,7 @@ export class AgentServer {
   /** 编辑最近一条用户消息：替换文本、丢弃其后的内容并重新生成 */
   async editLastUserMessage(id: string, text: string): Promise<void> {
     const rt = this.requireSession(id);
-    if (rt.running) throw new Error('会话正在运行中，请先等待完成或点击停止');
+    if (rt.running || rt.busy) throw new Error('会话正在运行中，请先等待完成或点击停止');
     const content = text.trim();
     if (!content) throw new Error('消息为空');
     let idx = -1;
@@ -453,7 +472,9 @@ export class AgentServer {
     const lastUserMessage = [...rt.data.messages].reverse().find((m) => m.role === 'user');
     const turnId = `${id}_${lastUserMessage?.id ?? Date.now().toString(36)}`;
     rt.running = true;
-    rt.controller = new AbortController();
+    // 测试自愈循环（TODOS #39）在修复回合中复用循环持有的 controller：
+    // 否则用户点停止只会打断修复回合，循环的 signal 依然存活，下一轮测试会继续跑起来。
+    rt.controller = (rt.busy && rt.controller) || new AbortController();
     let shadowPolicy: ShadowDecisionPolicy | undefined;
     const cleanUserMap = new Map<
       string,
@@ -503,6 +524,8 @@ export class AgentServer {
             }
           : undefined,
       );
+      // 权限规则（TODOS #47）：全局设置 + 项目级 .easycode/permissions.json 并集
+      const permissionRules = await this.resolvePermissionRules(rt.data.meta.workspaceRoot);
       // 对话中系统消息：模型配置关闭时把系统提示词并入首条用户消息
       // 提取工作区规则与全局偏好并注入系统提示词（天然抗上下文压缩，TODOS #33）
       const projectRules = rt.data.meta.workspaceRoot
@@ -583,6 +606,7 @@ export class AgentServer {
         signal: rt.controller.signal,
         approval: rt.approval,
         policy,
+        permissionRules,
         backgroundTasks: await this.bgManagerFor(id),
         onFileChange: async (change) => {
           if (rt.data.meta.workspaceRoot) {
@@ -1363,6 +1387,195 @@ export class AgentServer {
     return this.decisionStats.reviewDecision(sessionId, recordId, label);
   }
 
+  /* -------------------- 工具权限规则 (TODOS #47) -------------------- */
+
+  private projectPermissionsCache = new Map<
+    string,
+    { rules: PermissionRule[]; expiresAt: number }
+  >();
+
+  /** 读取项目级权限规则 `.easycode/permissions.json`（3 秒 TTL；非法条目跳过而非整份失效） */
+  async loadProjectPermissions(workspaceRoot: string): Promise<PermissionRule[]> {
+    const root = workspaceRoot?.trim();
+    if (!root) return [];
+    const now = Date.now();
+    const cached = this.projectPermissionsCache.get(root);
+    if (cached && cached.expiresAt > now) return cached.rules;
+    let rules: PermissionRule[] = [];
+    try {
+      const file = this.host.paths.join(root, '.easycode', 'permissions.json');
+      const stat = await this.host.fs.stat(file);
+      if (stat && !stat.isDirectory) {
+        rules = parsePermissionRules(await this.host.fs.readFile(file), 'project');
+      }
+    } catch {
+      rules = [];
+    }
+    this.projectPermissionsCache.set(root, { rules, expiresAt: now + 3000 });
+    return rules;
+  }
+
+  /**
+   * 合成参与裁决的权限规则：总开关关闭时返回 undefined（彻底回到 ask / yolo 语义）；
+   * 全局规则标注 `source: 'global'`，项目规则由 loadProjectPermissions 标注。
+   */
+  async resolvePermissionRules(workspaceRoot: string): Promise<PermissionRule[] | undefined> {
+    if (this.settings.permissions?.enabled === false) return undefined;
+    const globalRules = (this.settings.permissions?.rules ?? [])
+      .map((rule) => normalizePermissionRule(rule, 'global'))
+      .filter((rule): rule is PermissionRule => rule !== null);
+    const projectRules = await this.loadProjectPermissions(workspaceRoot);
+    const rules = [...globalRules, ...projectRules];
+    return rules.length > 0 ? rules : undefined;
+  }
+
+  /* -------------------- 测试自愈循环 (TODOS #39) -------------------- */
+
+  /** 读取项目级测试配置 `.easycode/test.json`（{ command?, maxRounds? }） */
+  private async readProjectTestConfig(
+    root: string,
+  ): Promise<{ command?: string; maxRounds?: number } | null> {
+    try {
+      const file = this.host.paths.join(root, '.easycode', 'test.json');
+      const stat = await this.host.fs.stat(file);
+      if (!stat || stat.isDirectory) return null;
+      const data = JSON.parse(await this.host.fs.readFile(file)) as Record<string, unknown>;
+      const command = typeof data.command === 'string' ? data.command.trim() : '';
+      const maxRounds =
+        typeof data.maxRounds === 'number' && Number.isFinite(data.maxRounds)
+          ? data.maxRounds
+          : undefined;
+      return { command: command || undefined, maxRounds };
+    } catch {
+      return null;
+    }
+  }
+
+  /** 探测会话工作区将要执行的测试命令（命令优先级：设置项 > 项目配置 > 项目类型自动探测） */
+  async detectSessionTestCommand(sessionId: string): Promise<TestCommandDetection | null> {
+    await this.ensureSettings();
+    const rt = this.requireSession(sessionId);
+    const root = rt.data.meta.workspaceRoot?.trim();
+    if (!root) return null;
+    const project = await this.readProjectTestConfig(root);
+    return detectTestCommand(
+      this.host,
+      root,
+      this.settings.testLoop?.command?.trim() || project?.command,
+    );
+  }
+
+  /**
+   * 启动一次测试自愈循环：运行测试 → 失败则驱动 Agent 修复 → 重跑，直至全绿或轮次耗尽。
+   * 测试命令整体只审批一次（ask 模式），循环内的修复回合仍走常规工具审批与权限规则。
+   */
+  async runTestLoop(sessionId: string, options?: RunTestLoopRequest): Promise<TestLoopResult> {
+    await this.ensureSettings();
+    const rt = this.requireSession(sessionId);
+    if (rt.running || rt.busy) throw new Error('会话正在运行中，请先等待完成或点击停止');
+    const root = rt.data.meta.workspaceRoot?.trim();
+    if (!root) throw new Error('当前会话未绑定工作区，无法运行测试');
+
+    const project = await this.readProjectTestConfig(root);
+    const detection = await detectTestCommand(
+      this.host,
+      root,
+      options?.command?.trim() || this.settings.testLoop?.command?.trim() || project?.command,
+    );
+    if (!detection) {
+      throw new Error(
+        '未探测到测试命令：请在设置页「测试自愈」中填写自定义命令，或在项目根目录添加 .easycode/test.json',
+      );
+    }
+    const maxRounds = clampInt(
+      options?.maxRounds ?? project?.maxRounds ?? this.settings.testLoop?.maxRounds ?? 3,
+      1,
+      5,
+    );
+    const timeoutMs = clampInt(this.settings.testLoop?.timeoutMs ?? 600_000, 10_000, 1_800_000);
+
+    // 测试命令同样要过权限规则：该命令可能来自仓库内的 package.json / .easycode/test.json，
+    // 属于不可信输入，绝不能让 deny 规则被「换个执行入口」绕过
+    const permissionRules = await this.resolvePermissionRules(root);
+    const verdict = evaluatePermission(
+      permissionRules,
+      'run_command',
+      { command: detection.command },
+      root,
+    );
+    if (verdict?.decision === 'deny') {
+      throw new Error(`测试命令被权限规则拒绝：${describePermissionRule(verdict.rule)}`);
+    }
+    const forcedByRule = verdict?.decision === 'ask';
+
+    // 单次审批覆盖整轮循环：ask 模式下用户确认一次即可，后续重跑与修复回合不再重复弹窗
+    // 审批等待期就先占位 busy：否则用户可以在审批卡片挂着时另发一条消息，两条链路争用同一 controller
+    rt.busy = true;
+    const controller = new AbortController();
+    try {
+      const approved = await rt.approval.request(
+        'test_loop',
+        {
+          command: detection.command,
+          framework: detection.framework,
+          source: detection.source,
+          maxRounds,
+        },
+        { force: forcedByRule, reason: forcedByRule ? describePermissionRule(verdict.rule) : '测试自愈循环' },
+      );
+      if (!approved) {
+        return { ok: false, rounds: 0, reason: 'aborted', message: '用户取消了测试自愈循环' };
+      }
+      rt.controller = controller;
+      return await runTestLoop({
+        command: detection.command,
+        commandSource: detection.source,
+        maxRounds,
+        focus: options?.focus,
+        signal: controller.signal,
+        emit: (event) => this.emitterFor(sessionId)(event),
+        runTests: async () => {
+          const started = Date.now();
+          const res = await this.host.process.run(detection.command, {
+            cwd: root,
+            timeoutMs,
+            shell: this.settings.shell ?? 'auto',
+            signal: controller.signal,
+          });
+          const output = [res.stdout, res.stderr]
+            .filter((part) => typeof part === 'string' && part.trim().length > 0)
+            .join('\n');
+          return { exitCode: res.code, output, durationMs: Date.now() - started };
+        },
+        repair: async (prompt) => {
+          rt.data.messages.push({
+            role: 'user',
+            content: prompt,
+            id: `m_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+            createdAt: new Date().toISOString(),
+          });
+          await this.runTurn(rt);
+          // runTurn 结束会复位运行态；循环期间保持 busy 阻止并发发送，并把中止信号接管回循环
+          rt.running = false;
+          rt.controller = controller;
+        },
+        readDiff: async () => {
+          try {
+            const diff = await getGitDiff(this.host, root);
+            return diff.diff?.trim() ? diff.diff : undefined;
+          } catch {
+            return undefined;
+          }
+        },
+      });
+    } finally {
+      rt.busy = false;
+      if (rt.controller === controller) rt.controller = undefined;
+      rt.data.meta.updatedAt = new Date().toISOString();
+      await this.persistSession(rt);
+    }
+  }
+
   /* -------------------- 回合级代码改动快照与一键回退 (TODOS #36) -------------------- */
 
   /** 列出会话内所有包含代码改动的回合快照摘要 */
@@ -1481,6 +1694,60 @@ export class AgentServer {
 
 function num(v: unknown): number | undefined {
   return typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : undefined;
+}
+
+/** 整数钳制（含默认值兜底，用于轮次与超时等必须落在安全区间的配置） */
+function clampInt(value: unknown, min: number, max: number): number {
+  const n = typeof value === 'number' && Number.isFinite(value) ? Math.round(value) : min;
+  return Math.min(Math.max(n, min), max);
+}
+
+/**
+ * 归一化单条权限规则（TODOS #47）：非法条目返回 null 由调用方跳过，
+ * 绝不因一条坏规则让整份配置失效。
+ */
+export function normalizePermissionRule(
+  item: unknown,
+  source: PermissionRuleSource,
+): PermissionRule | null {
+  if (!item || typeof item !== 'object') return null;
+  const raw = item as Record<string, unknown>;
+  const tool = typeof raw.tool === 'string' ? raw.tool.trim() : '';
+  if (!tool) return null;
+  const decision = raw.decision;
+  if (decision !== 'allow' && decision !== 'ask' && decision !== 'deny') return null;
+  const rule: PermissionRule = { tool, decision, source };
+  if (typeof raw.pattern === 'string' && raw.pattern.trim()) {
+    rule.pattern = raw.pattern.trim();
+  }
+  if (typeof raw.note === 'string' && raw.note.trim()) {
+    rule.note = raw.note.trim();
+  }
+  return rule;
+}
+
+/**
+ * 解析权限规则内容：兼容 `{ "rules": [...] }` 与直接数组两种写法；
+ * JSON 损坏或结构不符时返回空数组（调用方据此退化为无规则）。
+ */
+export function parsePermissionRules(
+  raw: string,
+  source: PermissionRuleSource,
+): PermissionRule[] {
+  let data: unknown;
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+  const list = Array.isArray(data) ? data : (data as { rules?: unknown } | null)?.rules;
+  if (!Array.isArray(list)) return [];
+  const out: PermissionRule[] = [];
+  for (const item of list) {
+    const rule = normalizePermissionRule(item, source);
+    if (rule) out.push(rule);
+  }
+  return out;
 }
 
 /** 关闭"对话中系统消息"时：把系统提示词并入首条用户消息（不改动存储的会话数组） */

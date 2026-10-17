@@ -7,12 +7,14 @@ import type {
   ApprovalItem,
   AssistantItem,
   ErrorItem,
+  TestRunItem,
   ToolItem,
   TranscriptItem,
   TurnItem,
   UserItem,
   ViewBlock,
 } from '../store.js';
+import { TestRunCard } from './TestRunCard.js';
 
 /** Markdown 渲染（含代码块样式钩子 + React.memo 浅比对优化）；streaming 时未闭合代码块跳过高亮分词（TODOS #45） */
 const Md = memo(function Md({ text, streaming = false }: { text: string; streaming?: boolean }) {
@@ -64,6 +66,7 @@ const TOOL_LABELS: Record<string, string> = {
   run_command: '执行命令',
   web_search: '联网搜索',
   todo_write: '任务清单',
+  test_loop: '测试自愈循环',
 };
 
 /** 工具输入摘要（单行） */
@@ -292,12 +295,15 @@ function ApprovalCard({ item }: { item: ApprovalItem }) {
   const headline =
     item.name === 'run_command'
       ? `执行命令${i.background ? '（后台常驻）' : ''}：${String(i.command ?? '')}`
-      : `${TOOL_LABELS[item.name] ?? item.name}：${String(i.path ?? '')}`;
+      : item.name === 'test_loop'
+        ? `运行测试自愈循环（最多 ${String(i.maxRounds ?? 3)} 轮）：${String(i.command ?? '')}`
+        : `${TOOL_LABELS[item.name] ?? item.name}：${String(i.path ?? '')}`;
   return (
     <div className={`approval-card ${item.status}`}>
       <div className="approval-head">需要你的批准 · {TOOL_LABELS[item.name] ?? item.name}</div>
       <div className="approval-body">
         <code>{headline}</code>
+        {item.reason && <div className="approval-reason">⚑ {item.reason}</div>}
         {(item.name === 'write_file' || item.name === 'edit_file') && (
           <ToolDiff name={item.name} input={item.input} />
         )}
@@ -380,7 +386,7 @@ function ItemView({
   item,
   streaming = false,
 }: {
-  item: AssistantItem | ToolItem | ApprovalItem | ErrorItem;
+  item: AssistantItem | ToolItem | ApprovalItem | ErrorItem | TestRunItem;
   streaming?: boolean;
 }) {
   switch (item.kind) {
@@ -409,6 +415,8 @@ function ItemView({
       return <ToolCard item={item} />;
     case 'approval':
       return <ApprovalCard item={item} />;
+    case 'testrun':
+      return <TestRunCard item={item} />;
     case 'error':
       return <div className="error-line">{item.message}</div>;
   }
@@ -420,11 +428,11 @@ function fmtDuration(ms: number): string {
   return `${Math.floor(s / 60)} 分 ${s % 60} 秒`;
 }
 
-/** 折叠时可见的最终结果：最后一个工具/审批之后的助手文本 */
+/** 折叠时可见的最终结果：最后一个工具/审批/测试轮次之后的助手文本 */
 function finalTextOf(turn: TurnItem): string {
   let out = '';
   for (const it of turn.items) {
-    if (it.kind === 'tool' || it.kind === 'approval') out = '';
+    if (it.kind === 'tool' || it.kind === 'approval' || it.kind === 'testrun') out = '';
     else if (it.kind === 'assistant') {
       const text = it.blocks
         .filter((b) => b.type === 'text')
@@ -733,6 +741,11 @@ function TurnView({ turn }: { turn: TurnItem }) {
     .reverse()
     .find((i): i is ToolItem => i.kind === 'tool' && i.name === 'todo_write');
   const checkpoint = !live ? store.getTurnCheckpointForTurn(turn) : undefined;
+  /** 回合内最后一张测试自愈卡片（折叠态无最终文本时作为可见结果保留） */
+  const lastTestRun = turn.items
+    .slice()
+    .reverse()
+    .find((i): i is TestRunItem => i.kind === 'testrun');
   const turnTodos = (() => {
     if (!latestTodoTool) return null;
     const i = (latestTodoTool.input ?? {}) as { todos?: TodoItem[] };
@@ -822,6 +835,9 @@ function TurnView({ turn }: { turn: TurnItem }) {
             </div>
           )}
           {finalText ? <Md text={finalText} /> : null}
+          {/* 测试自愈回合往往没有助手最终文本：折叠后必须至少保留该轮测试结果，
+              否则回合收起后整段过程凭空消失，用户完全看不到 [ TEST n/m ] 结果 */}
+          {!finalText && lastTestRun ? <TestRunCard item={lastTestRun} /> : null}
           {errors.map((e) => (
             <div key={e.id} className="error-line">
               {e.message}
@@ -1142,7 +1158,9 @@ export function Transcript() {
             return <UserView key={item.id} item={item} canEdit={isLastUser} />;
           }
           if (item.kind === 'turn') return <TurnView key={item.id} turn={item} />;
-          return null; // TurnEntry 兜底条目不会出现在顶层：回合聚合总是先建容器
+          // 兜底：极端情况下（如测试自愈循环在无活动回合时起步）条目可能落在顶层，
+          // 必须照常渲染，绝不能静默 return null 让用户「什么都看不到」
+          return <ItemView key={item.id} item={item} />;
         })}
         <div ref={bottomRef} />
       </div>

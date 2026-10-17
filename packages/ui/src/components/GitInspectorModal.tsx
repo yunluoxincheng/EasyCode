@@ -255,6 +255,12 @@ export const GitInspectorModal: React.FC<GitInspectorModalProps> = ({ onClose })
     store.send(prompt);
   };
 
+  // 运行测试并自愈（TODOS #39）：关闭面板回到会话，过程由测试卡片实时呈现
+  const handleRunTestLoop = () => {
+    onClose();
+    void store.runTestLoop();
+  };
+
   // Esc 键关闭
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => {
@@ -505,6 +511,15 @@ export const GitInspectorModal: React.FC<GitInspectorModalProps> = ({ onClose })
               title="暂存所有未暂存和未跟踪的改动 (git add .)"
             >
               ⧉ 暂存全部 (git add .)
+            </button>
+
+            <button
+              className="git-action-btn test"
+              onClick={handleRunTestLoop}
+              disabled={actionLoading || !status || !status.isGit || store.running}
+              title="运行测试并在失败时自动驱动 Agent 修复并重跑（TODOS #39）"
+            >
+              ▷ 运行测试并自愈
             </button>
 
             {selectedFile && !selectedFile.staged && (

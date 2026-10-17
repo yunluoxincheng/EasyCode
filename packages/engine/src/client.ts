@@ -20,7 +20,10 @@ import type {
   TurnUndoResult,
   RevertTurnOptions,
   WorkspaceFilePreview,
+  RunTestLoopRequest,
+  TestLoopResult,
 } from './server.js';
+import type { TestCommandDetection } from '@easycode/core';
 
 /**
  * UI 与引擎之间的传输抽象：
@@ -129,5 +132,9 @@ export interface AgentClient {
     recordId: string,
     label: { selectedId?: string; defer: boolean },
   ): Promise<void>;
+  /** 发起一次测试自愈循环（TODOS #39）：运行测试 → 失败自动修复 → 重跑直至全绿或轮次耗尽 */
+  runTestLoop?(id: string, options?: RunTestLoopRequest): Promise<TestLoopResult>;
+  /** 探测该会话将要执行的测试命令（供 UI 展示探测结果，TODOS #39） */
+  detectSessionTestCommand?(id: string): Promise<TestCommandDetection | null>;
   onEvent(listener: (payload: { sessionId: string; event: AgentEvent }) => void): () => void;
 }

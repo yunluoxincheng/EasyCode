@@ -7,6 +7,7 @@ import {
   type DecisionStats,
   type ProjectDecisionTree,
   type BackgroundTaskInfo,
+  type TestCommandDetection,
 } from '@easycode/core';
 import { AgentServer, type AgentClient, type ProviderEntry, type Settings } from '@easycode/engine';
 import type {
@@ -23,6 +24,8 @@ import type {
   TurnUndoResult,
   RevertTurnOptions,
   WorkspaceFilePreview,
+  RunTestLoopRequest,
+  TestLoopResult,
 } from '@easycode/engine';
 
 export type { AgentClient };
@@ -199,6 +202,12 @@ export class IpcAgentClient implements AgentClient {
   reviewDecision(sessionId: string, recordId: string, label: { selectedId?: string; defer: boolean }) {
     return this.invoke<void>('review-decision', { sessionId, recordId, label });
   }
+  runTestLoop(id: string, options?: RunTestLoopRequest) {
+    return this.invoke<TestLoopResult>('run-test-loop', { id, options });
+  }
+  detectSessionTestCommand(id: string) {
+    return this.invoke<TestCommandDetection | null>('detect-session-test-command', { id });
+  }
   onEvent(listener: (payload: { sessionId: string; event: AgentEvent }) => void) {
     this.bridge.onEvent(listener);
     return () => this.bridge.offEvent(listener);
@@ -214,6 +223,12 @@ export function createDemoClient(): AgentClient {
     '/demo-workspace/hello.txt': 'hello EasyCode!\n这是演示工作区中的示例文件。\n',
     '/demo-workspace/src/main.ts': `export function main(): void {\n  console.log('EasyCode demo');\n}\n`,
     '/demo-workspace/README.md': '# 演示工作区\n\n无需 API Key 即可体验完整 Agent 链路。\n',
+    // 演示项目的最小 package.json：让 /test-loop 的测试命令探测（scripts.test）可用
+    '/demo-workspace/package.json': JSON.stringify(
+      { name: 'easycode-demo', version: '0.0.0', scripts: { test: 'echo demo test passed' } },
+      null,
+      2,
+    ),
     '/easycode-demo/settings.json': JSON.stringify({
       providers: {
         demo: {
@@ -340,6 +355,8 @@ export function createDemoClient(): AgentClient {
     getDecisionTree: () => wrap(() => server.getDecisionTree()),
     exportDecisionDataset: (f) => wrap(() => server.exportDecisionDataset(f)),
     reviewDecision: (sid, rid, label) => wrap(() => server.reviewDecision(sid, rid, label)),
+    runTestLoop: (id, options) => wrap(() => server.runTestLoop(id, options)),
+    detectSessionTestCommand: (id) => wrap(() => server.detectSessionTestCommand(id)),
     onEvent: (listener) => server.onEvent(listener),
   };
 }

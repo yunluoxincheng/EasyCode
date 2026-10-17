@@ -378,6 +378,8 @@ export async function createTauriClient(options?: { reflexPolicy?: DecisionPolic
     getDecisionTree: () => server.getDecisionTree(),
     exportDecisionDataset: (filter) => server.exportDecisionDataset(filter),
     reviewDecision: (sessionId, recordId, label) => server.reviewDecision(sessionId, recordId, label),
+    runTestLoop: (id, options) => server.runTestLoop(id, options),
+    detectSessionTestCommand: (id) => server.detectSessionTestCommand(id),
     onEvent: (listener) => server.onEvent(listener),
   };
 }

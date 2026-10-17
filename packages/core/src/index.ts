@@ -8,6 +8,10 @@ export * from './host.js';
 export * from './tasks.js';
 // 审批
 export * from './approval.js';
+// 权限规则引擎（TODOS #47）
+export * from './permissions.js';
+// 测试运行探知与失败解析（TODOS #39）
+export * from './test-runner.js';
 // 工具
 export { ToolRegistry, executeTool, resolveWorkspacePath, createBuiltinTools, runWebSearch } from './tools/index.js';
 export type { Tool, ToolSpec, ToolContext, ToolExecution, FileChangeEvent } from './tools/index.js';

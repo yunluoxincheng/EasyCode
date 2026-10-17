@@ -27,12 +27,38 @@ export class ApprovalManager {
     return this.pending.size;
   }
 
-  async request(toolName: string, input: unknown): Promise<boolean> {
-    if (this.mode === 'yolo') return true;
+  /**
+   * 请求用户批准。
+   * `force: true` 时即使在 yolo 模式下也强制弹窗（权限规则 ask，TODOS #47）；
+   * `reason` 为触发原因说明（如命中的权限规则），供审批卡片展示。
+   */
+  async request(
+    toolName: string,
+    input: unknown,
+    options?: { force?: boolean; reason?: string },
+  ): Promise<boolean> {
+    if (this.mode === 'yolo' && !options?.force) return true;
     const requestId = `ap_${Date.now().toString(36)}_${this.seq++}`;
-    this.emitEvent({ type: 'approval_request', requestId, toolName, input });
     return new Promise<boolean>((resolve) => {
+      // 必须先登记 resolver 再派发事件：同进程宿主（CLI / 演示模式 / 单测）会在事件回调里
+      // 同步调用 resolve()，若事件先发，应答会因为 pending 中尚无该 requestId 被静默丢弃，
+      // 审批 promise 将永久挂起（对外表现为「任务跑到审批就不动了、不会自动停止」）。
       this.pending.set(requestId, resolve);
+      try {
+        this.emitEvent({
+          type: 'approval_request',
+          requestId,
+          toolName,
+          input,
+          ...(options?.reason ? { reason: options.reason } : {}),
+        });
+      } catch {
+        // 订阅者抛错同样不能让审批悬挂（否则整个回合会静默卡死）：
+        // 清理未决态并保守按拒绝收尾；异常本身不向执行链抛出，避免把宿主派发故障
+        // 升级成工具执行异常。
+        this.pending.delete(requestId);
+        resolve(false);
+      }
     });
   }
 

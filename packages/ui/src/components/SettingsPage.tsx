@@ -4,6 +4,8 @@ import { updater } from '../updater.js';
 import { TerminalSelect } from './TerminalSelect.js';
 import { ModelConfigDialog } from './ModelConfigDialog.js';
 import { ReflexDashboard } from './ReflexDashboard.js';
+import { PermissionRulesPanel } from './PermissionRulesPanel.js';
+import { TestLoopPanel } from './TestLoopPanel.js';
 import { PROVIDER_PRESETS, providerLabel, validWebSearchBackend } from '@easycode/engine';
 import type {
   ModelTestResult,
@@ -45,6 +47,8 @@ const NAV: Array<{ id: SettingsSection; label: string; group: string }> = [
   { id: 'models', label: '模型服务', group: '配置' },
   { id: 'websearch', label: '联网搜索', group: '配置' },
   { id: 'general', label: '常规', group: '配置' },
+  { id: 'permissions', label: '权限规则', group: '安全与自动化' },
+  { id: 'testloop', label: '测试自愈', group: '安全与自动化' },
   { id: 'reflex', label: '微模型决策 (Reflex)', group: '模型与分析' },
   { id: 'about', label: '关于', group: '信息' },
 ];
@@ -1018,6 +1022,52 @@ export function SettingsPage() {
                 API Key 保存在本机设置文件中，不会上传。接入 Ollama / LM Studio 等本地服务可完全离线使用。
               </p>
             </div>
+          </>
+        )}
+
+        {section === 'permissions' && (
+          <>
+            <h1 className="page-title">权限规则</h1>
+            <div className="page-head">
+              <p className="page-desc">
+                对具体工具、命令前缀与路径配置放行 / 询问 / 拒绝，命中规则时优先于审批模式生效。
+              </p>
+              <div className="page-actions">
+                {dirty && <span className="dirty-dot" title="有未保存的更改">●</span>}
+                {dirty && (
+                  <button className="btn" onClick={() => setDraft(structuredClone(store.settings!))}>
+                    放弃更改
+                  </button>
+                )}
+                <button className="btn primary" disabled={!dirty || saving} onClick={() => void save()}>
+                  {saving ? '保存中…' : '保存'}
+                </button>
+              </div>
+            </div>
+            <PermissionRulesPanel draft={draft} patch={patch} />
+          </>
+        )}
+
+        {section === 'testloop' && (
+          <>
+            <h1 className="page-title">测试自愈</h1>
+            <div className="page-head">
+              <p className="page-desc">
+                配置自主测试运行与排错自愈循环：修改完代码自动跑测试，失败则驱动 Agent 修复并重跑。
+              </p>
+              <div className="page-actions">
+                {dirty && <span className="dirty-dot" title="有未保存的更改">●</span>}
+                {dirty && (
+                  <button className="btn" onClick={() => setDraft(structuredClone(store.settings!))}>
+                    放弃更改
+                  </button>
+                )}
+                <button className="btn primary" disabled={!dirty || saving} onClick={() => void save()}>
+                  {saving ? '保存中…' : '保存'}
+                </button>
+              </div>
+            </div>
+            <TestLoopPanel draft={draft} patch={patch} />
           </>
         )}
 

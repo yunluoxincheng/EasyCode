@@ -137,7 +137,7 @@ EasyCode 作为开放、可扩展的桌面 Coding Agent，目前仅提供内置�
 
 ### 39. 自主测试运行与排错自愈循环（Auto Test-and-Fix Loop）
 
-**状态**：⏳ 待办（规划中）
+**状态**：✅ 已完成（2026-10-17，真实环境 30 项端到端验证通过）——Core 新增 `detectTestCommand`（`package.json` `scripts.test` 按锁文件推断 pnpm / yarn / bun / npm → `Cargo.toml` → `go.mod` → `pyproject.toml` 等 Python 标记，设置项与项目级 `.easycode/test.json` 可覆盖）+ `parseTestOutput` / `extractFailureExcerpt`（vitest / jest / pytest / cargo / go + **Node 内置 `node --test` 的 spec（`ℹ tests/pass/fail` 跨行聚合）与 TAP（`# …` + `not ok N -`，`# TODO` / `# SKIP` 不计失败）**；用例名剥离 reporter 追加的耗时后缀并跳过 `✖ failing tests:` 分节标题；解析不到保持 `undefined` 绝不估算）+ Engine `runTestLoop` 状态机（失败用例 + 日志摘录 + 当前 git diff 组成修复提示词驱动完整 Agent 回合，轮次 1~5 默认 3）+ 测试命令受权限规则约束（`deny` 直接拒绝、`ask` 在 YOLO 下强制审批）+ 停止信号贯穿修复回合 + `/test-loop [聚焦范围]` 与 Git 检视面板「▷ 运行测试并自愈」双入口 + 回合内 `[ TEST n/m ]` 卡片与四态收敛提示
 
 **背景**：
 编写代码只是开发的第一步，确保代码正确无误才是工程交付的根本。目前用户在让 Agent 完成代码修改后，通常需要手动打字让模型运行测试、等待模型报出测试错误、再人工提示模型“根据报错继续修改”，多次反复交互，沟通成本高且容易遗漏测试用例。
@@ -300,6 +300,40 @@ EasyCode 作为开放、可扩展的桌面 Coding Agent，目前仅提供内置�
 - `packages/engine/src/server.ts`：装配层注入决策策略与影子观察器，提供 stats / export IPC API；
 - `packages/ui/src/components/SettingsPage.tsx`：新增 `ReflexDashboard` 监控面板、KPI 卡片与两级折叠树；
 - `packages/ui/src/utils/exportDecision.ts`：微调数据集导出器。
+
+---
+
+### 47. 工具权限规则引擎（Allow / Deny / Ask Policy Rules）
+
+**状态**：✅ 已完成（2026-10-17）——Core 新增 `permissions.ts`（命令前缀匹配自带词边界、路径 glob 单段 / 跨目录、`deny > ask > allow` 顺序无关裁决、`normalizeShellCommand` 与 #40 结构化事实共用实现防前缀绕过）+ `executeTool` 三态短路（`deny` 不执行且不弹审批、`allow` 在 ask 模式免审批、`ask` 在 yolo 模式强制审批并标注规则来源）+ `ApprovalManager.request` 支持 `force` / `reason` + 全局 `Settings.permissions` 与项目级 `.easycode/permissions.json` 并集裁决（3 秒 TTL、非法条目跳过）+ 设置页「权限规则」可视化面板
+
+**背景**：
+目前的审批只有 `ask` / `yolo` 二元开关（`packages/core/src/approval.ts`）：`ask` 模式下每一次写文件与执行命令都要人工点一次批准，高频任务里极其打断心流；`yolo` 模式全量放行，连 `rm -rf` / `git push --force` 这类破坏性命令也毫无阻拦。用户被迫在「逐步审批」与「完全放手」之间二选一，这正是 #36 回合快照想普及 yolo 却仍难落地的关键缺口。
+业界主流 Coding Agent 的做法是细粒度权限规则：对特定工具、特定命令前缀或特定路径分别配置 `allow`（免审批）、`ask`（必须确认）、`deny`（直接拒绝）。
+
+**设计方案**：
+1. **规则模型与裁决语义（`packages/core/src/permissions.ts`，零运行时依赖）**：
+   - 规则：`{ tool, pattern?, decision, note? }`；`tool` 支持 `*` 通配；
+   - `pattern` 语义按工具分流：`run_command` 为**命令前缀**（自带词边界，`rm` 不会误命中 `rmdir`，`*` 为通配），文件类工具（`read_file` / `write_file` / `edit_file` / `list_dir` / `search_files`）为**工作区相对路径 glob**（`*` 单段、`**` 跨目录）；其余工具只支持工具级规则，写了 `pattern` 一律视为不命中（绝不制造「看似限制实则无效」的假象）；
+   - 命令归一化与 #40 结构化事实复用同一实现（剥离 `FOO=1` 环境变量前缀、解包 `powershell -c` / `cmd /c` / `bash -c` 包装），杜绝「加个环境变量前缀就绕过 deny」的旁路；
+   - 裁决与规则书写顺序无关、安全优先：任一命中规则为 `deny` 即拒绝，否则任一 `ask` 即强制审批，否则任一 `allow` 即免审批；都没有命中时回落到既有 `ask` / `yolo` 模式语义。
+2. **审批链路接入（`executeTool`）**：
+   - `deny`：工具不执行，直接回传明确的规则拒绝说明（模型不得机械重试）；
+   - `allow`：跳过审批，即使当前会话处于 `ask` 模式；
+   - `ask`：即使在 `yolo` 模式下也强制弹出审批卡片，并标注命中的规则来源。
+3. **两级规则来源**：
+   - 全局设置：`Settings.permissions = { enabled, rules[] }`，总开关关闭时彻底回到纯模式语义；
+   - 项目级 `.easycode/permissions.json`（`{ "rules": [...] }`，3 秒 TTL 缓存，非法条目跳过而非整份配置失效）；全局与项目规则取并集裁决，来源在审批卡片与拒绝文案中明示。
+4. **设置页配置面板**：新增「权限规则」分区，可视化增删改规则（工具下拉、匹配模式、裁决三态、备注），并附命令前缀 / 路径 glob 语义说明与项目配置文件路径提示。
+
+**涉及改动**：
+- `packages/core/src/permissions.ts`：新建规则模型、命令归一化、前缀与 glob 匹配、`evaluatePermission` 裁决；
+- `packages/core/src/approval.ts`：`request()` 支持 `force`（yolo 下强制审批）与 `reason`（规则来源说明）；
+- `packages/core/src/tools/index.ts`：`executeTool` 接入裁决，`ToolContext.permissionRules` 透传；
+- `packages/core/src/loop.ts`：`LoopOptions.permissionRules`；
+- `packages/engine/src/settings.ts`：`permissions` 配置与默认值；
+- `packages/engine/src/server.ts`：全局 + 项目级规则合成与传入循环；
+- `packages/ui/src/components/SettingsPage.tsx` / `PermissionRulesPanel.tsx`：权限规则配置面板。
 
 ---
 

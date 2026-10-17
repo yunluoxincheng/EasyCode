@@ -2,6 +2,27 @@
 
 本文件记录 EasyCode 每个版本的变更。发布时，GitHub Release 说明自动取自对应版本的段落。
 
+## [0.1.25] - 2026-10-17
+
+### 新增
+- 工具权限规则引擎（Allow / Deny / Ask Policy Rules）：在 `ask` / `yolo` 二元审批之上叠加细粒度策略——`run_command` 按命令前缀匹配（自带词边界，`rm` 不命中 `rmdir`），文件类工具按工作区相对路径 glob（`*` 单段 / `**` 跨目录），其余工具只支持工具级规则（写了 `pattern` 一律视为不命中，不制造「看似限制实则无效」的假象）；裁决与书写顺序无关、安全优先（任一命中为 `deny` 即拒绝 → 否则任一 `ask` 强制审批 → 否则任一 `allow` 免审批），无命中时回落既有模式语义；命令归一化与 #40 结构化事实共用 `normalizeShellCommand`（剥离 `FOO=1` 前缀、解包 `powershell -c` / `cmd /c` / `bash -c`），杜绝「加个环境变量前缀就绕过 deny」（TODOS #47）
+- 两级规则来源与设置页配置面板：全局 `Settings.permissions`（含总开关，关闭即彻底回到纯模式语义）+ 项目级 `.easycode/permissions.json`（3 秒 TTL 缓存、非法条目跳过而非整份配置失效），全局与项目规则取并集裁决并在审批卡片与拒绝文案中明示来源；设置页新增「权限规则」分区（工具下拉、匹配模式、裁决三态、备注与语义说明）（TODOS #47）
+- 自主测试运行与排错自愈循环（Auto Test-and-Fix Loop）：Core 新增 `detectTestCommand`（`package.json` `scripts.test` 并按锁文件推断 pnpm / yarn / bun / npm → `Cargo.toml` → `go.mod` → `pyproject.toml` 等 Python 标记）与 `parseTestOutput` / `extractFailureExcerpt`（覆盖 vitest / jest / pytest / cargo / go 以及 **Node 内置 `node --test` 的 spec reporter（`ℹ tests/pass/fail` 跨行聚合）与 TAP reporter（`# tests/pass/fail` + `not ok N - 名称`，`# TODO` / `# SKIP` 不计失败）**；用例名剥离 reporter 追加的耗时后缀并跳过 `✖ failing tests:` 这类分节标题；解析不到就保持 `undefined`，绝不用估算值冒充真实结果）（TODOS #39）
+- 自愈循环状态机与入口：`runTestLoop` 执行「跑测试 → 失败则把失败用例 + 日志摘录 + 当前 git diff 组成结构化修复提示词驱动一个完整 Agent 回合 → 自动重跑」，轮次上限 1~5（默认 3）防死循环；`/test-loop [聚焦范围]` 快捷指令与 Git 改动检视面板底部「▷ 运行测试并自愈」双入口；测试命令整体只审批一次（修复回合内的文件改动与命令仍走常规审批与权限规则），测试命令本身同样受权限规则约束——`deny` 直接拒绝不执行，`ask` 在 YOLO 模式下也强制弹窗确认（TODOS #39）
+- 回合内 `[ TEST n/m ]` 测试卡片：展示命令与探测来源、用时、通过 / 失败 / 总数与失败用例清单，可展开查看原始输出尾部；收敛时按 `passed` / `max_rounds` / `aborted` / `error` 四态给出明确 toast（TODOS #39）
+
+### 修复
+- **测试自愈循环在界面上完全不可见（P1）**：`/test-loop` 不经 `send()` 启动，没有被创建回合容器，`test_run_start` 与修复回合的工具/助手条目全部落到 `state.items` 顶层；而 `Transcript` 顶层渲染只处理 `user` 与 `turn`，对其余条目直接 `return null` 静默丢弃——表现就是「点了 `/test-loop`，界面什么都没有」。现修复三处：① `test_run_start` 经 `ensureWritableTurnInState` 显式保证存在未折叠回合，测试轮次与随后的修复过程都挂进该回合；② `Transcript` 顶层改为兜底渲染 `ItemView`，任何条目都不再被静默吞掉；③ `TurnView` 折叠态在无助手最终文本时保留该回合最后一张 `TestRunCard`，避免回合收起后结果凭空消失；`test_loop_done` 统一折叠回合并复位运行态（含错误态与快照/文件树刷新）
+- 审批可能永久挂起（`ApprovalManager.request` 时序缺陷）：原先先派发 `approval_request` 事件、后登记 resolver，同进程宿主（CLI / 演示模式 / 单测）在事件回调里同步应答时，应答会因为 `pending` 中尚无该 `requestId` 被静默丢弃，promise 永不 resolve——对外表现为「跑到审批就不动了、任务不会自动停止」。现改为**先登记 resolver 再派发事件**，并补 `try/catch`：订阅者抛错时清理未决态按拒绝收尾，绝不悬挂
+- 测试自愈循环的中止传播：修复回合由 `runTurn` 重新创建 `AbortController` 导致用户在修复过程中点「停止」只打断该回合、循环 signal 依旧存活并继续跑下一轮测试；现修复回合复用循环持有的 controller，停止一次即整体收敛
+- 审批等待期占位 `busy`：`runTestLoop` 原先在审批通过后才置位 `busy`，用户可在审批卡片挂起期间另发消息，两条链路争用同一 controller；现于审批前占位，结束后统一清理
+- 测试脚本超时保护：根 `test` 脚本补入遗漏的 `permissions` / `test-runner` / `test-loop` / `approval` 测试，并统一加 `--test-timeout=60000`——任何单测悬挂都会在 60s 内判定失败，而不是把整个 CI 与本地 `pnpm test` 吊死
+
+### 测试
+- 全仓 118 项测试通过（约 4.6s）：新增权限规则单测（命令前缀词边界、环境变量前缀与 shell 包装解包、路径 glob 单段/跨目录、`deny > ask > allow` 裁决、非法条目跳过）、`executeTool` 三态短路（deny 不弹审批、allow 在 ask 模式免审批、ask 在 yolo 模式强制审批并携带规则来源）、测试输出解析与失败摘录（含 Node spec / TAP 两种 reporter 与 `# TODO`/`# SKIP` 排除）、自愈循环五态（首轮全绿、失败→修复→重跑、轮次耗尽、中止、异常收敛）、`AgentServer.runTestLoop` 集成（项目级 `.easycode/test.json` + `permissions.json`、不可信测试命令被 deny 拦截、ask 规则在 YOLO 下强制审批、修复回合被停止后不再跑下一轮）、审批时序四项回归（同步应答不丢失、同步拒绝、`force` 语义、`denyAll` 中止路径、订阅者抛错不悬挂）
+- 审查返工验证：中止传播用例在移除修复后必然失败（已实测反证），确保该回归测试真的锁住了缺陷
+- **真实环境端到端验证（30/30 通过，直接驱动 `AgentServer` + `NodeHost`）**：真文件系统 + 真子进程 + 真 git 仓库 + 真实模型（复用本机已配置供应商），临时数据目录隔离，跑完即清理。覆盖：项目级规则解析 → `deny` 命中后命令未落地（目标目录与文件仍在）、`allow` 在 ask 模式免审批且真实输出、`ask` 在 YOLO 模式强制审批并在事件回调内同步应答不悬挂（152ms 完成）、`**/.env` 路径 glob 拦截且磁盘无文件；测试自愈在真实 `node --test` 项目上「exit 1 → 模型真实改源码 → 自动重跑 exit 0」两轮收敛，修复提示词携带真实 git diff 与失败摘录，末轮统计解析为 `pass=1 fail=0`；修复回合中途停止后只跑 1 轮测试即收敛为 `aborted`
+
 ## [0.1.24] - 2026-10-12
 
 ### 新增

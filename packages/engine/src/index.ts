@@ -14,9 +14,13 @@ export type {
   TurnUndoResult,
   RevertTurnOptions,
   WorkspaceFilePreview,
+  RunTestLoopRequest,
+  TestLoopResult,
   // end-server-type-exports
 } from './server.js';
-export { splitUnifiedDiff } from './server.js';
+export { splitUnifiedDiff, parsePermissionRules, normalizePermissionRule } from './server.js';
+export { runTestLoop, buildTestFixPrompt } from './test-loop.js';
+export type { RunTestLoopOptions, TestRunExecution } from './test-loop.js';
 export { CheckpointManager } from './checkpoints.js';
 export type { TurnCheckpointRecord, TurnFileSnapshot } from './checkpoints.js';
 export { supportsNativeWebSearch, validWebSearchBackend } from './server.js';
@@ -32,6 +36,8 @@ export type {
   ProjectEntry,
   ShellType,
   ShellInfo,
+  PermissionSettings,
+  TestLoopSettings,
 } from './settings.js';
 export { lookupCatalog, resolveModelMeta } from './model-catalog.js';
 export type { CatalogMeta } from './model-catalog.js';

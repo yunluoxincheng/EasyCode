@@ -2,6 +2,12 @@ import type { Host } from '../host.js';
 import { validateToolInput, type JsonSchema } from '../jsonschema.js';
 import type { ApprovalManager } from '../approval.js';
 import { startDecisionObservation, type DecisionPolicy, type DecisionOutcome } from '../policy.js';
+import {
+  describePermissionRule,
+  evaluatePermission,
+  normalizeShellCommand,
+  type PermissionRule,
+} from '../permissions.js';
 import type { BackgroundTaskManager } from '../tasks.js';
 import { readFileTool, writeFileTool, editFileTool, listDirTool } from './fs.js';
 import { searchFilesTool } from './search.js';
@@ -69,6 +75,8 @@ export interface ToolContext {
   callId?: string;
   /** 文件写操作完成后的快照回调（TODOS #36）：携带写前原始内容与写后新内容 */
   onFileChange?: (change: FileChangeEvent) => Promise<void> | void;
+  /** 权限规则（TODOS #47）：全局 + 项目级规则的并集，命中即优先于审批模式生效 */
+  permissionRules?: PermissionRule[];
 }
 
 export interface Tool {
@@ -174,16 +182,10 @@ const KNOWN_FILE_EXTS = new Set([
 export function extractStructuredOperationFact(name: string, rawInput: unknown): { operationCategory: string; targetExt?: string } {
   const input = typeof rawInput === 'object' && rawInput !== null ? (rawInput as Record<string, unknown>) : {};
   if (name === 'run_command') {
-    let cmd = typeof input.command === 'string' ? input.command.trim() : '';
-    // 1. 剥离环境变量前缀 (如 FOO=bar BAZ=123 cmd)
-    cmd = cmd.replace(/^(?:[a-zA-Z_][a-zA-Z0-9_]*=\S*\s+)+/, '').trim();
-    // 2. 解包常见的 Shell 包装命令 (如 powershell/pwsh -c "...", cmd /c "...")
-    const wrapperMatch = /^(?:powershell(?:\.exe)?|pwsh(?:\.exe)?|cmd(?:\.exe)?|bash|sh)\s+(?:-[a-zA-Z0-9]+\s+|(?:\/c|\/k)\s+)*["']?([^"']+)["']?/i.exec(cmd);
-    if (wrapperMatch) {
-      cmd = wrapperMatch[1].trim();
-      cmd = cmd.replace(/^(?:[a-zA-Z_][a-zA-Z0-9_]*=\S*\s+)+/, '').trim();
-    }
-    // 3. 提取首词并严格校验白名单，非白名单一律归为 shell_other
+    // 命令归一化（剥离环境变量前缀、解包 shell 包装）与权限规则共用同一实现，
+    // 杜绝两套归一化规则漂移（TODOS #40 / #47）
+    const cmd = normalizeShellCommand(input.command);
+    // 提取首词并严格校验白名单，非白名单一律归为 shell_other
     const verbMatch = /^[a-zA-Z0-9_-]+/.exec(cmd);
     const rawVerb = verbMatch ? verbMatch[0].toLowerCase() : '';
     const rootVerb = KNOWN_SHELL_VERBS.has(rawVerb) ? rawVerb : 'other';
@@ -244,6 +246,24 @@ export async function executeTool(
       durationMs: 0,
     };
   }
+  // 权限规则裁决（TODOS #47）：deny 直接拒绝、ask 强制审批、allow 免审批；
+  // 无规则命中时保持既有「敏感工具在 ask 模式下审批」语义
+  const permission = evaluatePermission(
+    ctx.permissionRules,
+    name,
+    validated.value,
+    ctx.workspace,
+  );
+  if (permission?.decision === 'deny') {
+    return {
+      content:
+        `权限规则拒绝执行本次调用（命中 ${describePermissionRule(permission.rule)}）。` +
+        '请不要重复尝试同一操作：改用其他方式完成任务，或请用户在设置页「权限规则」中调整该规则。',
+      approved: false,
+      isError: false,
+      durationMs: Date.now() - started,
+    };
+  }
   // 敏感操作语义安全风险评估旁路（TODOS #40 Safety）
   // 提取纯净结构化事实（如 shell_git, shell_rm, fs_write_file_ts），绝不在日志中暴露具体参数明文
   const opFact = registry.isSensitive(name) ? extractStructuredOperationFact(name, validated.value) : undefined;
@@ -265,15 +285,27 @@ export async function executeTool(
         targetExt: opFact.targetExt,
       },
     }) : undefined;
-  // 仅敏感工具（写文件/执行命令）在 ask 模式下需要审批，只读工具直接放行
-  const approved = registry.isSensitive(name)
-    ? await ctx.approval.request(name, validated.value)
+  // 规则 allow 时免审批；规则 ask 时即使在 yolo 模式下也强制弹窗；
+  // 其余情况仅敏感工具（写文件/执行命令）在 ask 模式下需要审批，只读工具直接放行
+  const ruleAsk = permission?.decision === 'ask';
+  const ruleAllow = permission?.decision === 'allow';
+  const needsApproval = ruleAsk || (!ruleAllow && registry.isSensitive(name));
+  const approved = needsApproval
+    ? await ctx.approval.request(name, validated.value, {
+        force: ruleAsk,
+        reason: ruleAsk ? describePermissionRule(permission.rule) : undefined,
+      })
     : true;
   safetyObservation?.actual({
     // 审批模式是配置，不是 Agent 对语义风险的判断；不可参与模型一致率。
-    description: ctx.approval.modeValue === 'ask'
-      ? `Approval requested (${approved ? 'approved' : 'denied'})`
-      : 'YOLO mode allowed action',
+    // 规则放行/强制询问优先于模式描述，避免把「未发生审批」写成 Approval requested 污染影子统计
+    description: ruleAsk
+      ? `Permission rule forced approval (${approved ? 'approved' : 'denied'})`
+      : ruleAllow
+        ? 'Permission rule allowed action'
+        : ctx.approval.modeValue === 'ask'
+          ? `Approval requested (${approved ? 'approved' : 'denied'})`
+          : 'YOLO mode allowed action',
   });
   if (!approved) {
     safetyObservation?.outcome({ status: 'unknown', evidence: 'User denied execution' });

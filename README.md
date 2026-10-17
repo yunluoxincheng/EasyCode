@@ -17,6 +17,8 @@
 - **多协议模型接入**：Anthropic Messages / Chat Completions / Responses 三种 API 格式，内置智谱、DeepSeek、OpenAI、Moonshot、Anthropic 预设与自定义供应商；Ollama / LM Studio 本地模型完全离线可用；无 Key 时自带演示模式
 - **联网搜索**：给不支持原生搜索的模型（GLM / DeepSeek 等）提供 `web_search` 工具，后端支持 SearXNG、Tavily 与自定义 API；GPT / Claude 等有原生搜索的模型自动走原生工具
 - **Agent 工具**：读写文件、精确编辑、目录浏览、正则搜索、执行命令；文件操作强制限制在工作区内，敏感操作有审批门（ask / YOLO）
+- **权限规则**：在 ask / YOLO 之上叠加 `allow` / `ask` / `deny` 细粒度规则——命令按前缀匹配（自带词边界，`rm` 不命中 `rmdir`），文件按工作区路径 glob；全局设置与项目级 `.easycode/permissions.json` 并集裁决且 `deny` 一律优先，YOLO 模式下也能守住破坏性命令
+- **测试自愈**：`/test-loop` 自动探测测试命令（package.json / Cargo / Go / Python）→ 失败时把失败用例、日志摘录与当前 diff 交给模型修复 → 自动重跑，轮次 1~5 可配，过程以 `[ TEST n/m ]` 卡片实时呈现
 - **模型管理**：一键拉取模型列表、参数自动探测（上下文窗口 / 最大输出 / 视觉 / 能力 / 推理档位，models.dev 目录 + 内置规格库 + 名称启发式）、逐模型连通性测试、模型级配置
 - **上下文与用量**：o200k 分词精确计数，容量面板按分类展示占用与缓存命中率
 - **会话与项目**：多会话持久化、项目分组、会话级模型与思考强度切换（自动跟随模型官方档位）、未绑定项目也能纯对话 + 联网搜索
