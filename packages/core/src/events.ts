@@ -1,5 +1,6 @@
 import type { ToolCallBlock, Usage } from './types.js';
 import type { BackgroundTaskInfo } from './tasks.js';
+import type { TestRunSummary } from './test-runner.js';
 
 /** 引擎 → UI 的单向事件流（传输层无关：IPC / 进程内 / CLI 终端皆可承载） */
 export type AgentEvent =
@@ -15,8 +16,20 @@ export type AgentEvent =
       content: string;
       isError: boolean;
       durationMs: number;
+      /**
+       * 是否被批准执行（TODOS #47）：`false` 表示被用户拒绝或被权限规则拒绝。
+       * UI 必须据此渲染「拒绝」状态，**不得**通过匹配中文提示文本判断执行结果。
+       */
+      approved?: boolean;
     }
-  | { type: 'approval_request'; requestId: string; toolName: string; input: unknown }
+  | {
+      type: 'approval_request';
+      requestId: string;
+      toolName: string;
+      input: unknown;
+      /** 触发原因说明（如命中的权限规则，TODOS #47） */
+      reason?: string;
+    }
   | { type: 'approval_resolved'; requestId: string; approved: boolean }
   | {
       type: 'step_end';
@@ -29,6 +42,39 @@ export type AgentEvent =
       beforeTokens?: number;
       afterTokens?: number;
       summary: string;
+    }
+  | {
+      /**
+       * 测试自愈循环单轮开始（TODOS #39）：进入回合时间线渲染 <TestRunCard>，
+       * 不参与模型上下文，也不占用工具调用 ID
+       */
+      type: 'test_run_start';
+      round: number;
+      maxRounds: number;
+      command: string;
+      /** 测试命令探测来源说明（如 package.json / 设置页自定义 / 项目配置） */
+      source: string;
+      /** 可选的聚焦目标（/test-loop 参数） */
+      focus?: string;
+    }
+  | {
+      /** 测试自愈循环单轮结束：结果摘要 + 输出尾部（供卡片展开查看） */
+      type: 'test_run_result';
+      round: number;
+      command: string;
+      ok: boolean;
+      exitCode: number | null;
+      durationMs: number;
+      summary: TestRunSummary;
+      outputTail: string;
+    }
+  | {
+      /** 测试自愈循环收敛：passed=全绿 / max_rounds=轮次耗尽 / aborted=用户中止 / error=异常 */
+      type: 'test_loop_done';
+      ok: boolean;
+      rounds: number;
+      reason: 'passed' | 'max_rounds' | 'aborted' | 'error';
+      message?: string;
     }
   | {
       /** 后台任务状态变化（TODOS #37）：不进入回合时间线，仅驱动底部任务条与预览面板 */

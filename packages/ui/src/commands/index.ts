@@ -60,6 +60,14 @@ export const BUILTIN_SLASH_COMMANDS: SlashCommand[] = [
 
   // 动作执行类（前端直接触发，零 Token 消耗）
   {
+    id: 'test-loop',
+    name: '/test-loop',
+    description: '运行测试并在失败时自动修复（可指定聚焦范围）',
+    kind: 'action',
+    category: 'code',
+    badge: '[测试]',
+  },
+  {
     id: 'undo',
     name: '/undo',
     description: '撤销最近一个回合的代码改动（恢复修改前快照）',

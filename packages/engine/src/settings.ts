@@ -1,4 +1,4 @@
-import type { ApprovalMode } from '@easycode/core';
+import type { ApprovalMode, PermissionRule } from '@easycode/core';
 
 /** 项目：命名的源文件夹，会话归属其下 */
 export interface ProjectEntry {
@@ -119,6 +119,40 @@ export interface Settings {
   globalRules?: string;
   /** Reflex 端侧微模型影子模式旁路观测开关（TODOS #40）；开时在端侧真实推理并落盘，关时零旁路开销；默认关 */
   reflexShadowMode?: boolean;
+  /** 工具权限规则（TODOS #47）：细粒度 allow / ask / deny，优先于审批默认模式 */
+  permissions?: PermissionSettings;
+  /** 测试自愈循环配置（TODOS #39） */
+  testLoop?: TestLoopSettings;
+}
+
+/** 工具权限规则配置（TODOS #47） */
+export interface PermissionSettings {
+  /** 总开关：关闭时彻底回到纯 ask / yolo 模式语义（默认开） */
+  enabled?: boolean;
+  /**
+   * 信任项目级 `allow` 规则的工作区白名单（规范化绝对路径）。
+   *
+   * 工作区内的代码属低信任输入：一个克隆下来的项目若自带
+   * `{"tool":"run_command","decision":"allow"}`，就等于把用户的 ask 审批保护
+   * 自行取消。因此项目级 `deny` / `ask` 默认生效（只收紧、不放宽），
+   * 而项目级 `allow` **只对用户逐项显式信任的工作区**生效。
+   *
+   * 采用按工作区授权而非全局开关：信任项目 A 不应连带放宽后来打开的 B、C；
+   * 授权记录保存在用户本地设置而非项目仓库内。
+   */
+  trustedWorkspaces?: string[];
+  /** 全局规则；与项目级 `.easycode/permissions.json` 取并集裁决 */
+  rules?: PermissionRule[];
+}
+
+/** 测试自愈循环配置（TODOS #39） */
+export interface TestLoopSettings {
+  /** 自定义测试命令；留空则自动探测（package.json / Cargo.toml / go.mod / pyproject.toml 等） */
+  command?: string;
+  /** 最大自愈轮次（含首轮运行），1~5，默认 3 */
+  maxRounds?: number;
+  /** 单次测试执行超时毫秒数，默认 600000（10 分钟） */
+  timeoutMs?: number;
 }
 
 export interface ContextCompactionConfig {
@@ -183,6 +217,8 @@ export const DEFAULT_SETTINGS: Settings = {
   webSearch: { enabled: false, backend: 'searxng', maxResults: 5 },
   shell: 'auto',
   reflexShadowMode: false,
+  permissions: { enabled: true, trustedWorkspaces: [], rules: [] },
+  testLoop: { maxRounds: 3, timeoutMs: 600_000 },
 };
 
 export function providerLabel(id: string, entry: ProviderEntry | undefined): string {

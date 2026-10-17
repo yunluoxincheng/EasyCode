@@ -1248,6 +1248,19 @@ html.crt-off body::after {
 .approval-body code {
   font-family: var(--font); font-size: 12.5px; word-break: break-all; color: var(--text);
 }
+/* 权限规则触发原因（TODOS #47） */
+.approval-reason {
+  margin-top: 6px;
+  padding: 4px 8px;
+  display: inline-block;
+  font-family: var(--font);
+  font-size: 11.5px;
+  color: var(--amber);
+  border: 1px dashed var(--amber);
+  border-radius: var(--radius);
+  background: rgba(251,191,36,.06);
+  word-break: break-all;
+}
 .approval-content {
   margin: 8px 0 0; padding: 8px 11px;
   background: #070a08; border-radius: var(--radius); border: 1px solid var(--border);
@@ -3484,6 +3497,16 @@ select:focus-visible,
   color: var(--cyan);
   font-weight: 600;
 }
+.git-action-btn.test {
+  background: rgba(251, 191, 36, .1);
+  border-color: rgba(251, 191, 36, .35);
+  color: var(--amber);
+  font-weight: 600;
+}
+.git-action-btn.test:hover:not(:disabled) {
+  background: rgba(251, 191, 36, .18);
+  border-color: var(--amber);
+}
 .git-action-btn.commit:hover:not(:disabled) {
   background: rgba(56, 189, 248, .2);
   border-color: var(--cyan);
@@ -4454,3 +4477,137 @@ select:focus-visible,
   border-radius: 3px;
   line-height: 1.4;
 }
+
+/* -------------------- 测试自愈循环卡片 (TODOS #39) -------------------- */
+.testrun-card {
+  border: 1px solid var(--border2);
+  border-radius: var(--radius);
+  background: var(--panel);
+  margin: 10px 0;
+  overflow: hidden;
+}
+.testrun-card.running { border-color: var(--cyan); background: rgba(56, 189, 248, .04); }
+.testrun-card.passed { border-color: var(--green-dim); background: rgba(74, 222, 128, .04); }
+.testrun-card.failed { border-color: var(--red); background: rgba(248, 113, 113, .05); }
+
+.testrun-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 12px;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  font-family: var(--font);
+  font-size: 12px;
+  color: var(--text);
+  text-align: left;
+}
+.testrun-head:hover { background: rgba(255, 255, 255, .02); }
+.testrun-caret { color: var(--dim); width: 10px; }
+.testrun-badge {
+  color: var(--cyan);
+  font-weight: 700;
+  letter-spacing: .5px;
+  white-space: nowrap;
+}
+.testrun-card.passed .testrun-badge { color: var(--green); }
+.testrun-card.failed .testrun-badge { color: var(--red); }
+.testrun-cmd {
+  color: var(--text-bright);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 46ch;
+}
+.testrun-head .spacer { flex: 1; }
+.testrun-status { font-size: 11.5px; white-space: nowrap; }
+.testrun-status.ok { color: var(--green); }
+.testrun-status.err { color: var(--red); }
+.testrun-status.waiting { color: var(--cyan); }
+
+.testrun-focus {
+  padding: 0 12px 6px 30px;
+  font-size: 11px;
+  color: var(--dim);
+}
+.testrun-failures {
+  padding: 4px 12px 8px 30px;
+  border-top: 1px dashed var(--border);
+}
+.testrun-failures-title { font-size: 11px; color: var(--amber); margin-bottom: 4px; }
+.testrun-failures ul { margin: 0; padding-left: 16px; }
+.testrun-failures li {
+  font-family: var(--font);
+  font-size: 11.5px;
+  color: var(--text);
+  line-height: 1.7;
+  word-break: break-all;
+}
+.testrun-output { border-top: 1px solid var(--border); }
+.testrun-output-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 12px;
+  font-size: 11px;
+  color: var(--dim);
+  background: var(--panel2);
+}
+.testrun-output-src { color: var(--faint); }
+.testrun-output pre {
+  margin: 0;
+  padding: 8px 12px;
+  max-height: 320px;
+  overflow: auto;
+  font-family: var(--font);
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: #070a08;
+}
+
+/* -------------------- 权限规则面板 (TODOS #47) -------------------- */
+.perm-list { display: flex; flex-direction: column; gap: 10px; }
+.perm-empty {
+  padding: 10px 12px;
+  border: 1px dashed var(--border2);
+  border-radius: var(--radius);
+  font-size: 12px;
+  color: var(--dim);
+  line-height: 1.7;
+}
+.perm-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+.perm-row-main { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.perm-pattern { flex: 1 1 220px; min-width: 160px; }
+.perm-note { width: 100%; font-size: 11.5px; }
+.perm-remove { padding: 4px 10px; color: var(--red); }
+.perm-actions { display: flex; gap: 8px; margin-top: 4px; }
+/* 按工作区授予的项目级 allow 信任（TODOS #47 复审） */
+.perm-trust { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.perm-trust-path {
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 11.5px;
+  color: var(--dim);
+  background: var(--panel2);
+  border: 1px solid var(--border2);
+  border-radius: 4px;
+  padding: 3px 8px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 被忽略的项目级 allow 规则提示（TODOS #47 第三轮复审 P3：接入 UI） */
+.perm-ignored { color: var(--amber); }

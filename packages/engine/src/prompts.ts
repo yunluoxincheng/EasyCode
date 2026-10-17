@@ -75,10 +75,11 @@ export function buildSystemPrompt(
     '5. 任务完成后，主动总结改动点与验证方式；不确定时提出问题而不是猜测。',
     '6. 处理多步骤、较复杂或跨文件的开发任务时，积极使用 todo_write 规划任务清单并在执行中持续更新状态（待办 pending / 进行中 in_progress / 已完成 completed），让进度清晰可见；简单单一问答无需使用。',
     '7. dev server、watch 模式、容器、数据库等不会自行退出的长期命令，必须用 run_command 的 background: true 后台运行（立即返回任务 ID，不会卡住任务）；随后用 read_task_logs 查看输出、确认服务地址与就绪状态，用 stop_task 停止。不要在前台运行这类命令（会被 120s 超时强杀且残留端口）。',
+    '8. 若工具调用返回「权限规则拒绝执行」，说明用户配置的权限规则禁止了该操作：不要重复尝试同一命令或换个写法绕过，改用其他方案或请用户调整权限规则。',
   );
   if (options?.webSearch) {
     lines.push(
-      '8. 涉及时效性信息（新闻/版本/价格/日期）或你不确定的事实时，可用 web_search 联网查证。',
+      '9. 涉及时效性信息（新闻/版本/价格/日期）或你不确定的事实时，可用 web_search 联网查证。',
     );
   }
   return lines.join('\n');

@@ -59,6 +59,34 @@ export interface Host {
     stat(path: string): Promise<null | { isDirectory: boolean; size: number; mtimeMs: number }>;
     unlink?(path: string): Promise<void>;
     rename?(from: string, to: string): Promise<void>;
+    /**
+     * 解析为真实绝对路径（消解符号链接 / 硬链接别名），用于权限裁决与工作区包含性校验。
+     *
+     * 安全要点：`paths.resolve()` 只做词法归一化，**不会**识别 symlink。
+     * 若工作区内存在 `public/key.txt -> ../private/key.txt`，词法路径是 `public/key.txt`
+     * 而实际读取的是 `private/key.txt`，仅靠词法匹配会让针对 `private/**` 的 `deny`
+     * 规则静默失效。因此文件路径类工具在裁决前必须经此能力取得真实目标。
+     *
+     * 返回 `null` 表示目标不存在；宿主不支持该能力时为 `undefined`（调用方按保守策略处理）。
+     * 无法解析（权限不足、循环链接等）请抛出异常，由调用方保守拒绝。
+     */
+    realpath?(path: string): Promise<string | null>;
+    /**
+     * 不跟随符号链接的 stat（等价 `lstat`）。
+     *
+     * 必要性：`realpath()` 对「路径本身不存在」与「路径是符号链接但目标不存在（悬空链接）」
+     * 都返回 ENOENT。若把两者混为一类，守卫会把悬空链接当成「待新建的普通文件」放行，
+     * 随后 `writeFile` 跟随该链接在工作区外部创建文件（PR #9 第四轮复审 P1）。
+     * 因此必须用 lstat 识别「本身是链接」，对悬空链接保守拒绝。
+     *
+     * 返回 `null` 表示路径本身不存在；宿主不支持时为 `undefined`。
+     */
+    lstat?(path: string): Promise<null | {
+      isDirectory: boolean;
+      isSymbolicLink: boolean;
+      size: number;
+      mtimeMs: number;
+    }>;
   };
   process: {
     run(
@@ -184,6 +212,18 @@ export class MemoryHost implements Host {
       if (data === undefined) throw new Error(`文件不存在: ${from}`);
       this.files.set(toKey, data);
       if (fromKey !== toKey) this.files.delete(fromKey);
+    },
+    /** 内存文件系统无符号链接：词法归一化即真实路径 */
+    realpath: async (p: string) => {
+      const key = this.norm(p);
+      if (this.files.has(key)) return key;
+      const hasChild = [...this.files.keys()].some((k) => k.startsWith(`${key}/`));
+      return hasChild || key === '/' ? key : null;
+    },
+    /** 内存文件系统无符号链接：lstat 等价于 stat */
+    lstat: async (p: string) => {
+      const st = await this.fs.stat(p);
+      return st ? { ...st, isSymbolicLink: false } : null;
     },
   };
 

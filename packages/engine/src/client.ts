@@ -20,7 +20,10 @@ import type {
   TurnUndoResult,
   RevertTurnOptions,
   WorkspaceFilePreview,
+  RunTestLoopRequest,
+  TestLoopResult,
 } from './server.js';
+import type { TestCommandDetection } from '@easycode/core';
 
 /**
  * UI 与引擎之间的传输抽象：
@@ -129,5 +132,24 @@ export interface AgentClient {
     recordId: string,
     label: { selectedId?: string; defer: boolean },
   ): Promise<void>;
+  /** 发起一次测试自愈循环（TODOS #39）：运行测试 → 失败自动修复 → 重跑直至全绿或轮次耗尽 */
+  runTestLoop?(id: string, options?: RunTestLoopRequest): Promise<TestLoopResult>;
+  /** 探测该会话将要执行的测试命令（供 UI 展示探测结果，TODOS #39） */
+  detectSessionTestCommand?(id: string): Promise<TestCommandDetection | null>;
+  /**
+   * 查询某个工作区是否已被用户显式信任（可启用项目级 allow 规则）。
+   *
+   * 信任判定必须由引擎统一负责：路径规范化（分隔符 / Windows 大小写）只有一份实现，
+   * UI 若自行比对字符串，会出现「显示已信任但撤销无效」这类权限撤销失败
+   * （PR #9 第三轮复审 P1）。
+   *
+   * 实现须在比较前刷新工作区的**物理身份**：符号链接被改指后词法路径不变，
+   * 只按字符串比对会把给旧项目的授权转移给新目标（PR #9 第八轮复审 P1）。
+   */
+  isProjectTrusted?(workspaceRoot: string): Promise<boolean>;
+  /** 授予 / 撤销某个工作区的项目级 allow 信任（由引擎写回本地设置） */
+  setProjectTrust?(workspaceRoot: string, trusted: boolean): Promise<Settings>;
+  /** 该项目中被信任策略忽略的 allow 规则条数（供 UI 提示） */
+  countIgnoredProjectAllowRules?(workspaceRoot: string): Promise<number>;
   onEvent(listener: (payload: { sessionId: string; event: AgentEvent }) => void): () => void;
 }

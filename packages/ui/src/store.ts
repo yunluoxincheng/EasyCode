@@ -6,18 +6,27 @@ import type {
   Usage,
   TodoItem,
   BackgroundTaskInfo,
+  TestRunSummary,
 } from '@easycode/core';
 import {
   providerLabel,
   type ProjectEntry,
   type Settings,
   type TurnCheckpointSummary,
+  type RunTestLoopRequest,
 } from '@easycode/engine';
 import type { AgentClient } from './client.js';
 
 export type ViewBlock = { type: 'text' | 'thinking'; text: string };
 export type ViewName = 'chat' | 'settings';
-export type SettingsSection = 'models' | 'websearch' | 'general' | 'reflex' | 'about';
+export type SettingsSection =
+  | 'models'
+  | 'websearch'
+  | 'general'
+  | 'permissions'
+  | 'testloop'
+  | 'reflex'
+  | 'about';
 
 export type UserItem = { kind: 'user'; id: string; text: string; ts?: number; msgId?: string };
 export type AssistantItem = { kind: 'assistant'; id: string; blocks: ViewBlock[] };
@@ -38,12 +47,34 @@ export type ApprovalItem = {
   requestId: string;
   name: string;
   input: unknown;
+  /** 触发原因（如命中的权限规则，TODOS #47） */
+  reason?: string;
   status: 'pending' | 'approved' | 'denied';
 };
 export type ErrorItem = { kind: 'error'; id: string; message: string };
+/** 测试自愈循环单轮结果卡片（TODOS #39） */
+export type TestRunItem = {
+  kind: 'testrun';
+  id: string;
+  round: number;
+  maxRounds: number;
+  command: string;
+  source: string;
+  focus?: string;
+  status: 'running' | 'passed' | 'failed';
+  exitCode?: number | null;
+  durationMs?: number;
+  summary?: TestRunSummary;
+  outputTail?: string;
+};
 
-/** 回合内条目：过程性内容（思考/工具/审批/错误），与顶层用户消息、回合容器相区分 */
-export type TurnEntry = AssistantItem | ToolItem | ApprovalItem | ErrorItem;
+/** 回合内条目：过程性内容（思考/工具/审批/错误/测试轮次），与顶层用户消息、回合容器相区分 */
+export type TurnEntry =
+  | AssistantItem
+  | ToolItem
+  | ApprovalItem
+  | ErrorItem
+  | TestRunItem;
 
 /** 一个回合：一次发送的完整执行（思考 + 工具调用 + 中间说明 + 最终回答） */
 export type TurnItem = {
@@ -532,6 +563,38 @@ export class AppStore {
       this.showToast('✓ 上下文已智能压缩，已腾出 Token 空间');
     } catch (err) {
       this.showToast(`压缩失败: ${err instanceof Error ? err.message : String(err)}`, 'err');
+    }
+  }
+
+  /**
+   * 启动测试自愈循环（TODOS #39）：运行测试 → 失败自动修复 → 重跑，直至全绿或轮次耗尽。
+   * 过程与结果由 test_run_* 事件驱动渲染 <TestRunCard>，此处只负责发起与错误提示。
+   */
+  async runTestLoop(options?: RunTestLoopRequest): Promise<void> {
+    const id = this.activeId;
+    if (!id) return;
+    const state = this.getOrCreateSessionState(id);
+    if (state.running || this.running) {
+      this.showToast('会话正在运行中，请先等待完成或停止', 'err');
+      return;
+    }
+    if (!this.client.runTestLoop) {
+      this.showToast('当前宿主不支持测试自愈循环', 'err');
+      return;
+    }
+    try {
+      const result = await this.client.runTestLoop(id, options);
+      if (result.reason === 'aborted' && result.message) {
+        this.showToast(result.message);
+      }
+      // 修复回合可能改动了文件，刷新快照与文件树（同 done 事件处理）
+      void this.refreshCheckpoints(id);
+      this.fileTreeRefreshTick++;
+    } catch (err) {
+      this.showToast(
+        err instanceof Error ? err.message : '测试自愈循环启动失败',
+        'err',
+      );
     }
   }
 
@@ -1264,7 +1327,28 @@ export class AppStore {
   }
 
   async saveSettings(patch: Partial<Settings>): Promise<void> {
-    this.settings = await this.client.updateSettings(patch);
+    // 项目信任授权只能经 setProjectTrust 变更（引擎是唯一事实来源）。
+    // 设置页草稿可能早于授权操作生成：若把陈旧的 trustedWorkspaces 一并提交，
+    // 会把用户刚撤销的授权静默写回（PR #9 第六轮复审 P1）。
+    // 因此普通保存一律沿用**引擎当前的**授权列表，不携带草稿中的值。
+    const sanitized: Partial<Settings> = { ...patch };
+    if (sanitized.permissions) {
+      const { trustedWorkspaces: _draftTrust, ...restPermissions } = sanitized.permissions;
+      sanitized.permissions = {
+        ...restPermissions,
+        trustedWorkspaces: this.settings?.permissions?.trustedWorkspaces ?? [],
+      };
+    }
+    this.settings = await this.client.updateSettings(sanitized);
+    this.notify();
+  }
+
+  /**
+   * 接受引擎返回的最新设置（如信任授权后由引擎写回）。
+   * 授权类操作的唯一事实来源是引擎，UI 只负责回读，不自行推导。
+   */
+  applySettings(next: Settings): void {
+    this.settings = next;
     this.notify();
   }
 
@@ -1397,7 +1481,13 @@ export class AppStore {
             ) ??
             turn.items.find((i): i is ToolItem => i.kind === 'tool' && i.callId === event.callId);
           if (tool) {
-            tool.status = event.isError ? 'error' : event.content.includes('用户拒绝') ? 'denied' : 'ok';
+            // 结构化优先：权限规则拒绝 / 用户拒绝都以 approved=false 表达，
+            // 不再依赖匹配中文提示文本（文本一改就会把拒绝误判成成功）
+            tool.status = event.isError
+              ? 'error'
+              : event.approved === false || event.content.includes('用户拒绝')
+                ? 'denied'
+                : 'ok';
             tool.result = event.content;
             tool.durationMs = event.durationMs;
             if (tool.name === 'todo_write' && !event.isError) {
@@ -1419,12 +1509,17 @@ export class AppStore {
         if (isActive) this.flushPendingNotify();
         this.flushAssistantInState(state);
         state.status = 'waiting';
+        // 测试自愈循环（TODOS #39）的审批发生在任何测试事件之前：必须先建立回合容器，
+        // 否则审批卡片落到顶层，与随后的测试轮次/修复过程分离成两条时间线，
+        // 且 approval_resolved 找不到它（卡片永远停在「等待批准」）
+        if (event.toolName === 'test_loop') this.ensureWritableTurnInState(state);
         this.pushToTurnInState(state, {
           kind: 'approval',
           id: this.nextId(),
           requestId: event.requestId,
           name: event.toolName,
           input: event.input,
+          reason: event.reason,
           status: 'pending',
         });
         if (isActive) {
@@ -1440,13 +1535,16 @@ export class AppStore {
 
       case 'approval_resolved': {
         if (isActive) this.flushPendingNotify();
-        const turn = state.currentTurn;
-        if (turn) {
-          const approval = turn.items.find(
+        // 同时兼容回合内与顶层条目：旧会话或异常时序下审批卡片可能不在当前回合里，
+        // 只查 currentTurn 会让卡片永远停在「等待批准」
+        const approval =
+          state.currentTurn?.items.find(
+            (i): i is ApprovalItem => i.kind === 'approval' && i.requestId === event.requestId,
+          ) ??
+          state.items.find(
             (i): i is ApprovalItem => i.kind === 'approval' && i.requestId === event.requestId,
           );
-          if (approval) approval.status = event.approved ? 'approved' : 'denied';
-        }
+        if (approval) approval.status = event.approved ? 'approved' : 'denied';
         if (state.running) {
           state.status = 'running';
         }
@@ -1499,6 +1597,78 @@ export class AppStore {
         } else if (event.action === 'started') {
           const sessionTitle = this.sessions.find((s) => s.id === sessionId)?.title || '后台会话';
           this.showToast(`[${sessionTitle}] 启动后台任务: ${event.task.command.slice(0, 40)}`);
+          this.notify(false);
+        }
+        break;
+      }
+
+      case 'test_run_start': {
+        // TODOS #39：测试自愈循环单轮开始——进入回合时间线，不占用工具卡片
+        if (isActive) this.flushPendingNotify();
+        this.flushAssistantInState(state);
+        // 显式保证可写回合存在：/test-loop 不经 send() 启动，没有回合容器时条目会丢失
+        this.ensureWritableTurnInState(state);
+        this.pushToTurnInState(state, {
+          kind: 'testrun',
+          id: this.nextId(),
+          round: event.round,
+          maxRounds: event.maxRounds,
+          command: event.command,
+          source: event.source,
+          focus: event.focus,
+          status: 'running',
+        });
+        if (isActive) {
+          this.syncActiveState(state);
+          this.turnAtBottom = true;
+          this.notify(true);
+        } else {
+          this.notify(false);
+        }
+        break;
+      }
+
+      case 'test_run_result': {
+        if (isActive) this.flushPendingNotify();
+        const item = this.findTestRunItemInState(state, event.round);
+        if (item) {
+          item.status = event.ok ? 'passed' : 'failed';
+          item.exitCode = event.exitCode;
+          item.durationMs = event.durationMs;
+          item.summary = event.summary;
+          item.outputTail = event.outputTail;
+        }
+        if (isActive) {
+          this.syncActiveState(state);
+          this.notify(true);
+        }
+        break;
+      }
+
+      case 'test_loop_done': {
+        if (isActive) this.flushPendingNotify();
+        // 循环收敛：折叠本轮自愈回合并复位运行态（最后一轮测试后可能没有后续 done 事件）
+        const hadError = state.currentTurn?.items.some((i) => i.kind === 'error') ?? false;
+        if (hadError) state.status = 'error';
+        this.closeTurnInState(state);
+        if (isActive) {
+          this.syncActiveState(state);
+          this.turnAtBottom = true;
+          void this.refreshCheckpoints(sessionId);
+          this.fileTreeRefreshTick++;
+          this.notify(true);
+          if (event.reason === 'passed') {
+            this.showToast(`[ OK ] 测试自愈完成：第 ${event.rounds} 轮全部通过`);
+          } else if (event.reason === 'max_rounds') {
+            this.showToast(`[ ERR ] 测试仍有失败：已达 ${event.rounds} 轮自愈上限，请人工介入`, 'err');
+          } else if (event.reason === 'error') {
+            this.showToast(event.message ?? '测试自愈循环异常中断', 'err');
+          } else if (event.message) {
+            this.showToast(event.message);
+          }
+        } else if (event.reason === 'passed') {
+          const sessionTitle = this.sessions.find((s) => s.id === sessionId)?.title || '后台会话';
+          this.showToast(`[${sessionTitle}] 测试自愈完成（${event.rounds} 轮）`);
           this.notify(false);
         }
         break;
@@ -1579,6 +1749,42 @@ export class AppStore {
     state.currentAssistant = null;
   }
 
+  /**
+   * 确保存在一个「可写入」的回合容器（TODOS #39）。
+   * 测试自愈循环不是经 send() 启动的，没有 user 消息也就没有回合容器；
+   * 若条目直接落到顶层，会被 Transcript 的回合聚合渲染过滤掉（历史缺陷：界面全空）。
+   * 因此测试轮次与随后的修复过程必须挂进一个显式回合。
+   */
+  private ensureWritableTurnInState(state: SessionViewState): TurnItem {
+    if (state.currentTurn && state.currentTurn.durationMs === undefined) {
+      return state.currentTurn;
+    }
+    const turn: TurnItem = {
+      kind: 'turn',
+      id: this.nextId(),
+      startedAt: Date.now(),
+      collapsed: false,
+      items: [],
+    };
+    state.items.push(turn);
+    state.currentTurn = turn;
+    state.running = true;
+    state.status = 'running';
+    return turn;
+  }
+
+  /** 折叠并关闭当前回合（测试自愈循环收敛时复用 done 的收尾语义） */
+  private closeTurnInState(state: SessionViewState): void {
+    const turn = state.currentTurn;
+    if (!turn) return;
+    this.flushAssistantInState(state);
+    turn.durationMs = Date.now() - turn.startedAt;
+    turn.collapsed = true;
+    state.currentTurn = null;
+    state.running = false;
+    if (state.status !== 'error') state.status = 'idle';
+  }
+
   private pushToTurnInState(state: SessionViewState, item: TurnEntry): void {
     if (state.currentTurn) {
       state.currentTurn.items.push(item);
@@ -1586,5 +1792,23 @@ export class AppStore {
     } else {
       state.items.push(item);
     }
+  }
+
+  /** 定位指定轮次的测试卡片（先查回合内条目，再查顶层条目） */
+  private findTestRunItemInState(
+    state: SessionViewState,
+    round: number,
+  ): TestRunItem | undefined {
+    for (let i = state.items.length - 1; i >= 0; i--) {
+      const entry = state.items[i];
+      if (entry.kind === 'testrun' && entry.round === round) return entry;
+      if (entry.kind === 'turn') {
+        for (let j = entry.items.length - 1; j >= 0; j--) {
+          const sub = entry.items[j];
+          if (sub.kind === 'testrun' && sub.round === round) return sub;
+        }
+      }
+    }
+    return undefined;
   }
 }

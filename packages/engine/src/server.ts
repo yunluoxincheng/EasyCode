@@ -12,6 +12,7 @@ import {
   SessionData,
   SessionMeta,
   runAgentLoop,
+  type LoopResult,
   createBuiltinTools,
   runWebSearch,
   listFilesRecursively,
@@ -38,14 +39,24 @@ import {
   resolveWorkspacePath,
   resolveCodeRangeMentions,
   parseCodeRangeMentions,
+  detectTestCommand,
+  describeCommandParseRisk,
+  describePermissionRule,
+  evaluatePermission,
+  resolveApprovalRequirement,
+  resolveRealPathInWorkspace,
+  type PermissionRule,
+  type PermissionRuleSource,
+  type TestCommandDetection,
 } from '@easycode/core';
 import { Settings, DEFAULT_SETTINGS, PROVIDER_PRESETS } from './settings.js';
 import type { ModelTestResult, ProviderEntry, ProviderModel, ProviderModelInfo } from './settings.js';
 import { loadModelDirectory, resolveModelMeta } from './model-catalog.js';
 import { buildSystemPrompt } from './prompts.js';
-import { WorkspaceLockManager } from './workspace-lock.js';
+import { Mutex, WorkspaceLockManager } from './workspace-lock.js';
 import { DecisionStatsManager } from './stats.js';
 import { ShadowDecisionPolicy } from './shadow.js';
+import { runTestLoop, type TestLoopResult } from './test-loop.js';
 import {
   CheckpointManager,
   type TurnCheckpointSummary,
@@ -54,7 +65,7 @@ import {
   type RevertTurnOptions,
 } from './checkpoints.js';
 
-export type { TurnCheckpointSummary, TurnUndoPreview, TurnUndoFilePreview, RevertTurnOptions };
+export type { TurnCheckpointSummary, TurnUndoPreview, TurnUndoFilePreview, RevertTurnOptions, TestLoopResult };
 
 /** 回合快照回退执行结果（TODOS #36） */
 export interface TurnUndoResult {
@@ -72,6 +83,16 @@ export interface WorkspaceFilePreview {
   totalLines: number;
   size: number;
   truncated: boolean;
+}
+
+/** 测试自愈循环启动参数（TODOS #39） */
+export interface RunTestLoopRequest {
+  /** 显式指定测试命令（覆盖自动探测与设置项） */
+  command?: string;
+  /** 最大自愈轮次（1~5，默认取设置或 3） */
+  maxRounds?: number;
+  /** 聚焦目标（/test-loop 参数），仅注入修复提示词，不改变测试命令 */
+  focus?: string;
 }
 
 export interface CreateSessionOptions {
@@ -105,6 +126,28 @@ interface SessionRuntime {
   approval: ApprovalManager;
   controller?: AbortController;
   running: boolean;
+  /** 测试自愈循环执行中（TODOS #39）：与 running 一同阻止并发发送 */
+  busy?: boolean;
+  /**
+   * 抑制常规 `done` 事件（TODOS #39 第三轮复审 P2）。
+   *
+   * 测试自愈循环的修复回合是一次**内部** Agent 回合：它结束后外层循环还要继续跑测试。
+   * 若照常发 `done`，前端会立即关闭当前回合、恢复 idle，并可能弹出「任务完成」通知，
+   * 而实际上自愈尚未结束——表现为一个任务被拆成多段 UI 回合、未完成就先提示完成。
+   * 因此修复回合期间置位本标记，由外层 `test_loop_done` 掌握最终结束语义。
+   */
+  suppressDone?: boolean;
+  /**
+   * 已从会话表删除（PR #9 第七轮复审 P2）。
+   *
+   * 删除发生在测试循环启动早期时，循环仍持有原 rt 对象，退出时还会调用
+   * `persistSession(rt)` —— 若不拦，已删除的会话文件会被重新写回磁盘（会话「复活」）。
+   */
+  deleted?: boolean;
+  /** 在途落盘任务：删除会话时必须等**全部**落定，否则较早写入完成时会把文件重新创建 */
+  persisting?: Set<Promise<void>>;
+  /** 落盘串行链尾：同一会话的写入排队，避免旧快照晚于新快照落盘 */
+  persistQueue?: Promise<void>;
 }
 
 export interface SessionEventPayload {
@@ -121,6 +164,18 @@ export class AgentServer {
   private sessions = new Map<string, SessionRuntime>();
   private readonly events = new Emitter<SessionEventPayload>();
   private readonly workspaceLocks = new WorkspaceLockManager();
+  /**
+   * 会话级「运行上下文操作」互斥锁（PR #9 第三轮复审 P1）。
+   *
+   * 仅靠入口处 `isSessionBusy()` 检查存在 TOCTOU：某操作通过检查后停在异步等待
+   * （如 `host.fs.stat()` / 快照查询），期间测试自愈循环启动进入 busy，
+   * 该操作随后仍会完成，导致会话上下文中途被改。
+   *
+   * 约定：所有会改写运行上下文或磁盘文件的操作，都在**临界区内**重新检查 busy，
+   * 而不是只在入口检查一次；`runTestLoop` 只在临界区内完成「检查 + 置 busy」，
+   * 之后立即释放，避免长时间占锁阻塞交互。
+   */
+  private readonly sessionOpLocks = new Map<string, Mutex>();
   /** 会话绑定的后台任务池（TODOS #37）：懒创建，会话删除/应用退出统一清场 */
   private readonly bgManagers = new Map<string, BackgroundTaskManager>();
   private readonly decisionStats: DecisionStatsManager;
@@ -128,6 +183,13 @@ export class AgentServer {
   private reflexPolicy: DecisionPolicy = new NoopDecisionPolicy();
   private settings: Settings = structuredClone(DEFAULT_SETTINGS);
   private settingsLoaded = false;
+  /**
+   * 词法工作区键 → 已解析的物理身份（`realpath` 归一化结果）。
+   *
+   * `isProjectTrusted()` 是同步接口（UI 与多处裁决都要即时判断），而物理身份
+   * 解析是异步的，因此由授予信任、裁决入口等异步路径刷新此缓存，同步查询只读缓存。
+   */
+  private readonly workspaceIdentities = new Map<string, string>();
 
   constructor(private readonly host: Host) {
     this.decisionStats = new DecisionStatsManager(host);
@@ -204,10 +266,18 @@ export class AgentServer {
   ): Promise<SessionMeta> {
     await this.ensureSettings();
     const rt = this.requireSession(sessionId);
-    if (rt.running) {
-      throw new Error('原会话正在运行中，请等待完成或停止后再分叉');
-    }
+    // 分叉读取并克隆历史：必须与测试循环互斥，否则可能克隆到执行中的不一致状态
+    return this.withSessionOpLock(
+      sessionId,
+      '原会话正在运行中，请等待完成或停止后再分叉',
+      () => this.forkSessionLocked(rt, options),
+    );
+  }
 
+  private async forkSessionLocked(
+    rt: SessionRuntime,
+    options?: { upToMessageId?: string; beforeUserIndex?: number },
+  ): Promise<SessionMeta> {
     let slicedMessages: ChatMessage[] = [];
     if (options?.beforeUserIndex !== undefined) {
       const targetUserIndex = options.beforeUserIndex;
@@ -280,37 +350,40 @@ export class AgentServer {
   async trimSessionHistory(id: string, keepRecentTurns = 2): Promise<SessionData> {
     await this.ensureSettings();
     const rt = this.requireSession(id);
-    if (rt.running) {
-      throw new Error('会话正在运行中，请先等待完成或点击停止');
-    }
+    // 压缩会改写历史消息（会话运行上下文），与测试循环互斥
+    return this.withSessionOpLock(id, '会话正在运行中，请先等待完成或点击停止', async () => {
+      if (rt.data.messages.length === 0) return rt.data;
 
-    if (rt.data.messages.length === 0) return rt.data;
+      const compRes = compactHistoryMessages(rt.data.messages, {
+        keepRecentTurns,
+        pruneTools: true,
+      });
 
-    const compRes = compactHistoryMessages(rt.data.messages, {
-      keepRecentTurns,
-      pruneTools: true,
-    });
-
-    if (compRes.compacted) {
-      rt.data.messages = compRes.messages;
-      const latestTodos = extractLatestTodos(rt.data.messages);
-      if (latestTodos) {
-        rt.data.todos = structuredClone(latestTodos);
-      }
-      rt.data.meta.updatedAt = new Date().toISOString();
-      await this.persistSession(rt);
-    } else {
-      // 即使轮数未超过 keepRecentTurns，也对历史旧工具的长输出执行折叠压缩
-      const pruneRes = pruneHistoricalToolResults(rt.data.messages, { keepRecentTurns: 1 });
-      if (pruneRes.modified) {
+      if (compRes.compacted) {
+        rt.data.messages = compRes.messages;
+        const latestTodos = extractLatestTodos(rt.data.messages);
+        if (latestTodos) {
+          rt.data.todos = structuredClone(latestTodos);
+        }
         rt.data.meta.updatedAt = new Date().toISOString();
         await this.persistSession(rt);
+      } else {
+        // 即使轮数未超过 keepRecentTurns，也对历史旧工具的长输出执行折叠压缩
+        const pruneRes = pruneHistoricalToolResults(rt.data.messages, { keepRecentTurns: 1 });
+        if (pruneRes.modified) {
+          rt.data.meta.updatedAt = new Date().toISOString();
+          await this.persistSession(rt);
+        }
       }
-    }
-    return rt.data;
+      return rt.data;
+    });
   }
 
   async listSessions(): Promise<SessionMeta[]> {
+    // 冷启动恢复会话时会用 settings.defaultApprovalMode 等默认值构造运行时，
+    // 必须先加载设置：否则历史会话的审批模式会退回 DEFAULT_SETTINGS（ask），
+    // 导致用户配置的 yolo 在重启后失效、测试自愈卡在审批上（PR #9 第三轮复审发现）
+    await this.ensureSettings();
     const metas = [...this.sessions.values()].map((rt) => rt.data.meta);
     if (metas.length > 0) return metas.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
     // 冷启动：从磁盘恢复
@@ -350,8 +423,27 @@ export class AgentServer {
   }
 
   async deleteSession(id: string): Promise<void> {
+    const rt = this.sessions.get(id);
+    if (rt) {
+      // 删除标记必须先于 abort 落下：会话删除后，任何仍在运行的异步流程
+      // （测试循环、修复回合）都不得把它重新持久化回来（PR #9 第七轮复审 P2）。
+      // persistSession 见到该标记直接放弃写入。
+      rt.deleted = true;
+    }
+    // abort 会中止 controller；测试循环启动早期就已挂上 controller，
+    // 因此「探测命令 / 审批」阶段被删除同样能收到中止信号。
     this.abort(id);
     this.sessions.delete(id);
+    if (rt?.persisting) {
+      // 等**所有**在途落盘落定（不能只等最后一个：串行链上较早的任务完成时
+      // 可能晚于 unlink，把已删除的文件重新创建出来）。deleted 标记已置位，
+      // 排队中的任务轮到时也会自行放弃，因此这里不会无限等待。
+      for (;;) {
+        const pending = rt.persisting;
+        if (!pending || pending.size === 0) break;
+        await Promise.allSettled([...pending]);
+      }
+    }
     // 会话删除同步终止其后台任务，杜绝僵尸进程与孤儿端口（TODOS #37）。
     // 仍有清理失败（存活）任务时保留 manager —— 引用已从会话表摘除，
     // 供应用退出 stopAllBackgroundTasks 兜底再清一次
@@ -384,7 +476,7 @@ export class AgentServer {
 
   async sendMessage(id: string, text: string): Promise<void> {
     const rt = this.requireSession(id);
-    if (rt.running) throw new Error('会话正在运行中，请先等待完成或点击停止');
+    if (rt.running || rt.busy) throw new Error('会话正在运行中，请先等待完成或点击停止');
     const content = text.trim();
     if (!content) throw new Error('消息为空');
     if (rt.data.messages.length === 0) {
@@ -403,7 +495,7 @@ export class AgentServer {
   /** 编辑最近一条用户消息：替换文本、丢弃其后的内容并重新生成 */
   async editLastUserMessage(id: string, text: string): Promise<void> {
     const rt = this.requireSession(id);
-    if (rt.running) throw new Error('会话正在运行中，请先等待完成或点击停止');
+    if (rt.running || rt.busy) throw new Error('会话正在运行中，请先等待完成或点击停止');
     const content = text.trim();
     if (!content) throw new Error('消息为空');
     let idx = -1;
@@ -447,36 +539,47 @@ export class AgentServer {
     await this.runTurn(rt);
   }
 
-  /** 执行一轮 Agent（消息由调用方先行构造；负责运行态与持久化） */
-  private async runTurn(rt: SessionRuntime): Promise<void> {
+  /**
+   * 执行一轮 Agent（消息由调用方先行构造；负责运行态与持久化）。
+   * 返回循环的终止原因：调用方（如测试自愈循环）需要据此区分成功、失败与中止，
+   * 不能只看事件流——事件只表达过程，不表达「这一回合是否真的完成任务」。
+   */
+  private async runTurn(rt: SessionRuntime): Promise<LoopResult> {
     const id = rt.data.meta.id;
     const lastUserMessage = [...rt.data.messages].reverse().find((m) => m.role === 'user');
-    const turnId = `${id}_${lastUserMessage?.id ?? Date.now().toString(36)}`;
     rt.running = true;
-    rt.controller = new AbortController();
+    // 测试自愈循环（TODOS #39）在修复回合中复用循环持有的 controller：
+    // 否则用户点停止只会打断修复回合，循环的 signal 依然存活，下一轮测试会继续跑起来。
+    // 复用时本方法**不拥有**该 controller，收尾阶段不得解除注册（见 finally）。
+    const inheritedController = rt.busy && rt.controller ? rt.controller : undefined;
+    const turnController = inheritedController ?? new AbortController();
+    rt.controller = turnController;
+    let loopResult: LoopResult | undefined;
     let shadowPolicy: ShadowDecisionPolicy | undefined;
     const cleanUserMap = new Map<
       string,
       { content: string; createdAt?: string; rangeContext?: string }
     >();
-    const userMessagesCount = rt.data.messages.filter((m) => m.role === 'user').length;
-    const turnNumber = await this.checkpoints.allocateTurnNumber(
-      id,
-      rt.data.meta.turnSeq,
-      Math.max(1, userMessagesCount),
-    );
-    rt.data.meta.turnSeq = turnNumber;
-    if (lastUserMessage && !lastUserMessage.id) {
-      lastUserMessage.id = `m_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
-    }
-    const turnTracker = this.checkpoints.beginTurn({
-      sessionId: id,
-      workspaceRoot: rt.data.meta.workspaceRoot,
-      turnNumber,
-      userMessageId: lastUserMessage?.id ?? `u_${turnNumber}`,
-    });
     let wireMessages: ChatMessage[] | undefined;
     try {
+      // 快照序号分配与回合开启都可能抛错（磁盘/持久化异常），
+      // 必须放在 try 内，否则 rt.running 会永久保持 true（PR #9 复审 P2）
+      const userMessagesCount = rt.data.messages.filter((m) => m.role === 'user').length;
+      const turnNumber = await this.checkpoints.allocateTurnNumber(
+        id,
+        rt.data.meta.turnSeq,
+        Math.max(1, userMessagesCount),
+      );
+      rt.data.meta.turnSeq = turnNumber;
+      if (lastUserMessage && !lastUserMessage.id) {
+        lastUserMessage.id = `m_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+      }
+      const turnTracker = this.checkpoints.beginTurn({
+        sessionId: id,
+        workspaceRoot: rt.data.meta.workspaceRoot,
+        turnNumber,
+        userMessageId: lastUserMessage?.id ?? `u_${turnNumber}`,
+      });
       const entry = this.settings.providers[rt.data.meta.providerId];
       const firstEnabled = (entry?.models ?? []).find((m) => m.enabled !== false)?.name ?? 'default';
       const model = rt.data.meta.model || firstEnabled;
@@ -503,6 +606,8 @@ export class AgentServer {
             }
           : undefined,
       );
+      // 权限规则（TODOS #47）：全局设置 + 项目级 .easycode/permissions.json 并集
+      const permissionRules = await this.resolvePermissionRules(rt.data.meta.workspaceRoot);
       // 对话中系统消息：模型配置关闭时把系统提示词并入首条用户消息
       // 提取工作区规则与全局偏好并注入系统提示词（天然抗上下文压缩，TODOS #33）
       const projectRules = rt.data.meta.workspaceRoot
@@ -555,8 +660,11 @@ export class AgentServer {
           ? baseMessages
           : mergeSystemIntoUser(baseMessages, systemPrompt);
 
-
-
+      // 工作区物理身份（消解符号链接别名）——锁键与别名登记都以此为准，
+      // 保证同一物理目录的不同写法共享同一把锁（PR #9 第五轮复审 P2）
+      const workspaceIdentity = await this.resolveWorkspaceIdentity(
+        rt.data.meta.workspaceRoot ?? '',
+      );
 
       // 装配微型决策策略（TODOS #40：Shadow Mode 旁路观测）
       // 门控：仅当用户开启 reflexShadowMode 开关时挂载，关闭时 policy 为 undefined（零 CPU 额外计算、零日志写入）
@@ -568,12 +676,12 @@ export class AgentServer {
               sessionId: rt.data.meta.id,
               sessionTitle: rt.data.meta.title,
               workspaceRoot: rt.data.meta.workspaceRoot,
-              turnId,
+              turnId: `${id}_${lastUserMessage?.id ?? Date.now().toString(36)}`,
             },
           ))
         : undefined;
 
-      const result = await runAgentLoop({
+      loopResult = await runAgentLoop({
         provider,
         tools: builtinTools,
         host: this.host,
@@ -583,6 +691,7 @@ export class AgentServer {
         signal: rt.controller.signal,
         approval: rt.approval,
         policy,
+        permissionRules,
         backgroundTasks: await this.bgManagerFor(id),
         onFileChange: async (change) => {
           if (rt.data.meta.workspaceRoot) {
@@ -610,6 +719,10 @@ export class AgentServer {
             });
             return;
           }
+          // 内部修复回合不向外发 done：外层 test_loop_done 才是真正的结束语义。
+          // 否则前端会提前关闭回合、误报「任务完成」，且自愈中途误发桌面通知
+          // （PR #9 第三轮复审 P2）
+          if (event.type === 'done' && rt.suppressDone) return;
           this.emitterFor(id)(event);
         },
         reasoningEffort: rt.data.meta.reasoningEffort ?? '',
@@ -618,11 +731,11 @@ export class AgentServer {
         contextWindow: autoCompact ? contextWindow : undefined,
         autoCompactThreshold: compactThreshold,
         workspaceLock: rt.data.meta.workspaceRoot
-          ? this.workspaceLocks.getLock(rt.data.meta.workspaceRoot)
+          ? this.workspaceLocks.getLock(workspaceIdentity)
           : undefined,
       });
-      if (result.reason === 'error' && result.errorMessage) {
-        this.events.emit({ sessionId: id, event: { type: 'error', message: result.errorMessage } });
+      if (loopResult.reason === 'error' && loopResult.errorMessage) {
+        this.events.emit({ sessionId: id, event: { type: 'error', message: loopResult.errorMessage } });
       }
     } finally {
       await shadowPolicy?.drain();
@@ -640,14 +753,22 @@ export class AgentServer {
         }
       }
       rt.running = false;
-      rt.controller = undefined;
       rt.data.meta.updatedAt = new Date().toISOString();
       const latestTodos = extractLatestTodos(rt.data.messages);
       if (latestTodos) {
         rt.data.todos = latestTodos;
       }
       await this.persistSession(rt);
+      // controller 的释放在持久化**之后**，且只释放本方法自己创建的那个：      // 若在 persistSession 之前就注销（或误释放外层循环的 controller），
+      // 用户恰好在落盘等待期间点停止时 abort() 会找不到 controller，
+      // 循环 signal 不受影响，恢复后又继续跑下一轮测试（PR #9 第七轮复审 P2）。
+      // 继承自测试循环的 controller 由循环的 finally 统一释放。
+      if (!inheritedController && rt.controller === turnController) {
+        rt.controller = undefined;
+      }
     }
+    // 理论上 finally 前一定已赋值；兜底按失败返回，避免调用方误判成功
+    return loopResult ?? { reason: 'error', errorMessage: '回合未产生结果' };
   }
 
   respondApproval(id: string, requestId: string, approved: boolean): void {
@@ -665,6 +786,68 @@ export class AgentServer {
     return this.sessions.get(id)?.running ?? false;
   }
 
+  /**
+   * 会话是否处于「不可安全变更运行上下文」的状态。
+   *
+   * 注意不能只看 `running`：测试自愈循环在两次测试之间 `running === false`
+   * 但 `busy === true`，此时切换工作区会让后续修复回合改到另一个项目，
+   * 而下一轮测试仍在原项目执行（PR #9 复审 P1）。所有影响运行上下文或
+   * 文件状态的操作都必须用这一个判据。
+   */
+  isSessionBusy(id: string): boolean {
+    const rt = this.sessions.get(id);
+    return !!rt && (rt.running || rt.busy === true);
+  }
+
+  /** 取会话级执行互斥锁（同一会话的上下文变更串行化） */
+  private sessionOpLock(id: string): Mutex {
+    let lock = this.sessionOpLocks.get(id);
+    if (!lock) {
+      lock = new Mutex();
+      this.sessionOpLocks.set(id, lock);
+    }
+    return lock;
+  }
+
+  /**
+   * 解析工作区的**物理身份**并把别名登记给锁管理器，返回该身份。
+   *
+   * `/tmp/project` 与 `/tmp/project-link` 是同一目录；若锁只按字符串分槽，
+   * 两个会话绑定不同写法就会各拿一把锁，工作区互斥失效（PR #9 第五轮复审 P2）。
+   * 解析失败时退回词法路径——锁仍能保护同一写法的并发，只是不合并别名。
+   */
+  async resolveWorkspaceIdentity(workspaceRoot: string): Promise<string> {
+    const root = workspaceRoot?.trim();
+    if (!root) return '';
+    const lexical = this.host.paths.resolve(root);
+    let identity = lexical;
+    try {
+      const real = await this.host.fs.realpath?.(lexical);
+      if (real) identity = real;
+    } catch {
+      // 解析失败（权限不足 / 循环链接）不阻断主流程，退回词法身份
+    }
+    this.workspaceLocks.registerAlias(root, identity);
+    this.workspaceLocks.registerAlias(lexical, identity);
+    return identity;
+  }
+
+  /**
+   * 在执行期互斥中执行「会改写运行上下文或磁盘文件」的操作：
+   * 临界区内**重新**检查 busy，消除「入口检查通过 → 异步等待期间循环启动」的 TOCTOU。
+   * `busyMessage` 为拒绝时的提示文案。
+   */
+  private async withSessionOpLock<T>(
+    id: string,
+    busyMessage: string,
+    fn: () => Promise<T> | T,
+  ): Promise<T> {
+    return this.sessionOpLock(id).withLock(async () => {
+      if (this.isSessionBusy(id)) throw new Error(busyMessage);
+      return fn();
+    });
+  }
+
   setApprovalMode(id: string, mode: ApprovalMode): void {
     this.requireSession(id).approval.setMode(mode);
   }
@@ -676,9 +859,10 @@ export class AgentServer {
   /** 会话级模型覆盖（'' = 跟随供应商默认，即第一个启用模型） */
   async setSessionModel(id: string, model: string): Promise<SessionMeta> {
     const rt = this.requireSession(id);
-    if (rt.running) throw new Error('会话运行中，暂不能切换模型');
-    rt.data.meta.model = model.trim();
-    rt.data.meta.updatedAt = new Date().toISOString();
+    await this.withSessionOpLock(id, '会话运行中，暂不能切换模型', () => {
+      rt.data.meta.model = model.trim();
+      rt.data.meta.updatedAt = new Date().toISOString();
+    });
     await this.persistSession(rt);
     return rt.data.meta;
   }
@@ -687,14 +871,15 @@ export class AgentServer {
   async setSessionProvider(id: string, providerId: string, model?: string): Promise<SessionMeta> {
     await this.ensureSettings();
     const rt = this.requireSession(id);
-    if (rt.running) throw new Error('会话运行中，暂不能切换模型服务');
     const entry = this.settings.providers[providerId];
     if (!entry) throw new Error(`未配置的模型服务: ${providerId}`);
     const enabledModels = (entry.models ?? []).filter((m) => m.enabled !== false).map((m) => m.name);
-    rt.data.meta.providerId = providerId;
-    rt.data.meta.model = model?.trim() ?? enabledModels[0] ?? '';
-    rt.data.meta.reasoningEffort = '';
-    rt.data.meta.updatedAt = new Date().toISOString();
+    await this.withSessionOpLock(id, '会话运行中，暂不能切换模型服务', () => {
+      rt.data.meta.providerId = providerId;
+      rt.data.meta.model = model?.trim() ?? enabledModels[0] ?? '';
+      rt.data.meta.reasoningEffort = '';
+      rt.data.meta.updatedAt = new Date().toISOString();
+    });
     await this.persistSession(rt);
     return rt.data.meta;
   }
@@ -712,14 +897,19 @@ export class AgentServer {
   async setSessionWorkspace(id: string, workspace: string): Promise<SessionMeta> {
     const rt = this.requireSession(id);
     const ws = workspace.trim();
+    // 目标目录校验放在锁外：它是纯读取，且可能较慢（网络盘）
     if (ws) {
       const stat = await this.host.fs.stat(ws);
       if (!stat || !stat.isDirectory) {
         throw new Error(`工作区不存在或不是目录: ${ws}`);
       }
     }
-    rt.data.meta.workspaceRoot = ws;
-    rt.data.meta.updatedAt = new Date().toISOString();
+    // 真正的「检查 + 写入」必须在同一临界区内：入口检查（上方无）与写入之间的
+    // 任何 await 都可能被测试循环插队（PR #9 第三轮复审 P1 TOCTOU）
+    await this.withSessionOpLock(id, '会话运行中，暂不能更换工作区', () => {
+      rt.data.meta.workspaceRoot = ws;
+      rt.data.meta.updatedAt = new Date().toISOString();
+    });
     await this.persistSession(rt);
     return rt.data.meta;
   }
@@ -1022,8 +1212,33 @@ export class AgentServer {
   }
 
   private async persistSession(rt: SessionRuntime): Promise<void> {
-    await this.host.fs.mkdir(this.sessionsDir(), { recursive: true });
-    await this.host.fs.writeFile(this.sessionFile(rt.data.meta.id), JSON.stringify(rt.data));
+    // 已删除的会话不得被仍在收尾的异步流程写回磁盘（会话「复活」防护）
+    if (rt.deleted) return;
+    // 串行化同一会话的落盘：
+    // ① 并发写入会让旧快照晚于新快照落盘（后写入的其实是更早的状态）；
+    // ② 若用单个字段记录「在途任务」，第二个任务会覆盖第一个的引用，
+    //    删除时只能等到最后一个，被覆盖的早期任务仍会在删除后把文件写回来
+    //    （PR #9 第八轮复审 P2）。
+    const previous = rt.persistQueue ?? Promise.resolve();
+    const task = previous
+      .catch(() => {
+        // 前一次失败不能阻断后续写入
+      })
+      .then(async () => {
+        // 轮到本次执行时可能已被删除：再次确认，避免排队期间会话被删还写回
+        if (rt.deleted) return;
+        await this.host.fs.mkdir(this.sessionsDir(), { recursive: true });
+        await this.host.fs.writeFile(this.sessionFile(rt.data.meta.id), JSON.stringify(rt.data));
+      });
+    rt.persistQueue = task;
+    const pending = rt.persisting ?? (rt.persisting = new Set());
+    pending.add(task);
+    try {
+      await task;
+    } finally {
+      pending.delete(task);
+      if (rt.persistQueue === task) rt.persistQueue = undefined;
+    }
   }
 
   private async ensureSettings(): Promise<void> {
@@ -1140,11 +1355,21 @@ export class AgentServer {
     ];
 
     for (const rel of candidates) {
-      const fullPath = this.host.paths.join(root, rel);
       try {
-        const stat = await this.host.fs.stat(fullPath);
+        // 自动加载的项目规范会拼进**系统提示词**并发往模型服务，比用户主动引用
+        // 更危险：克隆仓库里 `AGENTS.md -> /home/user/private.txt` 无需要用户操作
+        // 就会被读取上传（PR #9 第六轮复审 P1）。因此与文件预览 / @file 引用一样，
+        // 先取真实目标，越界或无法确认则跳过该候选。
+        const guard = await resolveRealPathInWorkspace(
+          this.host,
+          root,
+          rel,
+          this.host.paths,
+        );
+        if (!guard.ok) continue;
+        const stat = await this.host.fs.stat(guard.value.realPath);
         if (stat && !stat.isDirectory) {
-          const content = await this.host.fs.readFile(fullPath);
+          const content = await this.host.fs.readFile(guard.value.realPath);
           if (content.trim()) {
             const rule: ProjectRuleInfo = {
               path: rel.replace(/\\/g, '/'),
@@ -1247,9 +1472,19 @@ export class AgentServer {
 
       const list: CustomPromptInfo[] = [];
       for (const fileName of mdFiles) {
-        const fullPath = this.host.paths.join(promptsDir, fileName);
         try {
-          const content = await this.host.fs.readFile(fullPath);
+          // 自定义指令模板同样会进入模型上下文，与项目规则一样走真实路径守卫，
+          // 避免工作区内 `.easycode/prompts/x.md -> 工作区外` 泄露外部内容。
+          // 注意：host.paths.join 生成的是绝对路径，这里必须直接给绝对路径
+          // （守卫会解析真实目标并折算回工作区相对路径）
+          const guard = await resolveRealPathInWorkspace(
+            this.host,
+            root,
+            this.host.paths.join(root, '.easycode', 'prompts', fileName),
+            this.host.paths,
+          );
+          if (!guard.ok) continue;
+          const content = await this.host.fs.readFile(guard.value.realPath);
           const id = fileName.slice(0, -3);
           const lines = content.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
           let desc = '自定义指令';
@@ -1363,6 +1598,438 @@ export class AgentServer {
     return this.decisionStats.reviewDecision(sessionId, recordId, label);
   }
 
+  /* -------------------- 工具权限规则 (TODOS #47) -------------------- */
+
+  private projectPermissionsCache = new Map<
+    string,
+    { rules: PermissionRule[]; expiresAt: number }
+  >();
+
+  /** 读取项目级权限规则 `.easycode/permissions.json`（3 秒 TTL；非法条目跳过而非整份失效） */
+  async loadProjectPermissions(workspaceRoot: string): Promise<PermissionRule[]> {
+    const root = workspaceRoot?.trim();
+    if (!root) return [];
+    const now = Date.now();
+    const cached = this.projectPermissionsCache.get(root);
+    if (cached && cached.expiresAt > now) return cached.rules;
+    let rules: PermissionRule[] = [];
+    try {
+      const file = this.host.paths.join(root, '.easycode', 'permissions.json');
+      const stat = await this.host.fs.stat(file);
+      if (stat && !stat.isDirectory) {
+        rules = parsePermissionRules(await this.host.fs.readFile(file), 'project');
+      }
+    } catch {
+      rules = [];
+    }
+    this.projectPermissionsCache.set(root, { rules, expiresAt: now + 3000 });
+    return rules;
+  }
+
+  /**
+   * 工作区规范化键：用于信任白名单比对，避免「只凭目录名或未规范化字符串」授权。
+   * Windows 大小写不敏感，统一小写；分隔符由宿主 paths.resolve 归一。
+   *
+   * 注意：这只是**词法**键，用于给物理身份缓存索引；信任判定本身走物理身份
+   * （见 `resolveTrustIdentity` / `isProjectTrusted`）。
+   */
+  private workspaceTrustKey(workspaceRoot: string): string {
+    const root = workspaceRoot?.trim();
+    if (!root) return '';
+    let resolved: string;
+    try {
+      resolved = this.host.paths.resolve(root);
+    } catch {
+      return '';
+    }
+    // 必须与物理身份键走同一套归一化（分隔符 + Windows 大小写），
+    // 否则缓存索引与白名单比对会因 `\` vs `/` 而永不相等
+    return this.normalizeTrustKey(resolved);
+  }
+
+  /** 归一化一条已解析的绝对路径，用作物理信任键 */
+  private normalizeTrustKey(absolutePath: string): string {
+    const trimmed = absolutePath?.trim();
+    if (!trimmed) return '';
+    const normalized = trimmed.replace(/[\\/]+$/, '').replace(/\\/g, '/');
+    return this.host.paths.sep === '\\' ? normalized.toLowerCase() : normalized;
+  }
+
+  /**
+   * 解析工作区的**物理身份**（消解符号链接）并写入缓存。
+   *
+   * 信任必须绑定物理项目而非词法别名：`ws-link -> projectA` 被授权后，
+   * 若链接改指 `projectB`，词法键不变但已不是同一个项目——按词法比对会把
+   * 给 A 的免审批权限转移给 B（PR #9 第八轮复审 P1）。
+   * 解析失败（宿主无 realpath / 权限不足）时退回词法路径，此时只承认
+   * 与词法键完全一致的记录，不放宽到「同名前缀」比较。
+   */
+  private async resolveTrustIdentity(
+    workspaceRoot: string,
+  ): Promise<{ lexical: string; identity: string; stored: string } | null> {
+    const root = workspaceRoot?.trim();
+    if (!root) return null;
+    let stored: string;
+    try {
+      stored = this.host.paths.resolve(root);
+    } catch {
+      return null;
+    }
+    const lexical = this.normalizeTrustKey(stored);
+    if (!lexical) return null;
+    let identity = lexical;
+    try {
+      const real = await this.host.fs.realpath?.(stored);
+      if (real) {
+        stored = real;
+        identity = this.normalizeTrustKey(real);
+      }
+    } catch {
+      // 解析失败：退回词法身份
+    }
+    // 每次解析都覆盖缓存：符号链接改指后必须让旧身份失效
+    this.workspaceIdentities.set(lexical, identity);
+    if (identity !== lexical) this.workspaceIdentities.set(identity, identity);
+    return { lexical, identity, stored };
+  }
+
+  /**
+   * 指定工作区是否已被用户显式信任（可启用项目级 allow 规则）。
+   *
+   * 这是**同步**查询，只读已解析的物理身份缓存；符号链接改指后必须由异步入口
+   * （`getProjectTrust` / `resolvePermissionRules` / `setProjectTrust`）刷新。
+   * 内部裁决路径（`resolvePermissionRules`）总是先刷新再调用，因此不会用过期身份放行；
+   * 面向用户的查询请用 `getProjectTrust`。
+   */
+  isProjectTrusted(workspaceRoot: string): boolean {
+    const key = this.workspaceTrustKey(workspaceRoot);
+    if (!key) return false;
+    const entries = new Set(
+      (this.settings.permissions?.trustedWorkspaces ?? [])
+        .map((entry) => this.normalizeTrustKey(entry))
+        .filter(Boolean),
+    );
+    if (entries.size === 0) return false;
+    // 优先按**物理身份**比对：符号链接改指后词法路径不变，只有物理目标能分辨
+    // 「授权给哪个项目」（PR #9 第八轮复审 P1）
+    const identity = this.workspaceIdentities.get(key);
+    if (identity) return entries.has(identity);
+    // 尚未解析过物理身份：只接受与词法键完全一致的记录（本身就是物理路径的情形），
+    // 无法确认身份时不放行，绝不退化成「看起来信任过就算信任」
+    return entries.has(key);
+  }
+
+  /** 授予/撤销某个工作区的项目级 allow 信任（写回本地设置，绝不写入项目仓库） */
+  async setProjectTrust(workspaceRoot: string, trusted: boolean): Promise<Settings> {
+    await this.ensureSettings();
+    const keys = await this.resolveTrustIdentity(workspaceRoot);
+    if (!keys) throw new Error('工作区路径无效，无法设置信任');
+    const current = this.settings.permissions?.trustedWorkspaces ?? [];
+    // 旧记录可能是词法路径（升级前写入的），两种写法一并清理，避免重复累积
+    const kept = current.filter((entry) => {
+      const normalized = this.normalizeTrustKey(entry);
+      return normalized !== keys.identity && normalized !== keys.lexical;
+    });
+    const next = trusted ? [...kept, keys.stored] : kept;
+    return this.updateSettings({
+      permissions: {
+        enabled: this.settings.permissions?.enabled !== false,
+        rules: this.settings.permissions?.rules ?? [],
+        trustedWorkspaces: next,
+      },
+    });
+  }
+
+  /**
+   * 合成参与裁决的权限规则：总开关关闭时返回 undefined（彻底回到 ask / yolo 语义）；
+   * 全局规则标注 `source: 'global'`，项目规则由 loadProjectPermissions 标注。
+   *
+   * **信任边界**：项目级 `deny` / `ask` 默认生效（只会收紧权限），但项目级 `allow`
+   * 只在用户显式信任该工作区时参与裁决——工作区代码属低信任输入，
+   * 不能通过仓库内配置自行取消用户的审批保护。
+   */
+  async resolvePermissionRules(workspaceRoot: string): Promise<PermissionRule[] | undefined> {
+    if (this.settings.permissions?.enabled === false) return undefined;
+    // 裁决前刷新物理身份：符号链接改指后必须重新解析，否则会把给旧项目的授权
+    // 继承给新目标（PR #9 第八轮复审 P1）。isProjectTrusted 本身保持同步，
+    // 由这里（以及授予信任时）负责把身份写入缓存。
+    await this.resolveTrustIdentity(workspaceRoot);
+    const globalRules = (this.settings.permissions?.rules ?? [])
+      .map((rule) => normalizePermissionRule(rule, 'global'))
+      .filter((rule): rule is PermissionRule => rule !== null);
+    const projectTrusted = this.isProjectTrusted(workspaceRoot);
+    const projectRules = (await this.loadProjectPermissions(workspaceRoot)).filter(
+      (rule) => projectTrusted || rule.decision !== 'allow',
+    );
+    const rules = [...globalRules, ...projectRules];
+    return rules.length > 0 ? rules : undefined;
+  }
+
+  /**
+   * 异步查询信任状态：先刷新工作区物理身份再判定。
+   *
+   * UI 与任何面向用户的「是否已信任」查询都应走这里——符号链接可能已被改指，
+   * 只读缓存的同步版本会给出过期答案（PR #9 第八轮复审 P1）。
+   */
+  async getProjectTrust(workspaceRoot: string): Promise<boolean> {
+    await this.ensureSettings();
+    await this.resolveTrustIdentity(workspaceRoot);
+    return this.isProjectTrusted(workspaceRoot);
+  }
+
+  /** 项目级配置里被信任策略忽略的 allow 规则条数（供 UI 提示，不参与裁决） */
+  async countIgnoredProjectAllowRules(workspaceRoot: string): Promise<number> {
+    if (this.settings.permissions?.enabled === false) return 0;
+    // 同样先刷新物理身份，避免用过期信任状态计算提示数量
+    await this.resolveTrustIdentity(workspaceRoot);
+    if (this.isProjectTrusted(workspaceRoot)) return 0;
+    const projectRules = await this.loadProjectPermissions(workspaceRoot);
+    return projectRules.filter((rule) => rule.decision === 'allow').length;
+  }
+
+  /* -------------------- 测试自愈循环 (TODOS #39) -------------------- */
+
+  /** 读取项目级测试配置 `.easycode/test.json`（{ command?, maxRounds? }） */
+  private async readProjectTestConfig(
+    root: string,
+  ): Promise<{ command?: string; maxRounds?: number } | null> {
+    try {
+      const file = this.host.paths.join(root, '.easycode', 'test.json');
+      const stat = await this.host.fs.stat(file);
+      if (!stat || stat.isDirectory) return null;
+      const data = JSON.parse(await this.host.fs.readFile(file)) as Record<string, unknown>;
+      const command = typeof data.command === 'string' ? data.command.trim() : '';
+      const maxRounds =
+        typeof data.maxRounds === 'number' && Number.isFinite(data.maxRounds)
+          ? data.maxRounds
+          : undefined;
+      return { command: command || undefined, maxRounds };
+    } catch {
+      return null;
+    }
+  }
+
+  /** 探测会话工作区将要执行的测试命令（命令优先级：设置项 > 项目配置 > 项目类型自动探测） */
+  async detectSessionTestCommand(sessionId: string): Promise<TestCommandDetection | null> {
+    await this.ensureSettings();
+    const rt = this.requireSession(sessionId);
+    const root = rt.data.meta.workspaceRoot?.trim();
+    if (!root) return null;
+    const project = await this.readProjectTestConfig(root);
+    return detectTestCommand(
+      this.host,
+      root,
+      this.settings.testLoop?.command?.trim() || project?.command,
+    );
+  }
+
+  /**
+   * 启动一次测试自愈循环：运行测试 → 失败则驱动 Agent 修复 → 重跑，直至全绿或轮次耗尽。
+   * 测试命令整体只审批一次（ask 模式），循环内的修复回合仍走常规工具审批与权限规则。
+   */
+  async runTestLoop(sessionId: string, options?: RunTestLoopRequest): Promise<TestLoopResult> {
+    await this.ensureSettings();
+    const rt = this.requireSession(sessionId);
+    // 占位必须与检查处于同一临界区：否则「检查通过 → 异步探测命令期间」
+    // 另一个上下文操作（如工作区切换）可能插入（PR #9 第三轮复审 TOCTOU）
+    await this.withSessionOpLock(sessionId, '会话正在运行中，请先等待完成或点击停止', () => {
+      rt.busy = true;
+    });
+    const controller = new AbortController();
+    // 占位后立刻挂上 controller：从这一刻起到循环结束，用户点停止与
+    // deleteSession 都必须能中止本循环。若等到审批通过后才挂，
+    // 「探测命令 / 等待审批」这段窗口里的停止就是空操作
+    // （PR #9 第七轮复审 P2）。
+    rt.controller = controller;
+    // 只要本次调用已经让前端进入运行态（发出了审批请求或启动了循环），
+    // 就必须在退出时补发终止事件，否则 UI 会永久停在 running（复审 P1）。
+    let uiEngaged = false;
+    let doneEmitted = false;
+    let pendingErrorMessage = '测试自愈循环异常中断';
+    const emit = (event: AgentEvent): void => {
+      if (event.type === 'test_loop_done') doneEmitted = true;
+      this.emitterFor(sessionId)(event);
+    };
+    try {
+      const root = rt.data.meta.workspaceRoot?.trim();
+      if (!root) throw new Error('当前会话未绑定工作区，无法运行测试');
+
+      const project = await this.readProjectTestConfig(root);
+      const detection = await detectTestCommand(
+        this.host,
+        root,
+        options?.command?.trim() || this.settings.testLoop?.command?.trim() || project?.command,
+      );
+      if (!detection) {
+        throw new Error(
+          '未探测到测试命令：请在设置页「测试自愈」中填写自定义命令，或在项目根目录添加 .easycode/test.json',
+        );
+      }
+      const maxRounds = clampInt(
+        options?.maxRounds ?? project?.maxRounds ?? this.settings.testLoop?.maxRounds ?? 3,
+        1,
+        5,
+      );
+      const timeoutMs = clampInt(this.settings.testLoop?.timeoutMs ?? 600_000, 10_000, 1_800_000);
+
+      // 探测/读配置期间可能已被停止或删除会话：此时 signal 已中止，
+      // 直接收敛，不要继续走审批与测试执行
+      if (controller.signal.aborted) {
+        return { ok: false, rounds: 0, reason: 'aborted', message: '测试自愈循环已中止' };
+      }
+
+      // 测试命令同样要过权限规则：该命令可能来自仓库内的 package.json / .easycode/test.json，
+      // 属于不可信输入，绝不能让 deny 规则被「换个执行入口」绕过
+      const permissionRules = await this.resolvePermissionRules(root);
+      // 加载规则是异步的，期间用户可能已经点了停止：必须复核，否则紧接着会
+      // 新建一个审批请求并永久挂起（PR #9 第八轮复审 P2）
+      if (controller.signal.aborted) {
+        return { ok: false, rounds: 0, reason: 'aborted', message: '测试自愈循环已中止' };
+      }
+      const verdict = evaluatePermission(
+        permissionRules,
+        'run_command',
+        { command: detection.command },
+        root,
+        this.host.paths,
+      );
+      if (verdict?.decision === 'deny') {
+        throw new Error(`测试命令被权限规则拒绝：${describePermissionRule(verdict.rule)}`);
+      }
+
+      // 与常规工具调用共用同一套裁决语义（resolveApprovalRequirement）：
+      // allow → 免审批（即使在 ask 模式）；ask → 强制审批（即使在 yolo 模式）；无命中 → 跟随会话模式
+      // 测试命令含无法可靠解析的结构时按保守策略强制审批（与 executeTool 同一语义）
+      const requirement = resolveApprovalRequirement(verdict, true, {
+        parseRisk: describeCommandParseRisk(detection.command),
+      });
+      let approved = true;
+      if (requirement.needApproval) {
+        // 审批请求一旦发出，UI 就会建立运行态回合
+        uiEngaged = true;
+        // 单次审批覆盖整轮循环：确认一次即可，后续重跑与修复回合不再重复弹窗
+        approved = await rt.approval.request(
+          'test_loop',
+          {
+            command: detection.command,
+            framework: detection.framework,
+            source: detection.source,
+            maxRounds,
+          },
+          {
+            force: requirement.force,
+            reason: requirement.reason ?? '测试自愈循环',
+            // 审批监听同一个中止信号：即使停止发生在规则加载与弹窗之间，
+            // 也能立即按拒绝收敛，而不是留下一个悬挂的审批请求
+            signal: controller.signal,
+          },
+        );
+      }
+      if (!approved) {
+        // 必须显式发终止事件：前端已因审批请求进入 running，
+        // 只返回 aborted 会让会话永久卡在运行态（复审 P1）
+        const message = '用户取消了测试自愈循环';
+        emit({ type: 'test_loop_done', ok: false, rounds: 0, reason: 'aborted', message });
+        return { ok: false, rounds: 0, reason: 'aborted', message };
+      }
+      rt.controller = controller;
+      uiEngaged = true;
+      return await runTestLoop({
+        command: detection.command,
+        commandSource: detection.source,
+        maxRounds,
+        focus: options?.focus,
+        signal: controller.signal,
+        emit,
+        runTests: async () => {
+          const started = Date.now();
+          // 与普通敏感工具共享工作区互斥（PR #9 第四轮复审 P2）：
+          // 会话级 sessionOpLock 只能保护同一会话，无法阻止两个会话同时操作同一工作区。
+          // 锁粒度限定为「执行一次测试命令」，绝不能包住整个自愈循环——
+          // 中间的修复回合还要获取同一把锁执行 edit_file 等敏感工具，会死锁。
+          const run = () =>
+            this.host.process.run(detection.command, {
+              cwd: root,
+              timeoutMs,
+              shell: this.settings.shell ?? 'auto',
+              signal: controller.signal,
+            });
+          // 用物理身份取锁：同一工作区的不同写法（别名路径）必须共享同一把锁
+          const res = await this.workspaceLocks.withLock(
+            await this.resolveWorkspaceIdentity(root),
+            run,
+            controller.signal,
+          );
+          const output = [res.stdout, res.stderr]
+            .filter((part) => typeof part === 'string' && part.trim().length > 0)
+            .join('\n');
+          return { exitCode: res.code, output, durationMs: Date.now() - started };
+        },
+        repair: async (prompt) => {
+          // 工作区在循环期间必须固定：一旦被切走，修复回合会去改另一个项目的文件，
+          // 而下一轮测试仍在原项目执行（复审 P1）。正常情况下 setSessionWorkspace
+          // 已被 busy 拦截，这里是拒绝静默漂移的最后一道防线。
+          const currentRoot = rt.data.meta.workspaceRoot?.trim();
+          if (currentRoot !== root) {
+            return {
+              ok: false,
+              message: `测试循环期间会话工作区发生变化（${root} → ${currentRoot || '未绑定'}），已中止以免修改错误项目`,
+            };
+          }
+          rt.data.messages.push({
+            role: 'user',
+            content: prompt,
+            id: `m_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+            createdAt: new Date().toISOString(),
+          });
+          // 修复回合是**内部**回合：抑制常规 done，由外层 test_loop_done 收敛 UI
+          // （否则前端会提前结束回合并误报任务完成，PR #9 第三轮复审 P2）
+          rt.suppressDone = true;
+          let turn: LoopResult;
+          try {
+            // 修复回合的结果必须回传给循环：error / aborted 都要收敛循环，
+            // 否则「修复没成功也继续重跑测试」会白白烧掉剩余轮次
+            turn = await this.runTurn(rt);
+          } finally {
+            rt.suppressDone = false;
+            // runTurn 结束会复位运行态；循环期间保持 busy 阻止并发发送，并把中止信号接管回循环
+            rt.running = false;
+            rt.controller = controller;
+          }
+          if (turn.reason === 'aborted') return { ok: false, aborted: true };
+          if (turn.reason === 'error') {
+            return { ok: false, message: turn.errorMessage ?? '修复回合执行失败' };
+          }
+          return { ok: true };
+        },
+        readDiff: async () => {
+          try {
+            const diff = await getGitDiff(this.host, root);
+            return diff.diff?.trim() ? diff.diff : undefined;
+          } catch {
+            return undefined;
+          }
+        },
+      });
+    } finally {
+      rt.busy = false;
+      if (rt.controller === controller) rt.controller = undefined;
+      // 兜底收敛：任何已让前端进入运行态的路径（含初始化失败、异常）都必须有终止事件，
+      // 否则 UI 会永久停留在 running 并阻断后续发送
+      if (uiEngaged && !doneEmitted) {
+        emit({
+          type: 'test_loop_done',
+          ok: false,
+          rounds: 0,
+          reason: controller.signal.aborted ? 'aborted' : 'error',
+          message: controller.signal.aborted ? '测试自愈循环已中止' : pendingErrorMessage,
+        });
+      }
+      rt.data.meta.updatedAt = new Date().toISOString();
+      await this.persistSession(rt);
+    }
+  }
+
   /* -------------------- 回合级代码改动快照与一键回退 (TODOS #36) -------------------- */
 
   /** 列出会话内所有包含代码改动的回合快照摘要 */
@@ -1387,53 +2054,56 @@ export class AgentServer {
     optionsOrPaths?: RevertTurnOptions | string[],
   ): Promise<TurnUndoResult> {
     const rt = this.requireSession(sessionId);
-    if (rt.running) {
-      throw new Error('会话正在运行中，请先等待完成或点击停止');
-    }
+    // 快照回退会改写磁盘文件。仅入口检查存在 TOCTOU：检查通过后还要 await 快照查询，
+    // 期间测试循环可能启动，回退仍会执行（PR #9 第三轮复审 P1）。
+    // 因此整个「查询 + 回退 + 追加通知」都在执行期互斥内完成，临界区再复核 busy。
+    return this.withSessionOpLock(sessionId, '会话正在运行中，请先等待完成或点击停止', async () => {
+      // P1 #1：先解析目标快照，严格按快照记录的 workspaceRoot 加锁并失效缓存
+      const targetRecord = await this.checkpoints.getTargetRecord(sessionId, turnId);
+      const targetWorkspace = targetRecord.workspaceRoot?.trim();
+      const doRevert = () =>
+        this.checkpoints.revertTurn(sessionId, targetRecord.turnId, optionsOrPaths);
+      const { record, revertedPaths } = targetWorkspace
+        ? await this.workspaceLocks
+            .getLock(await this.resolveWorkspaceIdentity(targetWorkspace))
+            .withLock(doRevert)
+        : await doRevert();
 
-    // P1 #1：先解析目标快照，严格按快照记录的 workspaceRoot 加锁并失效缓存
-    const targetRecord = await this.checkpoints.getTargetRecord(sessionId, turnId);
-    const targetWorkspace = targetRecord.workspaceRoot?.trim();
-    const doRevert = () =>
-      this.checkpoints.revertTurn(sessionId, targetRecord.turnId, optionsOrPaths);
-    const { record, revertedPaths } = targetWorkspace
-      ? await this.workspaceLocks.getLock(targetWorkspace).withLock(doRevert)
-      : await doRevert();
+      if (targetWorkspace) {
+        this.workspaceFilesCache.delete(targetWorkspace);
+      }
+      if (rt.data.meta.workspaceRoot && rt.data.meta.workspaceRoot !== targetWorkspace) {
+        this.workspaceFilesCache.delete(rt.data.meta.workspaceRoot);
+      }
 
-    if (targetWorkspace) {
-      this.workspaceFilesCache.delete(targetWorkspace);
-    }
-    if (rt.data.meta.workspaceRoot && rt.data.meta.workspaceRoot !== targetWorkspace) {
-      this.workspaceFilesCache.delete(rt.data.meta.workspaceRoot);
-    }
+      const pathListStr = revertedPaths.map((p) => `\`${p}\``).join('、');
+      const noticeText = `> **[系统通知 · 快照回退]** 已撤销第 ${record.turnNumber} 回合的文件变更（恢复至修改前状态）：${pathListStr}`;
+      const lastMsg = rt.data.messages[rt.data.messages.length - 1];
+      if (lastMsg && lastMsg.role === 'assistant') {
+        lastMsg.blocks.push({
+          type: 'text',
+          text: `\n\n${noticeText}`,
+        });
+      } else {
+        rt.data.messages.push({
+          role: 'assistant',
+          blocks: [{ type: 'text', text: noticeText }],
+          id: `m_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+          createdAt: new Date().toISOString(),
+        });
+      }
 
-    const pathListStr = revertedPaths.map((p) => `\`${p}\``).join('、');
-    const noticeText = `> **[系统通知 · 快照回退]** 已撤销第 ${record.turnNumber} 回合的文件变更（恢复至修改前状态）：${pathListStr}`;
-    const lastMsg = rt.data.messages[rt.data.messages.length - 1];
-    if (lastMsg && lastMsg.role === 'assistant') {
-      lastMsg.blocks.push({
-        type: 'text',
-        text: `\n\n${noticeText}`,
-      });
-    } else {
-      rt.data.messages.push({
-        role: 'assistant',
-        blocks: [{ type: 'text', text: noticeText }],
-        id: `m_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
-        createdAt: new Date().toISOString(),
-      });
-    }
-
-    rt.data.meta.updatedAt = new Date().toISOString();
-    await this.persistSession(rt);
-    const checkpoints = await this.checkpoints.listCheckpoints(sessionId);
-    return {
-      turnId: record.turnId,
-      turnNumber: record.turnNumber,
-      revertedPaths,
-      checkpoints,
-      session: rt.data,
-    };
+      rt.data.meta.updatedAt = new Date().toISOString();
+      await this.persistSession(rt);
+      const checkpoints = await this.checkpoints.listCheckpoints(sessionId);
+      return {
+        turnId: record.turnId,
+        turnNumber: record.turnNumber,
+        revertedPaths,
+        checkpoints,
+        session: rt.data,
+      };
+    });
   }
 
   /* -------------------- 工作区文件轻量预览 (TODOS #38) -------------------- */
@@ -1444,7 +2114,12 @@ export class AgentServer {
     const root = rt.data.meta.workspaceRoot?.trim();
     if (!root) throw new Error('当前会话未绑定工作区');
     const cleanRel = relPath.replace(/\\/g, '/').replace(/^\.\//, '');
-    const abs = resolveWorkspacePath(root, cleanRel, this.host);
+    // 预览入口同样必须落在工作区内（PR #9 第五轮复审 P1）：
+    // 克隆仓库里 `notes.md -> /home/user/private.txt` 外观与普通文件无异，
+    // 单靠词法检查会让用户在文件树里点开就直接泄露工作区外内容。
+    const guard = await resolveRealPathInWorkspace(this.host, root, cleanRel, this.host.paths);
+    if (!guard.ok) throw new Error(guard.message);
+    const abs = guard.value.realPath;
     const stat = await this.host.fs.stat(abs);
     if (!stat) throw new Error(`文件不存在: ${cleanRel}`);
     if (stat.isDirectory) throw new Error(`目标是目录，无法作为文件预览: ${cleanRel}`);
@@ -1481,6 +2156,60 @@ export class AgentServer {
 
 function num(v: unknown): number | undefined {
   return typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : undefined;
+}
+
+/** 整数钳制（含默认值兜底，用于轮次与超时等必须落在安全区间的配置） */
+function clampInt(value: unknown, min: number, max: number): number {
+  const n = typeof value === 'number' && Number.isFinite(value) ? Math.round(value) : min;
+  return Math.min(Math.max(n, min), max);
+}
+
+/**
+ * 归一化单条权限规则（TODOS #47）：非法条目返回 null 由调用方跳过，
+ * 绝不因一条坏规则让整份配置失效。
+ */
+export function normalizePermissionRule(
+  item: unknown,
+  source: PermissionRuleSource,
+): PermissionRule | null {
+  if (!item || typeof item !== 'object') return null;
+  const raw = item as Record<string, unknown>;
+  const tool = typeof raw.tool === 'string' ? raw.tool.trim() : '';
+  if (!tool) return null;
+  const decision = raw.decision;
+  if (decision !== 'allow' && decision !== 'ask' && decision !== 'deny') return null;
+  const rule: PermissionRule = { tool, decision, source };
+  if (typeof raw.pattern === 'string' && raw.pattern.trim()) {
+    rule.pattern = raw.pattern.trim();
+  }
+  if (typeof raw.note === 'string' && raw.note.trim()) {
+    rule.note = raw.note.trim();
+  }
+  return rule;
+}
+
+/**
+ * 解析权限规则内容：兼容 `{ "rules": [...] }` 与直接数组两种写法；
+ * JSON 损坏或结构不符时返回空数组（调用方据此退化为无规则）。
+ */
+export function parsePermissionRules(
+  raw: string,
+  source: PermissionRuleSource,
+): PermissionRule[] {
+  let data: unknown;
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+  const list = Array.isArray(data) ? data : (data as { rules?: unknown } | null)?.rules;
+  if (!Array.isArray(list)) return [];
+  const out: PermissionRule[] = [];
+  for (const item of list) {
+    const rule = normalizePermissionRule(item, source);
+    if (rule) out.push(rule);
+  }
+  return out;
 }
 
 /** 关闭"对话中系统消息"时：把系统提示词并入首条用户消息（不改动存储的会话数组） */

@@ -4,6 +4,25 @@
 
 ## 待办需求
 
+### 48. 跨平台 CI 纳入全量单元测试（CI Unit Test Matrix）
+
+**状态**：⏳ 待办（规划中）
+
+**背景**：
+当前 `.github/workflows` 的 Release 工作流只负责三平台（Windows / macOS / Ubuntu）安装包构建，**不执行 `pnpm test`**。
+PR #9 复审期间已发现一处测试可移植性缺陷：真实 Shell 语义验证曾硬编码 `C:\Program Files\Git\bin\bash.exe`，在 macOS / Linux 必然失败。
+该处现已改为按平台发现 POSIX Shell（找不到时跳过而非失败），但同类问题缺乏 CI 兜底——只要单测不在多平台运行，写死路径、平台相关时序等问题就会持续潜伏。
+
+**设计方案**：
+1. 新增 `test.yml` 工作流：矩阵 `windows-latest` / `macos-latest` / `ubuntu-latest`，Node 版本与 `engines.node` 对齐；
+2. 步骤：`pnpm install` → `pnpm -r run build` → `pnpm test`；
+3. 触发条件：`pull_request`（所有分支）与 `push` 到 `master`；Release 工作流保持不变，避免打包流程被单测拖慢；
+4. 已知需要留意的平台差异：Unix 进程组生命周期、路径分隔符与大小写语义、`node --test` 的 `--test-force-exit` 行为、外部工具（bash / git）可用性——缺失外部依赖的用例应显式 skip 而不是失败。
+
+**涉及改动**：`.github/workflows/test.yml`（新建）、`package.json`（如需调整 test 脚本）。
+
+---
+
 ### 35. MCP (Model Context Protocol) 协议客户端接入（Stdio / SSE）
 
 **状态**：⏳ 待办（规划中）
@@ -137,7 +156,7 @@ EasyCode 作为开放、可扩展的桌面 Coding Agent，目前仅提供内置�
 
 ### 39. 自主测试运行与排错自愈循环（Auto Test-and-Fix Loop）
 
-**状态**：⏳ 待办（规划中）
+**状态**：✅ 已完成（2026-10-17，经 PR #9 四轮审查返工并真实环境复验通过）——Core 新增 `detectTestCommand`（`package.json` `scripts.test` 按锁文件推断 pnpm / yarn / bun / npm → `Cargo.toml` → `go.mod` → `pyproject.toml` 等 Python 标记，设置项与项目级 `.easycode/test.json` 可覆盖）+ `parseTestOutput` / `extractFailureExcerpt`（vitest / jest / pytest / cargo / go + **Node 内置 `node --test` 的 spec（`ℹ tests/pass/fail` 跨行聚合）与 TAP（`# …` + `not ok N -`，`# TODO` / `# SKIP` 不计失败）**；用例名剥离 reporter 追加的耗时后缀并跳过 `✖ failing tests:` 分节标题；解析不到保持 `undefined` 绝不估算）+ Engine `runTestLoop` 状态机（失败用例 + 日志摘录 + 当前 git diff 组成修复提示词驱动完整 Agent 回合，轮次 1~5 默认 3）+ 测试命令受权限规则约束（`deny` 直接拒绝、`ask` 在 YOLO 下强制审批、`allow` 免审批）+ 停止信号贯穿修复回合 + `/test-loop [聚焦范围]` 与 Git 检视面板「▷ 运行测试并自愈」双入口 + 回合内 `[ TEST n/m ]` 卡片与四态收敛提示。**审查返工加固（三轮）**：① 生命周期——`busy` 在同步检查后立即占位（经执行期互斥收缩临界区，杜绝与工作区切换交错），退出时若已让前端进入运行态则**必发且只发一次** `test_loop_done`（覆盖审批拒绝、初始化失败、异常），`finally` 兜底；② 运行上下文锁定——统一 `isSessionBusy()` 判据 + `withSessionOpLock()` 执行期互斥，工作区 / Provider / 模型切换与快照回退在循环期全部拦截（含真实交错场景），`repair()` 内再校验工作区未漂移；③ `runTurn` 将快照序号分配与回合开启纳入 `try/finally`，异常不再遗留 `running`；④ 修复回合结果与 `runTurn` 终止原因结构化回传（error/aborted 均收敛、修复失败不再白跑重试）；⑤ `test_loop` 审批前先行建立 UI 回合（审批与测试同时间线）；⑥ **内部 `done` 抑制**——修复回合是内部回合，期间不外发常规 `done`，结束语义由 `test_loop_done` 唯一掌握（避免 UI 提前关闭回合并误报任务完成）；⑦ 会话冷启动先加载设置，避免审批模式退回默认 `ask`；⑧ `extractFailureExcerpt` 修正符号类标记（`✖`/`✕`/`×`/`●`）边界、首行标记被丢弃，并在超长日志下改为「首个失败点上下文 + 末尾汇总」两段保留（省略标注计入预算）；⑨ 卡片状态标记统一为 `[ OK ]`/`[ ERR ]`/`[ WAIT ]`
 
 **背景**：
 编写代码只是开发的第一步，确保代码正确无误才是工程交付的根本。目前用户在让 Agent 完成代码修改后，通常需要手动打字让模型运行测试、等待模型报出测试错误、再人工提示模型“根据报错继续修改”，多次反复交互，沟通成本高且容易遗漏测试用例。
@@ -300,6 +319,40 @@ EasyCode 作为开放、可扩展的桌面 Coding Agent，目前仅提供内置�
 - `packages/engine/src/server.ts`：装配层注入决策策略与影子观察器，提供 stats / export IPC API；
 - `packages/ui/src/components/SettingsPage.tsx`：新增 `ReflexDashboard` 监控面板、KPI 卡片与两级折叠树；
 - `packages/ui/src/utils/exportDecision.ts`：微调数据集导出器。
+
+---
+
+### 47. 工具权限规则引擎（Allow / Deny / Ask Policy Rules）
+
+**状态**：✅ 已完成（2026-10-17，经 PR #9 九轮审查返工）——Core 新增 `permissions.ts`（命令前缀匹配自带词边界、路径 glob 单段 / 跨目录、`deny > ask > allow` 顺序无关裁决、`normalizeShellCommand` 与 #40 结构化事实共用实现防前缀绕过）+ `executeTool` 三态短路（`deny` 不执行且不弹审批、`allow` 在 ask 模式免审批、`ask` 在 yolo 模式强制审批并标注规则来源）+ `ApprovalManager.request` 支持 `force` / `reason` + 全局 `Settings.permissions` 与项目级 `.easycode/permissions.json` 并集裁决（3 秒 TTL、非法条目跳过）+ 设置页「权限规则」可视化面板。**审查返工加固（四轮）**：① 信任边界——项目级 `allow` 默认不生效，信任按**工作区**授予（`trustedWorkspaces` 规范化绝对路径比对，信任 A 不连带 B，记录只存本地不落仓库），查询 / 授予 / 撤销全部由引擎负责；② 真实路径守卫——`Host.fs.realpath` + `lstat` 与 `path-guard.ts`：消解符号链接别名（`public/key.txt -> ../private/key.txt` 不再绕过 `private/**`）、**悬空链接识别并保守拒绝**（`realpath` 的 ENOENT 不再与「不存在」混淆，避免 `write_file` 跟随悬空链接写出工作区）、新建文件回溯校验最近存在的父目录、指向工作区外的目标以「路径越界」拒绝、宿主能力不足时保守拒绝；③ **逐文件校验**——`search_files` 递归遍历的每个候选文件在读取前都重新校验真实目标，越界直接跳过并报告数量；④ 路径语义统一——`resolveWorkspaceRelative` 与 `resolveWorkspacePath` 共用同一解析入口，消除「先离开再进入」绕过，Windows 大小写不敏感语义一并统一；⑤ 执行期互斥——`withSessionOpLock` 收敛「检查 + 写入」并复核 busy（消除 TOCTOU），测试命令另纳入**工作区级互斥**（锁粒度为单次测试执行，避免与修复回合死锁）；⑥ 命令绕过——环境变量前缀改为词法解析（支持 `FOO="a b"` 引号含空格）；⑦ 统一裁决——`resolveApprovalRequirement` 供工具调用与引擎内置动作共用；⑧ UI 状态——`tool_result` 显式携带 `approved`，状态标记统一为 `[ OK ]`/`[ ERR ]`/`[ WAIT ]`/`[ DENY ]`，被忽略规则数量接入面板。**五轮补强**：⑨ 验证结果必须传递到实际 I/O——文件工具执行与审批展示均使用**已验证的真实路径**，审批返回后再复核真实目标（不一致即取消），杜绝「检查后、使用前」被替换；⑩ 边界守卫覆盖全部读取入口（`@file` 行范围引用与文件预览同样校验真实目标）；⑪ 工作区锁键以**物理身份**（`realpath`）为准，别名路径共享同一把锁。**六轮补强**：⑫ 授权状态单一事实来源——信任操作同步进设置页草稿，且 UI 唯一保存出口会剥离 `trustedWorkspaces`，任何全量保存都不会恢复已撤销的授权；⑬ 边界守卫覆盖**自动加载**入口（项目规则 `AGENTS.md` / `CLAUDE.md` 与 `.easycode/prompts/*.md` 同样校验真实目标——这些内容会直接进入系统提示词，比用户主动引用更危险）；⑭ 审批后复核同时比较**绝对真实目标**，杜绝「工作区根本身是链接、审批期间被改指到另一项目」时相对路径相同导致的漏判。**七轮补强**：⑮ 命令归一化按完整 **Shell word** 消费赋值前缀（引号片段与裸文本拼接、反斜杠转义），`FOO="a"b rm` 这类写法不再绕过 `deny`；⑯ 测试循环的中止信号在 `busy` 全生命周期内保持可达——修复回合复用循环 controller 且不在落盘前注销，落盘等待期点停止仍然有效；⑰ 会话删除以 `deleted` 标记 + 在途落盘等待实现「不可复活」语义，循环启动即挂 controller，探测阶段也能被停止。**八轮补强**：⑱ 信任绑定 **`realpath` 物理身份**而非词法别名——`ws-link -> A` 被授权后改指 B，不会把 A 的免审批权限带给 B（授予时存物理路径，裁决入口先刷新身份，面向用户的查询走异步 `getProjectTrust`）；⑲ 落盘按会话**串行化**并登记全部在途任务，删除时等集合清空，多个并发持久化任务也不会让文件复活；⑳ `ApprovalManager.request` 接受 `AbortSignal`，权限规则加载完成后复核中止状态，停止操作不再留下悬挂审批。**九轮补强**：㉑ 命令归一化按嵌套深度完整消费 `$( )` 与反引号命令替换（内部允许空格、可再嵌套、双引号内同样生效），`FOO=$(printf x) rm` 不再被截断成 `x) rm` 而绕过 `deny`；㉒ 新增 `describeCommandParseRisk()`——未闭合引号/命令替换视为**不可信**，`resolveApprovalRequirement` 对其强制审批，绝不把「归一化没命中」当成安全放行（`deny` 仍优先短路）；㉓ 三个宿主适配层（Electron / Tauri / Browser Demo）的信任查询统一走异步 `getProjectTrust`，符号链接改指后设置页不再显示过期授权状态。**边界**：命令前缀规则是命令级审批策略而非进程级沙箱，不覆盖 `scripts` 间接执行与复合命令；符号链接防护以「访问前解析真实目标」实现，无法对抗宿主级别的极端并发替换（需 `O_NOFOLLOW` 等宿主能力）——两点均已在设置页与 README 明示
+
+**背景**：
+目前的审批只有 `ask` / `yolo` 二元开关（`packages/core/src/approval.ts`）：`ask` 模式下每一次写文件与执行命令都要人工点一次批准，高频任务里极其打断心流；`yolo` 模式全量放行，连 `rm -rf` / `git push --force` 这类破坏性命令也毫无阻拦。用户被迫在「逐步审批」与「完全放手」之间二选一，这正是 #36 回合快照想普及 yolo 却仍难落地的关键缺口。
+业界主流 Coding Agent 的做法是细粒度权限规则：对特定工具、特定命令前缀或特定路径分别配置 `allow`（免审批）、`ask`（必须确认）、`deny`（直接拒绝）。
+
+**设计方案**：
+1. **规则模型与裁决语义（`packages/core/src/permissions.ts`，零运行时依赖）**：
+   - 规则：`{ tool, pattern?, decision, note? }`；`tool` 支持 `*` 通配；
+   - `pattern` 语义按工具分流：`run_command` 为**命令前缀**（自带词边界，`rm` 不会误命中 `rmdir`，`*` 为通配），文件类工具（`read_file` / `write_file` / `edit_file` / `list_dir` / `search_files`）为**工作区相对路径 glob**（`*` 单段、`**` 跨目录）；其余工具只支持工具级规则，写了 `pattern` 一律视为不命中（绝不制造「看似限制实则无效」的假象）；
+   - 命令归一化与 #40 结构化事实复用同一实现（剥离 `FOO=1` 环境变量前缀、解包 `powershell -c` / `cmd /c` / `bash -c` 包装），杜绝「加个环境变量前缀就绕过 deny」的旁路；
+   - 裁决与规则书写顺序无关、安全优先：任一命中规则为 `deny` 即拒绝，否则任一 `ask` 即强制审批，否则任一 `allow` 即免审批；都没有命中时回落到既有 `ask` / `yolo` 模式语义。
+2. **审批链路接入（`executeTool`）**：
+   - `deny`：工具不执行，直接回传明确的规则拒绝说明（模型不得机械重试）；
+   - `allow`：跳过审批，即使当前会话处于 `ask` 模式；
+   - `ask`：即使在 `yolo` 模式下也强制弹出审批卡片，并标注命中的规则来源。
+3. **两级规则来源**：
+   - 全局设置：`Settings.permissions = { enabled, rules[] }`，总开关关闭时彻底回到纯模式语义；
+   - 项目级 `.easycode/permissions.json`（`{ "rules": [...] }`，3 秒 TTL 缓存，非法条目跳过而非整份配置失效）；全局与项目规则取并集裁决，来源在审批卡片与拒绝文案中明示。
+4. **设置页配置面板**：新增「权限规则」分区，可视化增删改规则（工具下拉、匹配模式、裁决三态、备注），并附命令前缀 / 路径 glob 语义说明与项目配置文件路径提示。
+
+**涉及改动**：
+- `packages/core/src/permissions.ts`：新建规则模型、命令归一化、前缀与 glob 匹配、`evaluatePermission` 裁决；
+- `packages/core/src/approval.ts`：`request()` 支持 `force`（yolo 下强制审批）与 `reason`（规则来源说明）；
+- `packages/core/src/tools/index.ts`：`executeTool` 接入裁决，`ToolContext.permissionRules` 透传；
+- `packages/core/src/loop.ts`：`LoopOptions.permissionRules`；
+- `packages/engine/src/settings.ts`：`permissions` 配置与默认值；
+- `packages/engine/src/server.ts`：全局 + 项目级规则合成与传入循环；
+- `packages/ui/src/components/SettingsPage.tsx` / `PermissionRulesPanel.tsx`：权限规则配置面板。
 
 ---
 

@@ -2,6 +2,17 @@ import type { Host } from '../host.js';
 import { validateToolInput, type JsonSchema } from '../jsonschema.js';
 import type { ApprovalManager } from '../approval.js';
 import { startDecisionObservation, type DecisionPolicy, type DecisionOutcome } from '../policy.js';
+import {
+  describeCommandParseRisk,
+  describePermissionRule,
+  evaluatePermission,
+  normalizeShellCommand,
+  PATH_PATTERN_TOOLS,
+  resolveApprovalRequirement,
+  resolveWorkspaceRelative,
+  type PermissionRule,
+} from '../permissions.js';
+import { resolveRealPathInWorkspace, sameAbsolutePath } from '../path-guard.js';
 import type { BackgroundTaskManager } from '../tasks.js';
 import { readFileTool, writeFileTool, editFileTool, listDirTool } from './fs.js';
 import { searchFilesTool } from './search.js';
@@ -69,6 +80,8 @@ export interface ToolContext {
   callId?: string;
   /** 文件写操作完成后的快照回调（TODOS #36）：携带写前原始内容与写后新内容 */
   onFileChange?: (change: FileChangeEvent) => Promise<void> | void;
+  /** 权限规则（TODOS #47）：全局 + 项目级规则的并集，命中即优先于审批模式生效 */
+  permissionRules?: PermissionRule[];
 }
 
 export interface Tool {
@@ -135,17 +148,16 @@ export function resolveWorkspacePath(
   relative: string,
   host: Host,
 ): string {
-  const abs = host.paths.isAbsolute(relative)
-    ? host.paths.resolve(relative)
-    : host.paths.resolve(workspace, relative);
   const root = host.paths.resolve(workspace);
-  const inside =
-    abs === root ||
-    abs.startsWith(root.endsWith(host.paths.sep) ? root : root + host.paths.sep);
-  if (!inside) {
+  // 与权限规则共用同一套解析入口（TODOS #47 审查返工）：
+  // 包含性校验/大小写语义只实现一次，避免「权限层认为越界、文件层却能访问」的语义漂移
+  const rel = resolveWorkspaceRelative(workspace, relative, host.paths);
+  if (rel === null) {
     throw new Error(`路径越界: ${relative} 不在工作区 ${root} 内`);
   }
-  return abs;
+  return host.paths.isAbsolute(relative)
+    ? host.paths.resolve(relative)
+    : host.paths.resolve(workspace, relative);
 }
 
 export interface ToolExecution {
@@ -174,16 +186,10 @@ const KNOWN_FILE_EXTS = new Set([
 export function extractStructuredOperationFact(name: string, rawInput: unknown): { operationCategory: string; targetExt?: string } {
   const input = typeof rawInput === 'object' && rawInput !== null ? (rawInput as Record<string, unknown>) : {};
   if (name === 'run_command') {
-    let cmd = typeof input.command === 'string' ? input.command.trim() : '';
-    // 1. 剥离环境变量前缀 (如 FOO=bar BAZ=123 cmd)
-    cmd = cmd.replace(/^(?:[a-zA-Z_][a-zA-Z0-9_]*=\S*\s+)+/, '').trim();
-    // 2. 解包常见的 Shell 包装命令 (如 powershell/pwsh -c "...", cmd /c "...")
-    const wrapperMatch = /^(?:powershell(?:\.exe)?|pwsh(?:\.exe)?|cmd(?:\.exe)?|bash|sh)\s+(?:-[a-zA-Z0-9]+\s+|(?:\/c|\/k)\s+)*["']?([^"']+)["']?/i.exec(cmd);
-    if (wrapperMatch) {
-      cmd = wrapperMatch[1].trim();
-      cmd = cmd.replace(/^(?:[a-zA-Z_][a-zA-Z0-9_]*=\S*\s+)+/, '').trim();
-    }
-    // 3. 提取首词并严格校验白名单，非白名单一律归为 shell_other
+    // 命令归一化（剥离环境变量前缀、解包 shell 包装）与权限规则共用同一实现，
+    // 杜绝两套归一化规则漂移（TODOS #40 / #47）
+    const cmd = normalizeShellCommand(input.command);
+    // 提取首词并严格校验白名单，非白名单一律归为 shell_other
     const verbMatch = /^[a-zA-Z0-9_-]+/.exec(cmd);
     const rawVerb = verbMatch ? verbMatch[0].toLowerCase() : '';
     const rootVerb = KNOWN_SHELL_VERBS.has(rawVerb) ? rawVerb : 'other';
@@ -244,6 +250,62 @@ export async function executeTool(
       durationMs: 0,
     };
   }
+  // 真实路径守卫（TODOS #47 第三轮复审 P1）：`paths.resolve()` 只做词法归一化，
+  // 不识别符号链接。工作区内 `public/key.txt -> ../private/key.txt` 这类别名会让
+  // 针对 `private/**` 的 deny 规则静默失效；指向工作区外部的 symlink 还会绕过
+  // 词法 containment。因此文件路径类工具在裁决前必须取得真实目标：
+  // 已存在目标消解全部链接，新建文件则校验其最近存在的父目录。
+  let permissionInput = validated.value;
+  /** 文件类工具经校验后的「真实相对路径」——实际执行必须用它，否则会出现检查/使用不一致 */
+  let verifiedRelative: string | undefined;
+  /**
+   * 经校验的**真实绝对路径**。必须与相对路径一起记下：
+   * 若工作区根本身是符号链接，审批期间整个工作区被指向另一个项目时，
+   * 两个不同项目里的同名文件会得到相同的 `realRelative`（都是 `config.txt`），
+   * 只比较相对路径会漏判（PR #9 第六轮复审 P1）。
+   */
+  let verifiedAbsolute: string | undefined;
+  let rawPathForRecheck: string | undefined;
+  if (PATH_PATTERN_TOOLS.has(name) && ctx.workspace) {
+    const args = validated.value as Record<string, unknown>;
+    const rawPath = typeof args.path === 'string' ? args.path.trim() : '.';
+    const real = await resolveRealPathInWorkspace(ctx.host, ctx.workspace, rawPath, ctx.host.paths);
+    if (!real.ok) {
+      // 无法安全解析时保守拒绝，绝不退化成「当作安全」
+      return {
+        content:
+          `${real.message}。请改用工作区内的普通路径重试；` +
+          '若确需访问该位置，请让用户把它纳入工作区或调整权限规则。',
+        approved: false,
+        isError: false,
+        durationMs: Date.now() - started,
+      };
+    }
+    // 用真实相对路径参与裁决：别名路径也会命中针对真实目标的规则
+    permissionInput = { ...args, path: real.value.realRelative };
+    verifiedRelative = real.value.realRelative;
+    verifiedAbsolute = real.value.realPath;
+    rawPathForRecheck = rawPath;
+  }
+  // 权限规则裁决（TODOS #47）：deny 直接拒绝、ask 强制审批、allow 免审批；
+  // 无规则命中时保持既有「敏感工具在 ask 模式下审批」语义
+  const permission = evaluatePermission(
+    ctx.permissionRules,
+    name,
+    permissionInput,
+    ctx.workspace,
+    ctx.host.paths,
+  );
+  if (permission?.decision === 'deny') {
+    return {
+      content:
+        `权限规则拒绝执行本次调用（命中 ${describePermissionRule(permission.rule)}）。` +
+        '请不要重复尝试同一操作：改用其他方式完成任务，或请用户在设置页「权限规则」中调整该规则。',
+      approved: false,
+      isError: false,
+      durationMs: Date.now() - started,
+    };
+  }
   // 敏感操作语义安全风险评估旁路（TODOS #40 Safety）
   // 提取纯净结构化事实（如 shell_git, shell_rm, fs_write_file_ts），绝不在日志中暴露具体参数明文
   const opFact = registry.isSensitive(name) ? extractStructuredOperationFact(name, validated.value) : undefined;
@@ -265,15 +327,42 @@ export async function executeTool(
         targetExt: opFact.targetExt,
       },
     }) : undefined;
-  // 仅敏感工具（写文件/执行命令）在 ask 模式下需要审批，只读工具直接放行
-  const approved = registry.isSensitive(name)
-    ? await ctx.approval.request(name, validated.value)
+  // 规则 allow 时免审批；规则 ask 时即使在 yolo 模式下也强制弹窗；
+  // 其余情况仅敏感工具（写文件/执行命令）在 ask 模式下需要审批，只读工具直接放行。
+  // 裁决语义统一收敛在 core 的 resolveApprovalRequirement，与引擎内置动作（test_loop）共用，
+  // 杜绝两条链路各写一份判断而漂移
+  // 命令含无法可靠解析的结构时，归一化结果不可信（可能漏判 deny），
+  // 必须走保守审批而不是当作安全放行（PR #9 第九轮复审 P1）
+  const commandParseRisk =
+    name === 'run_command'
+      ? describeCommandParseRisk((validated.value as { command?: unknown }).command)
+      : null;
+  const requirement = resolveApprovalRequirement(permission, registry.isSensitive(name), {
+    parseRisk: commandParseRisk,
+  });
+  const ruleAsk = requirement.force;
+  const ruleAllow = permission?.decision === 'allow';
+  // 审批请求展示真实目标：用户看到的是实际会被写入/读取的位置，而不是可能被替换的链接
+  const approvalInput =
+    verifiedRelative !== undefined
+      ? { ...(permissionInput as Record<string, unknown>) }
+      : validated.value;
+  const approved = requirement.needApproval
+    ? await ctx.approval.request(name, approvalInput, {
+        force: requirement.force,
+        reason: requirement.reason,
+      })
     : true;
   safetyObservation?.actual({
     // 审批模式是配置，不是 Agent 对语义风险的判断；不可参与模型一致率。
-    description: ctx.approval.modeValue === 'ask'
-      ? `Approval requested (${approved ? 'approved' : 'denied'})`
-      : 'YOLO mode allowed action',
+    // 规则放行/强制询问优先于模式描述，避免把「未发生审批」写成 Approval requested 污染影子统计
+    description: ruleAsk
+      ? `Permission rule forced approval (${approved ? 'approved' : 'denied'})`
+      : ruleAllow
+        ? 'Permission rule allowed action'
+        : ctx.approval.modeValue === 'ask'
+          ? `Approval requested (${approved ? 'approved' : 'denied'})`
+          : 'YOLO mode allowed action',
   });
   if (!approved) {
     safetyObservation?.outcome({ status: 'unknown', evidence: 'User denied execution' });
@@ -286,7 +375,44 @@ export async function executeTool(
     };
   }
   try {
-    const run = () => tool.execute(validated.value, ctx);
+    // 审批通过后必须复核：审批期间另一个进程可能把符号链接换成别的目标
+    // （PR #9 第五轮复审 P1）。单次复检不能彻底消除竞态，但能把
+    // 「等待用户点同意」这段最长的窗口收掉；真正的强约束需要宿主级
+    // 句柄/O_NOFOLLOW 能力，见 README「安全设计」的边界说明。
+    if (
+      verifiedRelative !== undefined &&
+      ctx.workspace &&
+      rawPathForRecheck !== undefined &&
+      verifiedAbsolute !== undefined
+    ) {
+      const recheck = await resolveRealPathInWorkspace(
+        ctx.host,
+        ctx.workspace,
+        rawPathForRecheck,
+        ctx.host.paths,
+      );
+      // 必须比较**绝对**真实目标：只比相对路径会漏掉「整个工作区根被改指到另一个
+      // 项目」这种情形（两边都叫 config.txt）。工作区物理身份漂移同样在此暴露。
+      const unchanged =
+        recheck.ok &&
+        recheck.value.realRelative === verifiedRelative &&
+        sameAbsolutePath(recheck.value.realPath, verifiedAbsolute, ctx.host.paths.sep);
+      if (!unchanged) {
+        return {
+          content:
+            '路径在审批期间发生变化（真实目标或工作区物理位置已被替换），为避免写入/读取非预期位置，本次调用已取消。请重新发起操作。',
+          approved: false,
+          isError: false,
+          durationMs: Date.now() - started,
+        };
+      }
+    }
+    // 实际 I/O 使用**已验证的真实路径**：不能用原始路径，否则检查与使用落在不同目标上
+    const executeInput =
+      verifiedRelative !== undefined
+        ? { ...(permissionInput as Record<string, unknown>) }
+        : validated.value;
+    const run = () => tool.execute(executeInput, ctx);
     const content =
       registry.isSensitive(name) && ctx.workspaceLock
         ? await ctx.workspaceLock.withLock(run, ctx.signal)

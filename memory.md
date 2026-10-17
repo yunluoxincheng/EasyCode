@@ -132,6 +132,20 @@
 - **根因**：后台任务条包含每秒自增的运行时长文本（如 `运行中 12s`）。AX 树每秒都在重新生成，导致在 `getAXState()` 获取索引与随后的 `click(index)` 执行之间，AX 树快照必然失效。
 - **军规**：对于包含秒级动态刷新的组件，自动化测试切勿依赖 AX 元素索引，应通过稳定选择器、DOM 查询或截图坐标进行精准操作。
 
+### 3.10 【并发时序】审批「先发事件后登记 resolver」导致永久挂起
+- **现象**：接入测试自愈循环后，`pnpm test` 里有一条 AgentServer 集成用例卡到 30s 才被判超时；桌面端表现为「跑到审批那一步就不动了，点停止也没反应」，任务永远不会结束。
+- **根因**：`ApprovalManager.request()` 先 `emitEvent(approval_request)`、再 `new Promise` 里登记 resolver。同进程宿主（CLI / 演示模式 / 单测）会在事件回调里**同步**调用 `respondApproval` 或 `server.abort`，此时 `pending` 中还没有该 `requestId`，`resolve()` 直接静默 return —— 应答被吞，promise 永不 settle。
+- **军规**：
+  1. 「注册可被回调命中的状态」必须**先于**派发事件，绝不颠倒；
+  2. 派发回调可能抛错，必须 `try/catch` 清理未决态并按拒绝收尾，避免异常把执行链挂死；
+  3. 任何「等用户输入」的链路都要能被中止信号打断（`denyAll` / `AbortController` 贯穿），否则一旦事件丢失就是无限等待；
+  4. 单测里对可能悬挂的 promise 一律加确定性超时（`Promise.race` + `setTimeout`），让缺陷表现为失败而不是把 CI 吊死。
+
+### 3.11 【中止传播】子流程自建 controller 导致「停止」只停一半
+- **现象**：`/test-loop` 修复回合进行中点停止，当前回合停了，但循环随即又跑起下一轮测试，界面仍在动。
+- **根因**：`runTurn` 每次调用都 `rt.controller = new AbortController()`，覆盖了自愈循环持有的 controller。用户中止只打断回合，循环自己的 `signal` 从未 aborted，`while (rounds < maxRounds)` 自然继续。
+- **军规**：**跨阶段的编排循环必须独占一个中止源**，子阶段（回合）应复用而非重建 controller；子阶段结束时若确需复位，也要在编排层恢复引用，并在每轮边界复查 `signal.aborted`。
+
 ---
 
 ## 4. 真实基础设施与实测验证工装

@@ -56,6 +56,39 @@ test('循环：纯文本回复直接完成', async () => {
   assert.equal(env.events.at(-1)?.type, 'done');
 });
 
+test('【P2 拒绝态】权限规则拒绝时 tool_result 事件显式携带 approved=false', async () => {
+  const env = makeEnv('yolo');
+  const call: ToolCallBlock = {
+    type: 'tool_call',
+    id: 'c_deny',
+    name: 'run_command',
+    input: { command: 'rm -rf build' },
+  };
+  const provider = scriptedProvider([
+    { blocks: [call] },
+    { blocks: [{ type: 'text', text: '无法执行，已改用其他方案' }] },
+  ]);
+  const result = await runAgentLoop({
+    ...env,
+    provider,
+    tools: toolsFor(),
+    workspace: '/ws',
+    systemPrompt: 's',
+    permissionRules: [
+      { tool: 'run_command', pattern: 'rm', decision: 'deny', source: 'global' },
+    ],
+  });
+  assert.equal(result.reason, 'completed');
+  const event = env.events.find(
+    (e): e is Extract<AgentEvent, { type: 'tool_result' }> => e.type === 'tool_result',
+  );
+  assert.ok(event, '缺少 tool_result 事件');
+  // UI 依据结构化字段渲染「拒绝」，不再匹配中文提示文本
+  assert.equal(event.approved, false);
+  assert.equal(event.isError, false);
+  assert.match(event.content, /权限规则拒绝执行/);
+});
+
 test('循环：工具调用 → 结果回传 → 第二轮完成', async () => {
   const env = makeEnv('yolo');
   const call: ToolCallBlock = {

@@ -378,6 +378,40 @@ fn fs_readdir(path: String) -> Result<Vec<Dirent>, String> {
     Ok(out)
 }
 
+/// 不跟随符号链接的 stat：用于区分「目标不存在」与「悬空符号链接」。
+/// 二者在 realpath 下都表现为 NotFound，但后者绝不能被当作可新建的普通路径，
+/// 否则 write_file 会跟随该链接在工作区外创建文件。
+#[tauri::command]
+fn fs_lstat(path: String) -> Result<Option<LstatOut>, String> {
+    match std::fs::symlink_metadata(&path) {
+        Ok(m) => {
+            let mtime = m
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            Ok(Some(LstatOut {
+                is_directory: m.is_dir(),
+                is_symbolic_link: m.file_type().is_symlink(),
+                size: m.len(),
+                mtime_ms: mtime,
+            }))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+struct LstatOut {
+    is_directory: bool,
+    is_symbolic_link: bool,
+    size: u64,
+    mtime_ms: u64,
+}
+
 #[tauri::command]
 fn fs_stat(path: String) -> Result<Option<StatOut>, String> {
     match std::fs::metadata(&path) {
@@ -409,6 +443,18 @@ fn fs_unlink(path: String) -> Result<(), String> {
     match std::fs::remove_file(&path) {
         Ok(()) => Ok(()),
         Err(e) => std::fs::remove_dir(&path).map_err(|_| e.to_string()),
+    }
+}
+
+/// 真实路径解析（消解符号链接）：权限裁决与工作区包含性校验依赖它。
+/// 目标不存在返回 None；其它错误（权限不足、循环链接等）原样返回，
+/// 由调用方保守拒绝——绝不把「解析失败」当成「无风险」。
+#[tauri::command]
+fn fs_realpath(path: String) -> Result<Option<String>, String> {
+    match std::fs::canonicalize(&path) {
+        Ok(p) => Ok(Some(p.to_string_lossy().into_owned())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.to_string()),
     }
 }
 
@@ -750,7 +796,10 @@ async fn proc_run(
     timeout_ms: Option<u64>,
     shell: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    let timeout = Duration::from_millis(timeout_ms.unwrap_or(120_000).clamp(1_000, 600_000));
+    // 超时上限必须与引擎/设置页保持一致（1800s）。早期硬编码 600s，
+    // 导致用户设置 20/30 分钟时 Tauri 主力端会在 10 分钟强行终止命令
+    // （PR #9 第五轮复审 P2）。
+    let timeout = Duration::from_millis(timeout_ms.unwrap_or(120_000).clamp(1_000, 1_800_000));
 
     let mut cmd = make_shell_command(&command, cwd.as_deref(), shell.as_deref());
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).stdin(Stdio::null());
@@ -1327,6 +1376,8 @@ fn main() {
             fs_stat,
             fs_unlink,
             fs_rename,
+            fs_realpath,
+            fs_lstat,
             proc_run,
             proc_kill,
             proc_spawn,

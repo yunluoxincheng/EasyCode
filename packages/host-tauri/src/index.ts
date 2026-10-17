@@ -91,6 +91,14 @@ export async function createTauriHost(): Promise<Host> {
       stat: (p) => invoke<FsDirent extends never ? never : { isDirectory: boolean; size: number; mtimeMs: number } | null>('fs_stat', { path: p }),
       unlink: (p) => invoke<void>('fs_unlink', { path: p }),
       rename: (from, to) => invoke<void>('fs_rename', { from, to }),
+      realpath: (p) => invoke<string | null>('fs_realpath', { path: p }),
+      lstat: (p) =>
+        invoke<null | {
+          isDirectory: boolean;
+          isSymbolicLink: boolean;
+          size: number;
+          mtimeMs: number;
+        }>('fs_lstat', { path: p }),
     },
     process: {
       run: async (command, opts) => {
@@ -378,6 +386,14 @@ export async function createTauriClient(options?: { reflexPolicy?: DecisionPolic
     getDecisionTree: () => server.getDecisionTree(),
     exportDecisionDataset: (filter) => server.exportDecisionDataset(filter),
     reviewDecision: (sessionId, recordId, label) => server.reviewDecision(sessionId, recordId, label),
+    runTestLoop: (id, options) => server.runTestLoop(id, options),
+    detectSessionTestCommand: (id) => server.detectSessionTestCommand(id),
+    // 与 Electron / 浏览器 Demo 一致：走异步物理身份查询，
+    // 避免符号链接改指后设置页显示过期授权状态（PR #9 第九轮复审 P2）
+    isProjectTrusted: async (workspaceRoot) => server.getProjectTrust(workspaceRoot),
+    setProjectTrust: (workspaceRoot, trusted) => server.setProjectTrust(workspaceRoot, trusted),
+    countIgnoredProjectAllowRules: (workspaceRoot) =>
+      server.countIgnoredProjectAllowRules(workspaceRoot),
     onEvent: (listener) => server.onEvent(listener),
   };
 }
