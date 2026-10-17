@@ -153,10 +153,20 @@ function computeContentFingerprint(exists: boolean, content: string | null, tag 
   return `present:${content.length}:${h1.toString(16)}:${h2.toString(16)}`;
 }
 
+const utf8Encoder = new TextEncoder();
+
+function utf8ByteLength(text: string): number {
+  return utf8Encoder.encode(text).byteLength;
+}
+
 function recordStorageBytes(rec: TurnCheckpointRecord): number {
-  let bytes = 0;
+  let bytes = 256; // 预留回合记录 JSON 结构元数据开销
   for (const f of rec.files) {
-    bytes += (f.beforeContent?.length ?? 0) + f.afterContent.length;
+    bytes +=
+      128 +
+      utf8ByteLength(f.path) +
+      (f.beforeContent ? utf8ByteLength(f.beforeContent) : 0) +
+      utf8ByteLength(f.afterContent);
   }
   return bytes;
 }
@@ -545,8 +555,8 @@ export class CheckpointManager {
       turnId,
       recordFileChange: async (change: FileChangeEvent) => {
         if (!ctx.workspaceRoot) return;
-        const beforeLen = change.beforeContent?.length ?? 0;
-        const afterLen = change.afterContent.length;
+        const beforeLen = change.beforeContent ? utf8ByteLength(change.beforeContent) : 0;
+        const afterLen = utf8ByteLength(change.afterContent);
         if (beforeLen > MAX_SNAPSHOT_FILE_BYTES || afterLen > MAX_SNAPSHOT_FILE_BYTES) {
           throw new Error(
             `文件体积超过回合快照上限 (${Math.round(MAX_SNAPSHOT_FILE_BYTES / 1024 / 1024)}MB)，拒绝执行未受快照保护的文件修改`,
