@@ -92,10 +92,10 @@
 
 ## 4. 版本控制与 CHANGELOG 纪律（Changelog & Versioning Rules）
 
-### 4.1 提交前必更新 CHANGELOG.md
+### 4.1 提交前必更新 CHANGELOG.md（仅限代码变更）
 - 根目录 `CHANGELOG.md` 是 GitHub Release 描述的单一生成源头（由 Release 工作流通过精确脚本提取）。
-- 提交功能前，必须在 `CHANGELOG.md` 中对应写好更新项（新增、修复、优化、测试）。
-- 纯文档或未发布的变更，写入 `## [未发布]` 段落。
+- 提交功能、修复或优化代码前，必须在 `CHANGELOG.md` 中对应写好更新项（新增、修复、优化、测试）。
+- **非代码修改不记录**：纯文档维护、说明文档、工程文档体系等非代码修改**无需记录在 CHANGELOG.md 中**，变更日志严格聚焦于功能与工程代码实现本身。
 
 ### 4.2 版本号单一事实来源
 - 统一且唯一的应用版本号维护在：`packages/desktop-tauri/src-tauri/tauri.conf.json` 的 `version` 字段。
