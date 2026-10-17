@@ -324,9 +324,19 @@ export function parseTestOutput(output: string): TestRunSummary {
  */
 const FAILURE_MARKER_RE = /(?:^|\s)(?:FAIL(?:ED)?\b|---\s+FAIL\b|[✖✕×●])/u;
 
+/** 尾部截取：无失败标记或预算过小时使用 */
+function tailByChars(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  return text.slice(text.length - maxChars);
+}
+
 /**
- * 提取失败日志摘录：优先从首个失败标记处截取，否则取输出尾部；
- * 统一清理 ANSI 转义并限制长度，防止超长构建日志挤爆上下文与卡片。
+ * 提取失败日志摘录：优先从首个失败标记处截取，否则取输出尾部。
+ *
+ * 超长时必须**两段保留**（PR #9 复审 P2）：早期直接 `slice(-maxChars)` 只留尾部，
+ * 若首个失败点之后还有大量输出，最关键的异常堆栈反而会被截掉。
+ * 现在按约 70% / 30% 分配给「首个失败点起头的上下文」与「末尾汇总」，
+ * 中间省略部分明确标注，总预算不增加。
  */
 export function extractFailureExcerpt(
   output: string,
@@ -336,9 +346,27 @@ export function extractFailureExcerpt(
   if (!text) return '';
   const lines = text.split(/\r?\n/);
   const markerIdx = lines.findIndex((line) => FAILURE_MARKER_RE.test(line.trim()));
+  // 无失败标记：没有「需要抢救的失败点」，直接保留尾部（可预测且不浪费预算）
+  if (markerIdx < 0) return tailByChars(text, maxChars);
+
   // `>= 0`：标记正好落在首行时同样从首行截取（早期写成 `> 0` 会整段丢弃开头）
-  const startLine = markerIdx >= 0 ? markerIdx : Math.max(0, lines.length - 80);
-  let excerpt = lines.slice(startLine).join('\n').trim();
-  if (excerpt.length > maxChars) excerpt = excerpt.slice(excerpt.length - maxChars);
-  return excerpt;
+  const excerpt = lines.slice(markerIdx).join('\n').trim();
+  if (excerpt.length <= maxChars) return excerpt;
+
+  // 中间省略标注本身也占预算，必须先预留，否则拼装结果会超出 maxChars（实测 2020 > 2000）
+  const MARKER_RESERVE = 48;
+  const available = maxChars - MARKER_RESERVE;
+  // 预算过小：两段化在这里毫无意义（标注占比过大），退回纯尾部
+  if (available <= 8) return tailByChars(text, maxChars);
+
+  // 首段占比更高：失败点的堆栈/断言信息比尾部汇总更有诊断价值
+  const headBudget = Math.max(1, Math.floor(available * 0.7));
+  const tailBudget = Math.max(1, available - headBudget);
+  const head = excerpt.slice(0, headBudget).trimEnd();
+  const tail = excerpt.slice(excerpt.length - tailBudget).trimStart();
+  const omitted = Math.max(0, excerpt.length - head.length - tail.length);
+  const marker = `\n…（中间 ${omitted} 字符已省略）…\n`;
+  const merged = `${head}${marker}${tail}`;
+  // 预留足够时理论不会触发；作为最后一道保险优先保住尾部汇总
+  return merged.length <= maxChars ? merged : `${head}${marker}`.slice(0, maxChars - tail.length) + tail;
 }

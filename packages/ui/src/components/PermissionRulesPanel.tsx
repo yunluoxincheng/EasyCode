@@ -1,4 +1,5 @@
 import { TerminalSelect } from './TerminalSelect.js';
+import { useStore } from '../useStore.js';
 import type { PermissionRule } from '@easycode/core';
 import type { Settings } from '@easycode/engine';
 
@@ -40,12 +41,20 @@ export function PermissionRulesPanel({
   draft: Settings;
   patch: (p: Partial<Settings>) => void;
 }) {
+  const store = useStore();
+  const workspaceRoot = store.activeSession?.workspaceRoot ?? '';
   const enabled = draft.permissions?.enabled !== false;
-  const trustProjectAllow = draft.permissions?.trustProjectAllow === true;
+  const trustedWorkspaces = draft.permissions?.trustedWorkspaces ?? [];
   const rules = draft.permissions?.rules ?? [];
+  /** 当前工作区是否已被信任（按规范化路径比对由引擎负责，这里只做展示与写入） */
+  const trusted = workspaceRoot
+    ? trustedWorkspaces.some(
+        (w) => w === workspaceRoot || w.replace(/\\/g, '/') === workspaceRoot.replace(/\\/g, '/'),
+      )
+    : false;
 
   const update = (next: PermissionRule[]): void => {
-    patch({ permissions: { enabled, trustProjectAllow, rules: next } });
+    patch({ permissions: { enabled, trustedWorkspaces, rules: next } });
   };
 
   const setRule = (index: number, changes: Partial<PermissionRule>): void => {
@@ -69,7 +78,7 @@ export function PermissionRulesPanel({
             className={`switch ${enabled ? 'on' : ''}`}
             title={enabled ? '已开启（点击关闭，回到纯 ask / yolo 语义）' : '已关闭（点击开启）'}
             onClick={() =>
-              patch({ permissions: { enabled: !enabled, trustProjectAllow, rules } })
+              patch({ permissions: { enabled: !enabled, trustedWorkspaces, rules } })
             }
           >
             <span className="knob" />
@@ -81,27 +90,39 @@ export function PermissionRulesPanel({
       </div>
 
       <div className="field">
-        <span>信任项目级 allow 规则</span>
-        <div className="auto-scroll-row">
-          <button
-            className={`switch ${trustProjectAllow ? 'on' : ''}`}
-            title={
-              trustProjectAllow
-                ? '已信任（项目配置可免审批，仅在你确认仓库可信时开启）'
-                : '未信任（项目级 allow 规则被忽略）'
-            }
-            onClick={() =>
-              patch({ permissions: { enabled, trustProjectAllow: !trustProjectAllow, rules } })
-            }
-          >
-            <span className="knob" />
-          </button>
-          <span className="auto-scroll-text">
-            {trustProjectAllow
-              ? '已信任：项目自带 allow 规则会生效'
-              : '未信任（推荐）：项目级 deny / ask 生效，allow 被忽略'}
-          </span>
+        <span>项目级 allow 信任</span>
+        <div className="perm-trust">
+          {!workspaceRoot ? (
+            <span className="auto-scroll-text">未绑定工作区（先绑定项目再设置信任）</span>
+          ) : (
+            <>
+              <code className="perm-trust-path" title={workspaceRoot}>
+                {workspaceRoot}
+              </code>
+              <button
+                className={`btn ${trusted ? 'primary' : ''}`}
+                title={
+                  trusted
+                    ? '该项目自带的 allow 规则当前生效（点击撤销）'
+                    : '该项目自带的 allow 规则被忽略（点击信任以启用）'
+                }
+                onClick={() => {
+                  const next = trusted
+                    ? trustedWorkspaces.filter((w) => w !== workspaceRoot)
+                    : [...trustedWorkspaces, workspaceRoot];
+                  patch({ permissions: { enabled, trustedWorkspaces: next, rules } });
+                }}
+              >
+                {trusted ? '✓ 已信任此项目' : '信任此项目'}
+              </button>
+            </>
+          )}
         </div>
+        <span className="auto-scroll-text">
+          {trusted
+            ? '已信任：该项目自带 allow 规则会生效，请确认仓库来源可信'
+            : '未信任（推荐）：项目级 deny / ask 生效，allow 被忽略'}
+        </span>
       </div>
 
       <div className="perm-list">
@@ -164,15 +185,16 @@ export function PermissionRulesPanel({
         裁决语义：任一命中规则为「拒绝」即拒绝；否则任一「询问」即在 YOLO 模式下也强制弹窗；
         否则任一「放行」即跳过审批。命令匹配会先剥离 <code>FOO=1</code> /{' '}
         <code>FOO="a b"</code> 环境变量前缀并解包 <code>powershell -c</code> /{' '}
-        <code>cmd /c</code> 包装，无法用前缀绕过拒绝规则；路径匹配前会解析 <code>..</code>{' '}
-        等路径段，无法用 <code>src/tmp/../private</code> 绕过 glob。
+        <code>cmd /c</code> 包装，无法用前缀绕过拒绝规则。路径匹配<strong>复用文件工具的真实解析入口</strong>
+        （先按宿主语义把参数解析为绝对路径、校验是否在工作区内，再折算相对路径做 glob），
+        因此 <code>src/tmp/../private</code>、<code>../ws/private</code> 这类写法都会命中同一条规则。
       </p>
       <p className="hint">
         项目级规则可放在工作区根的 <code>.easycode/permissions.json</code>
         （<code>{'{ "rules": [ ... ] }'}</code>），与全局规则取并集裁决；非法条目会被跳过而不会让整份配置失效。
         出于信任边界考虑，项目级 <code>deny</code> / <code>ask</code> 默认生效（只会收紧权限），
-        项目级 <code>allow</code> 默认<strong>被忽略</strong>——克隆来的仓库不得自行取消你的审批保护，
-        需要显式开启上方「信任项目级 allow 规则」才会生效。
+        项目级 <code>allow</code> 默认<strong>被忽略</strong>——克隆来的仓库不得自行取消你的审批保护。
+        信任是<strong>按工作区授予</strong>的（上方「项目级 allow 信任」），信任项目 A 不会连带放宽项目 B、C。
       </p>
       <p className="hint">
         <strong>边界说明：</strong>这里配置的是<strong>命令级审批策略</strong>，不是进程级安全沙箱。

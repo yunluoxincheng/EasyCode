@@ -138,7 +138,7 @@ export function matchCommandPattern(pattern: string, command: string): boolean {
   return new RegExp(`^${source}(?=\\s|$)`).test(rawCommand);
 }
 
-/** 归一化路径：统一正斜杠、去掉 `./` 前缀与重复分隔符（不做 `..` 解析，见 normalizePathSegments） */
+/** 归一化路径：统一正斜杠、去掉 `./` 前缀与重复分隔符（不做 `..` 解析） */
 export function normalizeRelativePath(value: string): string {
   return value
     .trim()
@@ -148,33 +148,85 @@ export function normalizeRelativePath(value: string): string {
 }
 
 /**
- * 词法规范化路径（等价于 `path.resolve` 的字符串语义，不触碰文件系统）：
- * 折叠 `.`、消解 `..`、去除重复分隔符，使权限 glob 与实际文件工具看到的路径一致。
- *
- * 这修复了一类真实绕过：规则拒绝 `src/private/**`，但工具参数写成
- * `src/tmp/../private/key.json` 时，朴素字符串匹配命中不了，而 `resolveWorkspacePath()`
- * 会把它解析到 `src/private/key.json` 并成功访问。
- *
- * 相对路径中 `..` 逃出根目录时返回 `null`（无法映射为工作区内路径）；
- * 此时权限规则不命中，回落到审批模式语义（安全默认）。绝对路径的 `..` 按 resolve 语义忽略。
+ * 路径语义接口：由调用方注入宿主真实的 `paths` 实现（`Host.paths`）。
+ * 权限层**不得**自行猜测路径是否合法——必须与实际文件工具使用同一套解析入口，
+ * 否则两套语义必然会漂移出新的绕过方式。
  */
-export function normalizePathSegments(value: string): string | null {
-  const cleaned = typeof value === 'string' ? value.trim().replace(/\\/g, '/') : '';
-  if (!cleaned) return null;
-  const absolute = cleaned.startsWith('/');
-  const parts: string[] = [];
-  for (const raw of cleaned.split('/')) {
-    if (!raw || raw === '.') continue;
-    if (raw === '..') {
-      if (parts.length > 0) parts.pop();
-      else if (!absolute) return null;
-      continue;
+export interface PathApi {
+  resolve(...parts: string[]): string;
+  isAbsolute(p: string): boolean;
+  sep: string;
+}
+
+/** POSIX 风格的兜底实现（仅用于无 Host 的纯函数调用与单测） */
+export const defaultPathApi: PathApi = {
+  resolve: (...parts: string[]): string => {
+    let absolute = false;
+    const out: string[] = [];
+    for (const part of parts) {
+      if (!part) continue;
+      const normalized = part.replace(/\\/g, '/');
+      if (normalized.startsWith('/')) {
+        absolute = true;
+        out.length = 0;
+      }
+      for (const seg of normalized.split('/')) {
+        if (!seg || seg === '.') continue;
+        if (seg === '..') {
+          if (out.length > 0) out.pop();
+          else if (!absolute) out.push('..');
+          continue;
+        }
+        out.push(seg);
+      }
     }
-    parts.push(raw);
+    const joined = out.join('/');
+    if (absolute) return `/${joined}`;
+    return joined || '.';
+  },
+  isAbsolute: (p: string): boolean => p.startsWith('/') || /^[A-Za-z]:[\\/]/.test(p),
+  sep: '/',
+};
+
+/**
+ * 按宿主真实路径语义把工具参数解析为「工作区相对路径」。
+ *
+ * 与 `resolveWorkspacePath()` 使用完全相同的入口（`paths.resolve(workspace, input)` +
+ * 工作区包含性校验），因此：
+ * - `src/tmp/../private/key.json` → `src/private/key.json`（命中 `src/private/**`）
+ * - `../ws/private/key.json`（工作区 `/ws`）→ 解析回 `/ws/private/key.json` → `private/key.json`
+ *   （**这是本轮复审指出的绕过：词法层遇到开头 `..` 就放弃匹配，而文件层却能访问**）
+ *
+ * 返回 `null` 表示无法映射到工作区内（真正越界）：此时文件工具会直接报「路径越界」，
+ * 权限规则不命中并回落审批模式语义（安全默认）。
+ */
+export function resolveWorkspaceRelative(
+  workspace: string,
+  input: string,
+  paths: PathApi = defaultPathApi,
+): string | null {
+  const raw = typeof input === 'string' ? input.trim() : '';
+  const root = typeof workspace === 'string' ? workspace.trim() : '';
+  if (!raw || !root) return null;
+  let abs: string;
+  let base: string;
+  try {
+    abs = paths.isAbsolute(raw) ? paths.resolve(raw) : paths.resolve(root, raw);
+    base = paths.resolve(root);
+  } catch {
+    return null;
   }
-  const joined = parts.join('/');
-  if (absolute) return `/${joined}`;
-  return joined || '.';
+  const sep = paths.sep || '/';
+  const withSep = base.endsWith(sep) ? base : base + sep;
+  // Windows 路径大小写不敏感：包含性判断必须同语义，否则 C:\WS 与 C:\ws 会被判为越界
+  const caseInsensitive = sep === '\\';
+  const cmpAbs = caseInsensitive ? abs.toLowerCase() : abs;
+  const cmpBase = caseInsensitive ? base.toLowerCase() : base;
+  const cmpWithSep = caseInsensitive ? withSep.toLowerCase() : withSep;
+  if (cmpAbs !== cmpBase && !cmpAbs.startsWith(cmpWithSep)) return null;
+  if (cmpAbs === cmpBase) return '.';
+  const rel = abs.slice(base.length + (base.endsWith(sep) ? 0 : 1));
+  return normalizeRelativePath(rel) || '.';
 }
 
 /** 省略 path 参数时实际访问工作区根目录的工具（权限规则必须按 `.` 求值） */
@@ -214,8 +266,9 @@ function matchPathRule(
   rawPath: string,
   workspace: string | undefined,
   toolName: string,
+  paths: PathApi,
 ): boolean {
-  const candidates = pathCandidates(rawPath, workspace);
+  const candidates = pathCandidates(rawPath, workspace, paths);
   if (candidates.some((candidate) => matchPathGlob(pattern, candidate))) return true;
   if (rule.decision === 'allow') return false;
   if (!SUBTREE_SCOPE_TOOLS.has(toolName)) return false;
@@ -258,25 +311,22 @@ export function matchPathGlob(pattern: string, target: string): boolean {
 }
 
 /** 工具输入中的候选路径：规范化后的相对路径 + 若为工作区内绝对路径则折算出的相对路径 */
-function pathCandidates(rawPath: string, workspace?: string): string[] {
+function pathCandidates(rawPath: string, workspace: string | undefined, paths: PathApi): string[] {
   const out: string[] = [];
   const push = (value: string | null | undefined): void => {
     if (value && !out.includes(value)) out.push(value);
   };
-  // 关键：先做词法规范化（解析 `.` 与 `..`），否则 `src/tmp/../private/x`
-  // 无法命中 `src/private/**` 这类规则（真实绕过）
-  const norm = normalizePathSegments(rawPath);
-  push(norm);
-  if (!norm) return out;
-  const root = workspace ? normalizePathSegments(workspace) : null;
-  if (root && root !== '.') {
-    const lowerRoot = root.toLowerCase();
-    const lowerNorm = norm.toLowerCase();
-    if (lowerNorm === lowerRoot) push('.');
-    else if (lowerNorm.startsWith(`${lowerRoot}/`)) {
-      push(normalizePathSegments(norm.slice(root.length + 1)));
-    }
+  if (!workspace) {
+    // 未绑定工作区：无宿主语义可依，退回词法规范化（仅作相对路径匹配）
+    const lexical = defaultPathApi.resolve('.', rawPath);
+    push(normalizeRelativePath(lexical));
+    return out;
   }
+  // 关键：完全复用文件工具的解析入口（resolve(工作区, 输入) + 包含性校验），
+  // 先得到真实绝对路径再折算相对路径。绝不能自行猜测 `..` 是否合法——
+  // `../ws/private/key.json` 在 `/ws` 下会解析回工作区内，词法层却会误判为越界。
+  const rel = resolveWorkspaceRelative(workspace, rawPath, paths);
+  push(rel);
   return out;
 }
 
@@ -284,12 +334,16 @@ function pathCandidates(rawPath: string, workspace?: string): string[] {
  * 裁决一次工具调用：
  * - 无规则或规则为空 → `null`（由审批模式语义兜底）；
  * - 任一命中规则为 deny 即拒绝；否则任一 ask 即强制审批；否则任一 allow 即免审批。
+ *
+ * `paths` 必须传入宿主真实路径能力（`Host.paths`），否则路径类规则会退化到
+ * POSIX 兜底语义，与文件工具的实际行为不一致。
  */
 export function evaluatePermission(
   rules: PermissionRule[] | undefined,
   toolName: string,
   input: unknown,
   workspace?: string,
+  paths: PathApi = defaultPathApi,
 ): PermissionEvaluation | null {
   if (!rules || rules.length === 0) return null;
   const args =
@@ -309,7 +363,7 @@ export function evaluatePermission(
         // 缺省路径按工具真实默认值求值（list_dir / search_files 默认工作区根），
         // 不能因为参数省略就跳过路径规则
         if (!rawPath) continue;
-        if (!matchPathRule(rule, pattern, rawPath, workspace, toolName)) continue;
+        if (!matchPathRule(rule, pattern, rawPath, workspace, toolName, paths)) continue;
       } else {
         // 非命令/路径类工具无法可靠映射 pattern，一律视为不命中（不制造假限制）
         continue;

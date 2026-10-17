@@ -225,7 +225,7 @@ export class AgentServer {
   ): Promise<SessionMeta> {
     await this.ensureSettings();
     const rt = this.requireSession(sessionId);
-    if (rt.running || rt.busy) {
+    if (this.isSessionBusy(sessionId)) {
       throw new Error('原会话正在运行中，请等待完成或停止后再分叉');
     }
 
@@ -301,7 +301,7 @@ export class AgentServer {
   async trimSessionHistory(id: string, keepRecentTurns = 2): Promise<SessionData> {
     await this.ensureSettings();
     const rt = this.requireSession(id);
-    if (rt.running || rt.busy) {
+    if (this.isSessionBusy(id)) {
       throw new Error('会话正在运行中，请先等待完成或点击停止');
     }
 
@@ -476,7 +476,6 @@ export class AgentServer {
   private async runTurn(rt: SessionRuntime): Promise<LoopResult> {
     const id = rt.data.meta.id;
     const lastUserMessage = [...rt.data.messages].reverse().find((m) => m.role === 'user');
-    const turnId = `${id}_${lastUserMessage?.id ?? Date.now().toString(36)}`;
     rt.running = true;
     // 测试自愈循环（TODOS #39）在修复回合中复用循环持有的 controller：
     // 否则用户点停止只会打断修复回合，循环的 signal 依然存活，下一轮测试会继续跑起来。
@@ -487,24 +486,26 @@ export class AgentServer {
       string,
       { content: string; createdAt?: string; rangeContext?: string }
     >();
-    const userMessagesCount = rt.data.messages.filter((m) => m.role === 'user').length;
-    const turnNumber = await this.checkpoints.allocateTurnNumber(
-      id,
-      rt.data.meta.turnSeq,
-      Math.max(1, userMessagesCount),
-    );
-    rt.data.meta.turnSeq = turnNumber;
-    if (lastUserMessage && !lastUserMessage.id) {
-      lastUserMessage.id = `m_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
-    }
-    const turnTracker = this.checkpoints.beginTurn({
-      sessionId: id,
-      workspaceRoot: rt.data.meta.workspaceRoot,
-      turnNumber,
-      userMessageId: lastUserMessage?.id ?? `u_${turnNumber}`,
-    });
     let wireMessages: ChatMessage[] | undefined;
     try {
+      // 快照序号分配与回合开启都可能抛错（磁盘/持久化异常），
+      // 必须放在 try 内，否则 rt.running 会永久保持 true（PR #9 复审 P2）
+      const userMessagesCount = rt.data.messages.filter((m) => m.role === 'user').length;
+      const turnNumber = await this.checkpoints.allocateTurnNumber(
+        id,
+        rt.data.meta.turnSeq,
+        Math.max(1, userMessagesCount),
+      );
+      rt.data.meta.turnSeq = turnNumber;
+      if (lastUserMessage && !lastUserMessage.id) {
+        lastUserMessage.id = `m_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+      }
+      const turnTracker = this.checkpoints.beginTurn({
+        sessionId: id,
+        workspaceRoot: rt.data.meta.workspaceRoot,
+        turnNumber,
+        userMessageId: lastUserMessage?.id ?? `u_${turnNumber}`,
+      });
       const entry = this.settings.providers[rt.data.meta.providerId];
       const firstEnabled = (entry?.models ?? []).find((m) => m.enabled !== false)?.name ?? 'default';
       const model = rt.data.meta.model || firstEnabled;
@@ -598,7 +599,7 @@ export class AgentServer {
               sessionId: rt.data.meta.id,
               sessionTitle: rt.data.meta.title,
               workspaceRoot: rt.data.meta.workspaceRoot,
-              turnId,
+              turnId: `${id}_${lastUserMessage?.id ?? Date.now().toString(36)}`,
             },
           ))
         : undefined;
@@ -698,6 +699,19 @@ export class AgentServer {
     return this.sessions.get(id)?.running ?? false;
   }
 
+  /**
+   * 会话是否处于「不可安全变更运行上下文」的状态。
+   *
+   * 注意不能只看 `running`：测试自愈循环在两次测试之间 `running === false`
+   * 但 `busy === true`，此时切换工作区会让后续修复回合改到另一个项目，
+   * 而下一轮测试仍在原项目执行（PR #9 复审 P1）。所有影响运行上下文或
+   * 文件状态的操作都必须用这一个判据。
+   */
+  isSessionBusy(id: string): boolean {
+    const rt = this.sessions.get(id);
+    return !!rt && (rt.running || rt.busy === true);
+  }
+
   setApprovalMode(id: string, mode: ApprovalMode): void {
     this.requireSession(id).approval.setMode(mode);
   }
@@ -709,7 +723,7 @@ export class AgentServer {
   /** 会话级模型覆盖（'' = 跟随供应商默认，即第一个启用模型） */
   async setSessionModel(id: string, model: string): Promise<SessionMeta> {
     const rt = this.requireSession(id);
-    if (rt.running || rt.busy) {
+    if (this.isSessionBusy(id)) {
       throw new Error('会话运行中，暂不能切换模型');
     }
     rt.data.meta.model = model.trim();
@@ -722,7 +736,7 @@ export class AgentServer {
   async setSessionProvider(id: string, providerId: string, model?: string): Promise<SessionMeta> {
     await this.ensureSettings();
     const rt = this.requireSession(id);
-    if (rt.running) throw new Error('会话运行中，暂不能切换模型服务');
+    if (this.isSessionBusy(id)) throw new Error('会话运行中，暂不能切换模型服务');
     const entry = this.settings.providers[providerId];
     if (!entry) throw new Error(`未配置的模型服务: ${providerId}`);
     const enabledModels = (entry.models ?? []).filter((m) => m.enabled !== false).map((m) => m.name);
@@ -746,6 +760,11 @@ export class AgentServer {
   /** 绑定/更换会话的工作区（传空串表示解绑，纯对话） */
   async setSessionWorkspace(id: string, workspace: string): Promise<SessionMeta> {
     const rt = this.requireSession(id);
+    // 循环期间更换工作区会让修复回合改到另一个项目（复审 P1）：
+    // 必须在解析目标目录之前就拦住，避免出现「测试在 A、修复改 B」
+    if (this.isSessionBusy(id)) {
+      throw new Error('会话运行中，暂不能更换工作区');
+    }
     const ws = workspace.trim();
     if (ws) {
       const stat = await this.host.fs.stat(ws);
@@ -1427,21 +1446,62 @@ export class AgentServer {
   }
 
   /**
+   * 工作区规范化键：用于信任白名单比对，避免「只凭目录名或未规范化字符串」授权。
+   * Windows 大小写不敏感，统一小写；分隔符由宿主 paths.resolve 归一。
+   */
+  private workspaceTrustKey(workspaceRoot: string): string {
+    const root = workspaceRoot?.trim();
+    if (!root) return '';
+    let resolved: string;
+    try {
+      resolved = this.host.paths.resolve(root);
+    } catch {
+      return '';
+    }
+    return this.host.paths.sep === '\\' ? resolved.toLowerCase() : resolved;
+  }
+
+  /** 指定工作区是否已被用户显式信任（可启用项目级 allow 规则） */
+  isProjectTrusted(workspaceRoot: string): boolean {
+    const key = this.workspaceTrustKey(workspaceRoot);
+    if (!key) return false;
+    const list = this.settings.permissions?.trustedWorkspaces ?? [];
+    return list.some((entry) => this.workspaceTrustKey(entry) === key);
+  }
+
+  /** 授予/撤销某个工作区的项目级 allow 信任（写回本地设置，绝不写入项目仓库） */
+  async setProjectTrust(workspaceRoot: string, trusted: boolean): Promise<Settings> {
+    await this.ensureSettings();
+    const key = this.workspaceTrustKey(workspaceRoot);
+    if (!key) throw new Error('工作区路径无效，无法设置信任');
+    const current = this.settings.permissions?.trustedWorkspaces ?? [];
+    const kept = current.filter((entry) => this.workspaceTrustKey(entry) !== key);
+    const next = trusted ? [...kept, this.host.paths.resolve(workspaceRoot.trim())] : kept;
+    return this.updateSettings({
+      permissions: {
+        enabled: this.settings.permissions?.enabled !== false,
+        rules: this.settings.permissions?.rules ?? [],
+        trustedWorkspaces: next,
+      },
+    });
+  }
+
+  /**
    * 合成参与裁决的权限规则：总开关关闭时返回 undefined（彻底回到 ask / yolo 语义）；
    * 全局规则标注 `source: 'global'`，项目规则由 loadProjectPermissions 标注。
    *
    * **信任边界**：项目级 `deny` / `ask` 默认生效（只会收紧权限），但项目级 `allow`
-   * 默认被丢弃——工作区代码属低信任输入，不能通过仓库内配置自行取消用户的审批保护。
-   * 只有用户显式开启 `permissions.trustProjectAllow` 后才参与裁决。
+   * 只在用户显式信任该工作区时参与裁决——工作区代码属低信任输入，
+   * 不能通过仓库内配置自行取消用户的审批保护。
    */
   async resolvePermissionRules(workspaceRoot: string): Promise<PermissionRule[] | undefined> {
     if (this.settings.permissions?.enabled === false) return undefined;
     const globalRules = (this.settings.permissions?.rules ?? [])
       .map((rule) => normalizePermissionRule(rule, 'global'))
       .filter((rule): rule is PermissionRule => rule !== null);
-    const trustProjectAllow = this.settings.permissions?.trustProjectAllow === true;
+    const projectTrusted = this.isProjectTrusted(workspaceRoot);
     const projectRules = (await this.loadProjectPermissions(workspaceRoot)).filter(
-      (rule) => trustProjectAllow || rule.decision !== 'allow',
+      (rule) => projectTrusted || rule.decision !== 'allow',
     );
     const rules = [...globalRules, ...projectRules];
     return rules.length > 0 ? rules : undefined;
@@ -1450,7 +1510,7 @@ export class AgentServer {
   /** 项目级配置里被信任策略忽略的 allow 规则条数（供 UI 提示，不参与裁决） */
   async countIgnoredProjectAllowRules(workspaceRoot: string): Promise<number> {
     if (this.settings.permissions?.enabled === false) return 0;
-    if (this.settings.permissions?.trustProjectAllow === true) return 0;
+    if (this.isProjectTrusted(workspaceRoot)) return 0;
     const projectRules = await this.loadProjectPermissions(workspaceRoot);
     return projectRules.filter((rule) => rule.decision === 'allow').length;
   }
@@ -1498,12 +1558,23 @@ export class AgentServer {
   async runTestLoop(sessionId: string, options?: RunTestLoopRequest): Promise<TestLoopResult> {
     await this.ensureSettings();
     const rt = this.requireSession(sessionId);
-    if (rt.running || rt.busy) throw new Error('会话正在运行中，请先等待完成或点击停止');
+    if (this.isSessionBusy(sessionId)) {
+      throw new Error('会话正在运行中，请先等待完成或点击停止');
+    }
     // 同步占位：检查与占位之间不得有任何 await。否则两次快速点击都能通过上面的检查，
     // 后续读项目配置 / 探测命令 / 解析规则期间并发启动两个循环，导致重复跑测试、
     // 同一会话并发执行修复回合，并互相覆盖 rt.controller。
     rt.busy = true;
     const controller = new AbortController();
+    // 只要本次调用已经让前端进入运行态（发出了审批请求或启动了循环），
+    // 就必须在退出时补发终止事件，否则 UI 会永久停在 running（复审 P1）。
+    let uiEngaged = false;
+    let doneEmitted = false;
+    let pendingErrorMessage = '测试自愈循环异常中断';
+    const emit = (event: AgentEvent): void => {
+      if (event.type === 'test_loop_done') doneEmitted = true;
+      this.emitterFor(sessionId)(event);
+    };
     try {
       const root = rt.data.meta.workspaceRoot?.trim();
       if (!root) throw new Error('当前会话未绑定工作区，无法运行测试');
@@ -1534,6 +1605,7 @@ export class AgentServer {
         'run_command',
         { command: detection.command },
         root,
+        this.host.paths,
       );
       if (verdict?.decision === 'deny') {
         throw new Error(`测试命令被权限规则拒绝：${describePermissionRule(verdict.rule)}`);
@@ -1544,6 +1616,8 @@ export class AgentServer {
       const requirement = resolveApprovalRequirement(verdict, true);
       let approved = true;
       if (requirement.needApproval) {
+        // 审批请求一旦发出，UI 就会建立运行态回合
+        uiEngaged = true;
         // 单次审批覆盖整轮循环：确认一次即可，后续重跑与修复回合不再重复弹窗
         approved = await rt.approval.request(
           'test_loop',
@@ -1560,16 +1634,21 @@ export class AgentServer {
         );
       }
       if (!approved) {
-        return { ok: false, rounds: 0, reason: 'aborted', message: '用户取消了测试自愈循环' };
+        // 必须显式发终止事件：前端已因审批请求进入 running，
+        // 只返回 aborted 会让会话永久卡在运行态（复审 P1）
+        const message = '用户取消了测试自愈循环';
+        emit({ type: 'test_loop_done', ok: false, rounds: 0, reason: 'aborted', message });
+        return { ok: false, rounds: 0, reason: 'aborted', message };
       }
       rt.controller = controller;
+      uiEngaged = true;
       return await runTestLoop({
         command: detection.command,
         commandSource: detection.source,
         maxRounds,
         focus: options?.focus,
         signal: controller.signal,
-        emit: (event) => this.emitterFor(sessionId)(event),
+        emit,
         runTests: async () => {
           const started = Date.now();
           const res = await this.host.process.run(detection.command, {
@@ -1584,6 +1663,16 @@ export class AgentServer {
           return { exitCode: res.code, output, durationMs: Date.now() - started };
         },
         repair: async (prompt) => {
+          // 工作区在循环期间必须固定：一旦被切走，修复回合会去改另一个项目的文件，
+          // 而下一轮测试仍在原项目执行（复审 P1）。正常情况下 setSessionWorkspace
+          // 已被 busy 拦截，这里是拒绝静默漂移的最后一道防线。
+          const currentRoot = rt.data.meta.workspaceRoot?.trim();
+          if (currentRoot !== root) {
+            return {
+              ok: false,
+              message: `测试循环期间会话工作区发生变化（${root} → ${currentRoot || '未绑定'}），已中止以免修改错误项目`,
+            };
+          }
           rt.data.messages.push({
             role: 'user',
             content: prompt,
@@ -1614,6 +1703,17 @@ export class AgentServer {
     } finally {
       rt.busy = false;
       if (rt.controller === controller) rt.controller = undefined;
+      // 兜底收敛：任何已让前端进入运行态的路径（含初始化失败、异常）都必须有终止事件，
+      // 否则 UI 会永久停留在 running 并阻断后续发送
+      if (uiEngaged && !doneEmitted) {
+        emit({
+          type: 'test_loop_done',
+          ok: false,
+          rounds: 0,
+          reason: controller.signal.aborted ? 'aborted' : 'error',
+          message: controller.signal.aborted ? '测试自愈循环已中止' : pendingErrorMessage,
+        });
+      }
       rt.data.meta.updatedAt = new Date().toISOString();
       await this.persistSession(rt);
     }
@@ -1643,7 +1743,9 @@ export class AgentServer {
     optionsOrPaths?: RevertTurnOptions | string[],
   ): Promise<TurnUndoResult> {
     const rt = this.requireSession(sessionId);
-    if (rt.running) {
+    // 快照回退会改写磁盘文件：测试循环运行期间回退，会让下一轮测试跑在被回退的代码上，
+    // 并可能与修复回合的写操作交叉（复审 P1）。统一用 isSessionBusy 判断。
+    if (this.isSessionBusy(sessionId)) {
       throw new Error('会话正在运行中，请先等待完成或点击停止');
     }
 

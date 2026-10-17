@@ -199,11 +199,31 @@ test('extractFailureExcerpt：清理 ANSI 转义并保留失败区域', () => {
   assert.ok(excerpt.includes('AssertionError'));
 });
 
-test('extractFailureExcerpt：无失败标记时取尾部并受长度上限约束', () => {
+test('extractFailureExcerpt：无失败标记时保留尾部且严格受预算约束', () => {
   const long = Array.from({ length: 50 }, (_, i) => `line ${i}`).join('\n');
   const excerpt = extractFailureExcerpt(long, 40);
-  assert.ok(excerpt.length <= 40);
-  assert.ok(excerpt.includes('line 49'));
+  assert.ok(excerpt.includes('line 49'), '末尾内容必须保留');
+  assert.ok(excerpt.length <= 40, `总长必须 ≤ 预算，实际 ${excerpt.length}`);
+  assert.ok(!excerpt.includes('已省略'), '无失败标记时不做两段拼装（没有需要抢救的失败点）');
+});
+
+test('【P2 复审】超长失败日志必须保留首个失败点的堆栈，而非只留尾部', () => {
+  const lines = [
+    'FAIL  src/core.test.ts > 关键用例',
+    '  AssertionError: expected 42 but got 41',
+    '    at Object.<anonymous> (src/core.test.ts:12:5)',
+    ...Array.from({ length: 500 }, (_, i) => `  trailing noise line ${i} ${'x'.repeat(40)}`),
+    '===============================',
+    'Tests  1 failed | 120 passed (121)',
+  ];
+  const excerpt = extractFailureExcerpt(lines.join('\n'), 2000);
+  // 失败点与异常堆栈必须留在首段
+  assert.ok(excerpt.startsWith('FAIL  src/core.test.ts'), `实际开头: ${excerpt.slice(0, 40)}`);
+  assert.ok(excerpt.includes('AssertionError'), '异常信息丢失');
+  assert.ok(excerpt.includes('src/core.test.ts:12:5'), '堆栈位置丢失');
+  // 末尾汇总同样保留
+  assert.ok(excerpt.includes('Tests  1 failed'), '末尾汇总丢失');
+  assert.ok(excerpt.includes('已省略'), '必须明确标注中间被省略');
 });
 
 test('【P2 日志摘录】符号类失败标记（✖ / ✕ / × / ●）必须命中，不能退回尾部', () => {
@@ -236,6 +256,44 @@ test('【P2 日志摘录】标记正好落在首行时同样从首行截取', ()
   );
   const excerpt = extractFailureExcerpt(output, 60000);
   assert.ok(excerpt.startsWith('FAIL  src/a.test.ts'));
+});
+
+test('【P2 复审】长日志必须同时保留失败点上下文与末尾汇总', () => {
+  // 失败点之后还有大量输出：单纯保留尾部会把最关键的断言信息挤掉
+  const lines = [
+    'RUN v1.6.0',
+    ...Array.from({ length: 300 }, (_, i) => `setup line ${i}`),
+    'FAIL  src/a.test.ts > math > adds numbers',
+    '  AssertionError: expected 3 to be 4',
+    '    at src/a.test.ts:12:9',
+    ...Array.from({ length: 600 }, (_, i) => `noise ${i} `.repeat(8)),
+    '      Tests  1 failed | 5 passed (6)',
+    '   Duration  1.23s',
+  ].join('\n');
+  const excerpt = extractFailureExcerpt(lines, 2000);
+
+  assert.ok(excerpt.length <= 2000, `超预算: ${excerpt.length}`);
+  // 失败点上下文必须保留（这是早期「只留尾部」会丢掉的部分）
+  assert.ok(excerpt.includes('AssertionError'), '失败断言信息被丢弃');
+  assert.ok(excerpt.includes('adds numbers'), '失败用例名被丢弃');
+  // 末尾汇总同样必须在场
+  assert.ok(excerpt.includes('Tests  1 failed | 5 passed (6)'), '末尾汇总被丢弃');
+  // 中间省略需有明确标注，且省略字符数不得为负数
+  assert.match(excerpt, /…（中间 \d+ 字符已省略）…/);
+  const omitted = Number(/中间 (\d+) 字符/.exec(excerpt)?.[1]);
+  assert.ok(omitted > 0, `省略字符数异常: ${omitted}`);
+});
+
+test('【P2 复审】极小预算下仍有界且不产生负数省略标注', () => {
+  const long = [
+    'FAIL  src/x.test.ts',
+    ...Array.from({ length: 200 }, (_, i) => `noise line ${i}`),
+  ].join('\n');
+  for (const budget of [50, 120, 500]) {
+    const excerpt = extractFailureExcerpt(long, budget);
+    assert.ok(excerpt.length > 0, `预算 ${budget} 时不应返回空`);
+    assert.ok(!/中间 -\d+ 字符/.test(excerpt), `预算 ${budget} 出现负数省略标注`);
+  }
 });
 
 test('【P2 日志摘录】不把 FAILOVER 这类词误判为失败标记', () => {

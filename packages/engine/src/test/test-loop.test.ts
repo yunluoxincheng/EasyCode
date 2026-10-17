@@ -640,11 +640,18 @@ test('【P1 信任边界】不可信项目自带 allow 规则不得取消用户�
   approval.resolve(req.requestId, true);
   assert.equal((await pending).approved, true);
 
-  // 显式信任后，项目级 allow 才会参与裁决
-  await server.updateSettings({ permissions: { enabled: true, trustProjectAllow: true, rules: [] } });
+  // 显式信任该工作区后，项目级 allow 才会参与裁决
+  await server.setProjectTrust('/ws', true);
+  assert.equal(server.isProjectTrusted('/ws'), true);
   const trusted = await server.resolvePermissionRules('/ws');
   assert.equal(trusted?.some((r) => r.decision === 'allow'), true);
   assert.equal(await server.countIgnoredProjectAllowRules('/ws'), 0);
+  // 按工作区授权：信任 /ws 不应连带信任其它项目（复审建议）
+  assert.equal(server.isProjectTrusted('/other-project'), false);
+  // 撤销后立即恢复忽略
+  await server.setProjectTrust('/ws', false);
+  assert.equal(server.isProjectTrusted('/ws'), false);
+  assert.equal(await server.countIgnoredProjectAllowRules('/ws'), 1);
 });
 
 test('【P2 统一裁决】测试命令命中 allow 时 ask 模式下免审批直接执行', async () => {
@@ -666,8 +673,8 @@ test('【P2 统一裁决】测试命令命中 allow 时 ask 模式下免审批�
     defaultProvider: 'mock',
     // ask 模式：若 allow 未生效就会弹审批并卡住
     defaultApprovalMode: 'ask',
-    // 项目级 allow 需显式信任（见上一条用例）
-    permissions: { enabled: true, trustProjectAllow: true, rules: [] },
+    // 项目级 allow 需显式信任该工作区（见上一条用例）
+    permissions: { enabled: true, trustedWorkspaces: ['/ws'], rules: [] },
   });
   const session = await server.createSession({
     workspaceRoot: '/ws',
@@ -776,4 +783,156 @@ test('【P2 错误收敛】修复回合返回 aborted 时收敛为 aborted', asy
   });
   assert.equal(result.reason, 'aborted');
   assert.equal(events.filter((e) => e.type === 'test_loop_done').length, 1);
+});
+
+/* ------------------------------------------------------------------ */
+/* PR #9 第二轮复审回归                                                */
+/* ------------------------------------------------------------------ */
+
+/** 构造一个已绑定工作区、可跑测试的 AgentServer */
+async function makeServer(
+  files: Record<string, string>,
+  script: Array<{ code: number; stdout: string }>,
+  settings: Parameters<AgentServer['updateSettings']>[0] = {},
+): Promise<{ host: ScriptedTestHost; server: AgentServer }> {
+  const host = new ScriptedTestHost(files, script);
+  const server = new AgentServer(host);
+  await server.updateSettings({
+    providers: {
+      mock: { kind: 'mock', baseURL: '', name: 'Mock', enabled: true, models: [{ name: 'mock-1', enabled: true }] },
+    },
+    defaultProvider: 'mock',
+    defaultApprovalMode: 'yolo',
+    ...settings,
+  });
+  return { host, server };
+}
+
+const TEST_PKG = { '/ws/package.json': JSON.stringify({ scripts: { test: 'vitest run' } }) };
+
+test('【P1 复审】拒绝测试循环审批后必须发出终止事件（前端不得卡在运行态）', async () => {
+  const { host, server } = await makeServer(TEST_PKG, [], { defaultApprovalMode: 'ask' });
+  const session = await server.createSession({
+    workspaceRoot: '/ws',
+    providerId: 'mock',
+    title: '审批拒绝收敛',
+  });
+  const events: AgentEvent[] = [];
+  server.onEvent((payload) => {
+    if (payload.sessionId !== session.id) return;
+    events.push(payload.event);
+    if (payload.event.type === 'approval_request') {
+      // 模拟用户点「拒绝」
+      server.respondApproval(session.id, payload.event.requestId, false);
+    }
+  });
+
+  const result = await server.runTestLoop(session.id, { maxRounds: 1 });
+  assert.equal(result.reason, 'aborted');
+  const done = events.filter((e) => e.type === 'test_loop_done');
+  assert.equal(done.length, 1, '拒绝路径必须发出 test_loop_done，否则 UI 永久 running');
+  assert.ok(done[0].type === 'test_loop_done' && done[0].reason === 'aborted');
+  assert.equal(host.runs.length, 0, '拒绝后不得执行任何测试');
+  // 收尾后会话必须恢复空闲，可再次启动
+  assert.equal(server.isSessionBusy(session.id), false);
+});
+
+test('【P1 复审】测试循环期间不得切换工作区 / Provider / 回退快照', async () => {
+  // 用可控宿主：让测试命令「挂住」，确保断言发生在循环真正运行期间
+  let release: (() => void) | undefined;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const host = new ScriptedTestHost(
+    { ...TEST_PKG, '/ws2/keep.txt': 'x' },
+    [{ code: 0, stdout: 'Tests  1 passed (1)' }],
+  );
+  // 只覆盖 run，保留 spawn / kill / listSpawned 等其它进程能力
+  const originalProcess = host.process;
+  const originalRun = originalProcess.run as unknown as (
+    command: string,
+    options?: ProcessRunOptions,
+  ) => Promise<ProcessResult>;
+  let gateHit = false;
+  host.process = {
+    ...originalProcess,
+    run: async (command: string, options?: ProcessRunOptions) => {
+      // 测试命令探测结果是 `npm test`（无锁文件时默认 npm），必须按命令内容而非
+      // 具体的 vitest 字样判断，否则 gate 不生效、循环瞬间结束
+      if (!gateHit && /\btest\b/i.test(command)) {
+        gateHit = true;
+        await gate;
+      }
+      return originalRun(command, options);
+    },
+  } as unknown as typeof host.process;
+
+  const server = new AgentServer(host);
+  await server.updateSettings({
+    providers: {
+      mock: { kind: 'mock', baseURL: '', name: 'Mock', enabled: true, models: [{ name: 'mock-1', enabled: true }] },
+      other: { kind: 'mock', baseURL: '', name: 'Other', enabled: true, models: [{ name: 'o-1', enabled: true }] },
+    },
+    defaultProvider: 'mock',
+    defaultApprovalMode: 'yolo',
+  });
+  const session = await server.createSession({
+    workspaceRoot: '/ws',
+    providerId: 'mock',
+    title: '运行期锁定',
+  });
+
+  const pending = server.runTestLoop(session.id, { maxRounds: 1 });
+  // 等循环进入运行态（busy=true；此时 running 可能为 false——这正是复审指出的窗口）。
+  // 必须带超时：忙等待若无上限，一旦状态没按预期变化就会把整个测试进程挂死。
+  const waitDeadline = Date.now() + 5000;
+  while (!server.isSessionBusy(session.id)) {
+    if (Date.now() > waitDeadline) {
+      release?.();
+      throw new Error('等待测试循环进入运行态超时（isSessionBusy 始终为 false）');
+    }
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  assert.equal(server.isRunning(session.id), false, '测试命令执行期间 running 应为 false');
+
+  await assert.rejects(() => server.setSessionWorkspace(session.id, '/ws2'), /运行中/);
+  await assert.rejects(() => server.setSessionProvider(session.id, 'other'), /运行中/);
+  await assert.rejects(() => server.setSessionModel(session.id, 'm2'), /运行中/);
+  await assert.rejects(() => server.revertTurnCheckpoint(session.id), /运行中/);
+
+  release?.();
+  await pending;
+
+  // 结束后恢复正常可用
+  const meta = await server.setSessionWorkspace(session.id, '/ws2');
+  assert.equal(meta.workspaceRoot, '/ws2');
+});
+
+test('【P2 复审】快照序号分配失败时 runTurn 不得遗留 running 状态', async () => {
+  const { server } = await makeServer(TEST_PKG, []);
+  const session = await server.createSession({
+    workspaceRoot: '/ws',
+    providerId: 'mock',
+    title: '快照失败',
+  });
+
+  // 让快照分配在真正执行时抛错（注入到已创建的服务实例上）
+  const checkpoints = (server as unknown as { checkpoints: { allocateTurnNumber: () => Promise<number> } })
+    .checkpoints;
+  const original = checkpoints.allocateTurnNumber;
+  checkpoints.allocateTurnNumber = async () => {
+    throw new Error('磁盘不可写');
+  };
+  try {
+    await assert.rejects(() => server.sendMessage(session.id, '写一个文件'), /磁盘不可写/);
+  } finally {
+    checkpoints.allocateTurnNumber = original;
+  }
+
+  // 关键：运行态必须已复位，用户可以继续发消息
+  assert.equal(server.isRunning(session.id), false, 'runTurn 异常后 running 必须复位');
+  assert.equal(server.isSessionBusy(session.id), false);
+  // 恢复正常后能再次发送（不会被「会话正在运行中」挡住）
+  await server.sendMessage(session.id, '再试一次');
+  assert.equal(server.isRunning(session.id), false);
 });

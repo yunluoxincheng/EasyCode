@@ -7,6 +7,7 @@ import {
   evaluatePermission,
   normalizeShellCommand,
   resolveApprovalRequirement,
+  resolveWorkspaceRelative,
   type PermissionRule,
 } from '../permissions.js';
 import type { BackgroundTaskManager } from '../tasks.js';
@@ -144,17 +145,16 @@ export function resolveWorkspacePath(
   relative: string,
   host: Host,
 ): string {
-  const abs = host.paths.isAbsolute(relative)
-    ? host.paths.resolve(relative)
-    : host.paths.resolve(workspace, relative);
   const root = host.paths.resolve(workspace);
-  const inside =
-    abs === root ||
-    abs.startsWith(root.endsWith(host.paths.sep) ? root : root + host.paths.sep);
-  if (!inside) {
+  // 与权限规则共用同一套解析入口（TODOS #47 审查返工）：
+  // 包含性校验/大小写语义只实现一次，避免「权限层认为越界、文件层却能访问」的语义漂移
+  const rel = resolveWorkspaceRelative(workspace, relative, host.paths);
+  if (rel === null) {
     throw new Error(`路径越界: ${relative} 不在工作区 ${root} 内`);
   }
-  return abs;
+  return host.paths.isAbsolute(relative)
+    ? host.paths.resolve(relative)
+    : host.paths.resolve(workspace, relative);
 }
 
 export interface ToolExecution {
@@ -254,6 +254,7 @@ export async function executeTool(
     name,
     validated.value,
     ctx.workspace,
+    ctx.host.paths,
   );
   if (permission?.decision === 'deny') {
     return {

@@ -7,12 +7,18 @@
 ### 新增
 - 工具权限规则引擎（Allow / Deny / Ask Policy Rules）：在 `ask` / `yolo` 二元审批之上叠加细粒度策略——`run_command` 按命令前缀匹配（自带词边界，`rm` 不命中 `rmdir`），文件类工具按工作区相对路径 glob（`*` 单段 / `**` 跨目录），其余工具只支持工具级规则（写了 `pattern` 一律视为不命中，不制造「看似限制实则无效」的假象）；裁决与书写顺序无关、安全优先（任一命中为 `deny` 即拒绝 → 否则任一 `ask` 强制审批 → 否则任一 `allow` 免审批），无命中时回落既有模式语义；命令归一化与 #40 结构化事实共用 `normalizeShellCommand`（剥离 `FOO=1` 前缀、解包 `powershell -c` / `cmd /c` / `bash -c`），杜绝「加个环境变量前缀就绕过 deny」（TODOS #47）
 - 两级规则来源与设置页配置面板：全局 `Settings.permissions`（含总开关，关闭即彻底回到纯模式语义）+ 项目级 `.easycode/permissions.json`（3 秒 TTL 缓存、非法条目跳过而非整份配置失效），全局与项目规则取并集裁决并在审批卡片与拒绝文案中明示来源；设置页新增「权限规则」分区（工具下拉、匹配模式、裁决三态、备注与语义说明）（TODOS #47）
-- **权限信任边界（PR #9 审查返工）**：工作区内的代码属低信任输入，克隆来的仓库不得自行放宽审批。项目级 `deny` / `ask` 默认生效（只会收紧权限），项目级 `allow` **默认被忽略**，须由用户显式开启新增的 `Settings.permissions.trustProjectAllow`（设置页「信任项目级 allow 规则」开关）后才参与裁决；引擎侧提供 `countIgnoredProjectAllowRules()` 供 UI 提示被忽略的条数
+- **权限信任边界（PR #9 审查返工）**：工作区内的代码属低信任输入，克隆来的仓库不得自行放宽审批。项目级 `deny` / `ask` 默认生效（只会收紧权限），项目级 `allow` **默认被忽略**。信任粒度按**工作区**授予（`Settings.permissions.trustedWorkspaces`，规范化绝对路径比对）而非全局开关——信任项目 A 不会连带放宽后来打开的 B、C；授权记录只写入用户本地设置，绝不落在项目仓库内。引擎提供 `isProjectTrusted()` / `setProjectTrust()` / `countIgnoredProjectAllowRules()`，设置页在「权限规则」中按当前工作区提供「信任此项目」按钮并展示被忽略条数
 - 自主测试运行与排错自愈循环（Auto Test-and-Fix Loop）：Core 新增 `detectTestCommand`（`package.json` `scripts.test` 并按锁文件推断 pnpm / yarn / bun / npm → `Cargo.toml` → `go.mod` → `pyproject.toml` 等 Python 标记）与 `parseTestOutput` / `extractFailureExcerpt`（覆盖 vitest / jest / pytest / cargo / go 以及 **Node 内置 `node --test` 的 spec reporter（`ℹ tests/pass/fail` 跨行聚合）与 TAP reporter（`# tests/pass/fail` + `not ok N - 名称`，`# TODO` / `# SKIP` 不计失败）**；用例名剥离 reporter 追加的耗时后缀并跳过 `✖ failing tests:` 这类分节标题；解析不到就保持 `undefined`，绝不用估算值冒充真实结果）（TODOS #39）
 - 自愈循环状态机与入口：`runTestLoop` 执行「跑测试 → 失败则把失败用例 + 日志摘录 + 当前 git diff 组成结构化修复提示词驱动一个完整 Agent 回合 → 自动重跑」，轮次上限 1~5（默认 3）防死循环；`/test-loop [聚焦范围]` 快捷指令与 Git 改动检视面板底部「▷ 运行测试并自愈」双入口；测试命令整体只审批一次（修复回合内的文件改动与命令仍走常规审批与权限规则），测试命令本身同样受权限规则约束——`deny` 直接拒绝不执行，`ask` 在 YOLO 模式下也强制弹窗确认（TODOS #39）
 - 回合内 `[ TEST n/m ]` 测试卡片：展示命令与探测来源、用时、通过 / 失败 / 总数与失败用例清单，可展开查看原始输出尾部；收敛时按 `passed` / `max_rounds` / `aborted` / `error` 四态给出明确 toast（TODOS #39）
 
 ### 修复
+- **第二轮复审返工（P1 三项 + P2 两项）**：
+  - **路径「先离开再进入」绕过**：`../ws/private/key.json` 在 `/ws` 下经 `resolve` 会回到工作区内，而词法层遇到开头 `..` 直接放弃匹配 → 权限层认为无法映射、文件层却能访问。现彻底放弃自行猜测路径合法性：抽出 `resolveWorkspaceRelative(workspace, input, paths)`，与 `resolveWorkspacePath()` **共用同一套解析入口**（`paths.resolve(workspace, input)` + 工作区包含性校验），先得真实绝对路径再折算相对路径做 glob 匹配。Windows 大小写不敏感语义一并统一（`sep === '\\'` 时按小写比对），避免 `C:\WS` 与 `C:\ws` 被判越界
+  - **审批拒绝不收敛**：用户点「拒绝」后后端直接返回 `aborted`，不发 `test_loop_done`，而前端已因审批请求建立运行态 → 会话永久卡在 running、无法再发消息。现在只要本次调用已让前端进入运行态（发出审批请求或启动循环），退出时**必发且只发一次**终止事件；`finally` 兜底覆盖初始化失败与异常路径
+  - **测试期间可切换运行上下文**：`busy` 期间 `running === false`，而 `setSessionWorkspace` / `setSessionProvider` / `revertTurnCheckpoint` 只看 `running` → 修复回合可能改到另一个项目、下一轮测试却仍在原项目跑。现统一为 `isSessionBusy(id)` 判据并覆盖工作区切换、Provider 切换、模型切换、快照回退；`repair()` 内额外校验工作区未漂移，作为拒绝静默改错项目的最后防线
+  - **`runTurn` 状态泄漏**：`rt.running = true` 之后的快照序号分配与回合开启位于 `try` 之外，分配抛错会永久留下 running。现全部纳入 `try/finally`
+  - **长日志摘录丢失失败点**：两段化时中间省略标注本身未计入预算（实测 2020 > 2000），且预算过小时会拼出荒谬内容。现预留标注长度、极小预算退化为纯尾部；无失败标记时不做无意义的两段拼装
 - **权限绕过（PR #9 审查返工，P1 三项）**：
   - **路径 `..` 绕过**：`pathCandidates()` 原先只处理分隔符与工作区前缀，未解析 `..`——规则拒绝 `src/private/**` 时，`src/tmp/../private/key.json` 匹配不到，而文件工具经 `resolveWorkspacePath()` 会真实访问该文件。现新增 `normalizePathSegments()` 做词法规范化（折叠 `.`、消解 `..`、统一分隔符，等价 `path.resolve` 字符串语义且不触碰文件系统）后再做 glob 匹配；相对路径逃出工作区时返回 `null`，规则不命中并回落审批模式（安全默认）
   - **`search_files` 省略 path 时规则被跳过**：该工具默认递归整个工作区，实际会读到 `src/private/**` 却因「无 path 参数」跳过路径规则。现按各工具真实默认作用域求值（`list_dir` / `search_files` 默认 `.`），并对递归搜索类工具做**只收紧不放宽**的子树推断：规则指向子目录时从上层发起搜索同样命中（`deny` / `ask` 保守放大，`allow` 绝不凭前缀推断放宽审批）
@@ -29,16 +35,18 @@
 - 审批可能永久挂起（`ApprovalManager.request` 时序缺陷）：原先先派发 `approval_request` 事件、后登记 resolver，同进程宿主（CLI / 演示模式 / 单测）在事件回调里同步应答时，应答会因为 `pending` 中尚无该 `requestId` 被静默丢弃，promise 永不 resolve——对外表现为「跑到审批就不动了、任务不会自动停止」。现改为**先登记 resolver 再派发事件**，并补 `try/catch`：订阅者抛错时清理未决态按拒绝收尾，绝不悬挂
 - 测试自愈循环的中止传播：修复回合由 `runTurn` 重新创建 `AbortController` 导致用户在修复过程中点「停止」只打断该回合、循环 signal 依旧存活并继续跑下一轮测试；现修复回合复用循环持有的 controller，停止一次即整体收敛
 - 审批等待期占位 `busy`：`runTestLoop` 原先在审批通过后才置位 `busy`，用户可在审批卡片挂起期间另发消息，两条链路争用同一 controller；现于审批前占位（并经审查返工提前到同步检查后），结束后统一清理
-- 测试脚本超时保护：根 `test` 脚本补入遗漏的 `permissions` / `test-runner` / `test-loop` / `approval` 测试，并统一加 `--test-timeout=60000`——任何单测悬挂都会在 60s 内判定失败，而不是把整个 CI 与本地 `pnpm test` 吊死
+- 测试脚本超时保护：根 `test` 脚本补入遗漏的 `permissions` / `test-runner` / `test-loop` / `approval` 测试，统一加 `--test-timeout=60000`，并补 `--test-force-exit`——前者让悬挂的单测在 60s 内判定失败，后者保证即使存在未释放的句柄，测试进程也一定会退出，不再出现「`pnpm test` 跑完不返回」
 
 ### 安全边界说明
 命令前缀权限规则是**命令级审批策略，不是进程级安全沙箱**：它按命令前缀匹配，无法阻止间接执行——`package.json` 的 `scripts.test` 内部可执行任意命令，此时被检查的是 `pnpm test` 而非展开后的每条语句；`a && b`、管道与脚本同样不在匹配范围内。该限制已在设置页「权限规则」面板与 README「安全设计」中明示，不将前缀匹配表述为沙箱防护。
 
 ### 测试
-- 全仓 134 项测试通过（约 5s）：新增权限规则单测（命令前缀词边界、环境变量前缀与 shell 包装解包、路径 glob 单段/跨目录、`deny > ask > allow` 裁决、非法条目跳过）、`executeTool` 三态短路（deny 不弹审批、allow 在 ask 模式免审批、ask 在 yolo 模式强制审批并携带规则来源）、测试输出解析与失败摘录（含 Node spec / TAP 两种 reporter 与 `# TODO`/`# SKIP` 排除）、自愈循环五态（首轮全绿、失败→修复→重跑、轮次耗尽、中止、异常收敛）、`AgentServer.runTestLoop` 集成（项目级 `.easycode/test.json` + `permissions.json`、不可信测试命令被 deny 拦截、ask 规则在 YOLO 下强制审批、修复回合被停止后不再跑下一轮）、审批时序四项回归（同步应答不丢失、同步拒绝、`force` 语义、`denyAll` 中止路径、订阅者抛错不悬挂）
-- **PR #9 审查返工新增 16 项回归**：项目级 `allow` 默认被忽略且 `deny` 保留（含显式信任后的行为反转）、`FOO="hello world" rm` 等引号赋值与未闭合引号的原样返回、`src/tmp/../private/key.json` / 反斜杠 / 绝对路径三类 `..` 绕过、省略 path 的 `list_dir` / `search_files` 按真实默认作用域求值、子树推断只收紧不放宽（`allow` 不得凭前缀放宽）、`resolveApprovalRequirement` 三态语义、`normalizePathSegments` 边界（含逃出工作区返回 `null`）、连续两次启动 `/test-loop` 只允许一次进入运行态、修复回合抛异常 / 返回失败 / 返回中止三种收敛路径且 `test_loop_done` 只发一次、权限规则拒绝时 `tool_result` 事件携带 `approved=false`、长日志中 `✖` / `✕` / `×` / `●` 摘录命中且不从首行丢弃、`FAILOVER` 不被误判为失败标记
+- 全仓 142 项测试通过（约 4.6s）：新增权限规则单测（命令前缀词边界、环境变量前缀与 shell 包装解包、路径 glob 单段/跨目录、`deny > ask > allow` 裁决、非法条目跳过）、`executeTool` 三态短路（deny 不弹审批、allow 在 ask 模式免审批、ask 在 yolo 模式强制审批并携带规则来源）、测试输出解析与失败摘录（含 Node spec / TAP 两种 reporter 与 `# TODO`/`# SKIP` 排除）、自愈循环五态（首轮全绿、失败→修复→重跑、轮次耗尽、中止、异常收敛）、`AgentServer.runTestLoop` 集成（项目级 `.easycode/test.json` + `permissions.json`、不可信测试命令被 deny 拦截、ask 规则在 YOLO 下强制审批、修复回合被停止后不再跑下一轮）、审批时序四项回归（同步应答不丢失、同步拒绝、`force` 语义、`denyAll` 中止路径、订阅者抛错不悬挂）
+- **PR #9 审查返工新增 16 项回归**：项目级 `allow` 默认被忽略且 `deny` 保留（含显式信任后的行为反转）、`FOO="hello world" rm` 等引号赋值与未闭合引号的原样返回、`src/tmp/../private/key.json` / 反斜杠 / 绝对路径三类 `..` 绕过、省略 path 的 `list_dir` / `search_files` 按真实默认作用域求值、子树推断只收紧不放宽（`allow` 不得凭前缀放宽）、`resolveApprovalRequirement` 三态语义、路径解析边界（含逃出工作区返回 `null`）、连续两次启动 `/test-loop` 只允许一次进入运行态、修复回合抛异常 / 返回失败 / 返回中止三种收敛路径且 `test_loop_done` 只发一次、权限规则拒绝时 `tool_result` 事件携带 `approved=false`、长日志中 `✖` / `✕` / `×` / `●` 摘录命中且不从首行丢弃、`FAILOVER` 不被误判为失败标记
+- **第二轮复审新增 8 项回归**：`resolveWorkspaceRelative` 的 POSIX / Windows 双语义（含「先离开再进入」与大小写变体）、权限层与 `resolveWorkspacePath` 解析结果一致（同一路径在两层解析出同一绝对路径）、按工作区授予信任且信任 A 不连带 B、可撤销信任、拒绝审批必发终止事件、运行期四项操作全拦截、快照分配失败后状态复位、长日志两段保留（失败断言 + 末尾汇总）与极小预算不产生负数省略标注
 - 审查返工验证：中止传播用例在移除修复后必然失败（已实测反证），确保该回归测试真的锁住了缺陷
 - **真实环境端到端验证（23/23 通过，直接驱动 `AgentServer` + `NodeHost`；覆盖审查要求的 8 项回归表）**：真文件系统 + 真子进程 + 真 git 仓库 + 真实模型（复用本机已配置供应商），临时数据目录隔离，跑完即清理。验证点包括：不可信项目自带 `allow run_command` 无法取消 ask 保护（含被忽略条数上报）、`FOO="a b" rm` 命中 deny、`src/tmp/../private/key.json` 真实工具调用被拒绝且未读到密钥、并发启动两次 `/test-loop` 仅一次成功、ask 模式 + 未信任项目级 allow 时先弹审批（首个审批来自 `test_loop`）后由模型真实改回源码并重跑至全绿、审批事件先于测试事件（同回合时间线）、修复回合被中止时只发一次 `test_loop_done`、deny 结果携带 `approved=false` 且目标文件未被删除、长日志 `✖` 摘录命中
+- **第二轮复审证据复验（17/17 通过，真实 Runtime）**：按复审点名要求逐项取证——① 路径「先离开再进入」在 POSIX（`../projA/src/private/key.json`）与 Windows（`..\ws\src\private\key.json`，大小写+反斜杠变体）下均被解析回工作区内并命中 deny，真正越界（`../../outside.txt`）返回 `null`；② 拒绝测试循环审批后返回 `aborted`、**发出且仅发出一次** `test_loop_done`、`isSessionBusy` 复位、可立即再次启动；③ 测试命令执行期间（`running === false` 的窗口）工作区切换 / Provider 切换 / 模型切换 / 快照回退**全部被拦截**（4/4），循环结束后工作区仍为原项目；④ 注入快照序号分配失败后 `running` 与 `busy` 均复位，且恢复后可正常再次发送消息
 
 ## [0.1.24] - 2026-10-12
 

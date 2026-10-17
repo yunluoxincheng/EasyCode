@@ -5,9 +5,10 @@ import {
   evaluatePermission,
   matchCommandPattern,
   matchPathGlob,
-  normalizePathSegments,
   normalizeShellCommand,
   resolveApprovalRequirement,
+  resolveWorkspaceRelative,
+  type PathApi,
   type PermissionEvaluation,
   type PermissionRule,
 } from '../permissions.js';
@@ -269,15 +270,110 @@ test('【P2 统一裁决】resolveApprovalRequirement 三态语义', () => {
   assert.equal(resolveApprovalRequirement(asRule('deny'), true).needApproval, false);
 });
 
-test('normalizePathSegments 词法规范化边界', () => {
-  assert.equal(normalizePathSegments('a/./b'), 'a/b');
-  assert.equal(normalizePathSegments('a/b/../c'), 'a/c');
-  assert.equal(normalizePathSegments('a//b///c'), 'a/b/c');
-  assert.equal(normalizePathSegments('.\\a\\b'), 'a/b');
-  assert.equal(normalizePathSegments('.'), '.');
-  assert.equal(normalizePathSegments(''), null);
-  // 相对路径逃出根目录 → 无法映射为工作区内路径
-  assert.equal(normalizePathSegments('../outside.txt'), null);
-  // 绝对路径的 .. 按 resolve 语义忽略
-  assert.equal(normalizePathSegments('/ws/../etc/passwd'), '/etc/passwd');
+/** Windows 路径语义（用于验证「先离开再进入」在两种平台下都被正确拒绝） */
+const winPathApi: PathApi = {
+  resolve: (...parts: string[]): string => {
+    let out = '';
+    for (const part of parts) {
+      if (!part) continue;
+      const normalized = part.replace(/\//g, '\\');
+      if (/^[A-Za-z]:\\/.test(normalized) || normalized.startsWith('\\\\')) {
+        out = normalized;
+        continue;
+      }
+      out = out ? `${out.replace(/\\+$/, '')}\\${normalized}` : normalized;
+    }
+    const drive = /^([A-Za-z]:)/.exec(out)?.[1] ?? '';
+    const rest = out.slice(drive.length).replace(/\\/g, '/');
+    const segs: string[] = [];
+    for (const seg of rest.split('/')) {
+      if (!seg || seg === '.') continue;
+      if (seg === '..') {
+        if (segs.length > 0) segs.pop();
+        continue;
+      }
+      segs.push(seg);
+    }
+    return `${drive}\\${segs.join('\\')}`;
+  },
+  isAbsolute: (p: string): boolean => /^[A-Za-z]:[\\/]/.test(p) || p.startsWith('\\\\'),
+  sep: '\\',
+};
+
+test('resolveWorkspaceRelative 按宿主语义解析（POSIX）', () => {
+  assert.equal(resolveWorkspaceRelative('/ws', 'a/./b'), 'a/b');
+  assert.equal(resolveWorkspaceRelative('/ws', 'a/b/../c'), 'a/c');
+  assert.equal(resolveWorkspaceRelative('/ws', 'a//b///c'), 'a/b/c');
+  assert.equal(resolveWorkspaceRelative('/ws', '.\\a\\b'), 'a/b');
+  assert.equal(resolveWorkspaceRelative('/ws', '.'), '.');
+  assert.equal(resolveWorkspaceRelative('/ws', ''), null);
+  // 真正越界 → null
+  assert.equal(resolveWorkspaceRelative('/ws', '../../etc/passwd'), null);
+  assert.equal(resolveWorkspaceRelative('/ws', '/etc/passwd'), null);
+});
+
+test('【P1 复审】「先离开再进入」的路径必须在 POSIX 与 Windows 下都被拦截', () => {
+  const posixRules: PermissionRule[] = [
+    { tool: 'read_file', pattern: 'private/**', decision: 'deny' },
+  ];
+  // POSIX：../ws/private/key.json 在 /ws 下解析回 /ws/private/key.json
+  assert.equal(
+    resolveWorkspaceRelative('/ws', '../ws/private/key.json'),
+    'private/key.json',
+  );
+  assert.equal(
+    evaluatePermission(posixRules, 'read_file', { path: '../ws/private/key.json' }, '/ws')
+      ?.decision,
+    'deny',
+  );
+  // 多段绕行同样命中
+  assert.equal(
+    evaluatePermission(
+      posixRules,
+      'read_file',
+      { path: './sub/../../ws/private/key.json' },
+      '/ws',
+    )?.decision,
+    'deny',
+  );
+
+  // Windows：同名反例（大小写与分隔符同时变化）
+  const winRules: PermissionRule[] = [
+    { tool: 'read_file', pattern: 'private/**', decision: 'deny' },
+  ];
+  assert.equal(
+    resolveWorkspaceRelative('C:\\WS', '..\\ws\\private\\key.json', winPathApi),
+    'private/key.json',
+  );
+  assert.equal(
+    evaluatePermission(
+      winRules,
+      'read_file',
+      { path: '..\\ws\\private\\key.json' },
+      'C:\\WS',
+      winPathApi,
+    )?.decision,
+    'deny',
+  );
+  // 真正越出工作区（到 C:\Windows）→ 不命中规则，但文件工具会直接报「路径越界」
+  assert.equal(
+    resolveWorkspaceRelative('C:\\WS', '..\\Windows\\System32\\config', winPathApi),
+    null,
+  );
+});
+
+test('【P1 复审】权限层与 resolveWorkspacePath 使用同一套解析语义', async () => {
+  const { MemoryHost } = await import('../host.js');
+  const { resolveWorkspacePath } = await import('../tools/index.js');
+  const host = new MemoryHost({ '/ws/private/key.json': '{"secret":true}' });
+  const rel = '../ws/private/key.json';
+
+  // 文件工具真实解析结果
+  const abs = resolveWorkspacePath('/ws', rel, host);
+  assert.equal(abs, host.paths.resolve('/ws', rel));
+
+  // 权限层折算出的相对路径必须与「文件工具实际访问位置」一致
+  const mapped = resolveWorkspaceRelative('/ws', rel, host.paths);
+  assert.ok(mapped);
+  assert.equal(host.paths.resolve('/ws', mapped), abs);
 });
