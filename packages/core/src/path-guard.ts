@@ -63,6 +63,21 @@ function joinLexical(paths: PathApi, base: string, segments: string[]): string {
 }
 
 /**
+ * 判断两个绝对路径是否指向同一位置（Windows 大小写与分隔符不敏感）。
+ *
+ * 用于「审批前后真实目标是否漂移」的比较——必须比绝对路径：
+ * 若工作区根本身是符号链接，被改指到另一个项目时，两边同名文件会得到
+ * 相同的相对路径（都是 `config.txt`），只比相对路径会漏判。
+ */
+export function sameAbsolutePath(a: string, b: string, sep = '/'): boolean {
+  const norm = (v: string): string => {
+    const s = v.replace(/[\\/]+/g, '/').replace(/\/+$/, '');
+    return sep === '\\' ? s.toLowerCase() : s;
+  };
+  return norm(a) === norm(b);
+}
+
+/**
  * 把工具传入的路径解析为「真实目标 + 真实相对路径」。
  *
  * `input` 为工具参数中的原始路径（可为相对或绝对）；`workspaceRoot` 为会话工作区。

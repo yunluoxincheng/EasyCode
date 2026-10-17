@@ -1283,11 +1283,21 @@ export class AgentServer {
     ];
 
     for (const rel of candidates) {
-      const fullPath = this.host.paths.join(root, rel);
       try {
-        const stat = await this.host.fs.stat(fullPath);
+        // 自动加载的项目规范会拼进**系统提示词**并发往模型服务，比用户主动引用
+        // 更危险：克隆仓库里 `AGENTS.md -> /home/user/private.txt` 无需要用户操作
+        // 就会被读取上传（PR #9 第六轮复审 P1）。因此与文件预览 / @file 引用一样，
+        // 先取真实目标，越界或无法确认则跳过该候选。
+        const guard = await resolveRealPathInWorkspace(
+          this.host,
+          root,
+          rel,
+          this.host.paths,
+        );
+        if (!guard.ok) continue;
+        const stat = await this.host.fs.stat(guard.value.realPath);
         if (stat && !stat.isDirectory) {
-          const content = await this.host.fs.readFile(fullPath);
+          const content = await this.host.fs.readFile(guard.value.realPath);
           if (content.trim()) {
             const rule: ProjectRuleInfo = {
               path: rel.replace(/\\/g, '/'),
@@ -1390,9 +1400,19 @@ export class AgentServer {
 
       const list: CustomPromptInfo[] = [];
       for (const fileName of mdFiles) {
-        const fullPath = this.host.paths.join(promptsDir, fileName);
         try {
-          const content = await this.host.fs.readFile(fullPath);
+          // 自定义指令模板同样会进入模型上下文，与项目规则一样走真实路径守卫，
+          // 避免工作区内 `.easycode/prompts/x.md -> 工作区外` 泄露外部内容。
+          // 注意：host.paths.join 生成的是绝对路径，这里必须直接给绝对路径
+          // （守卫会解析真实目标并折算回工作区相对路径）
+          const guard = await resolveRealPathInWorkspace(
+            this.host,
+            root,
+            this.host.paths.join(root, '.easycode', 'prompts', fileName),
+            this.host.paths,
+          );
+          if (!guard.ok) continue;
+          const content = await this.host.fs.readFile(guard.value.realPath);
           const id = fileName.slice(0, -3);
           const lines = content.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
           let desc = '自定义指令';

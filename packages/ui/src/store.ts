@@ -1327,7 +1327,19 @@ export class AppStore {
   }
 
   async saveSettings(patch: Partial<Settings>): Promise<void> {
-    this.settings = await this.client.updateSettings(patch);
+    // 项目信任授权只能经 setProjectTrust 变更（引擎是唯一事实来源）。
+    // 设置页草稿可能早于授权操作生成：若把陈旧的 trustedWorkspaces 一并提交，
+    // 会把用户刚撤销的授权静默写回（PR #9 第六轮复审 P1）。
+    // 因此普通保存一律沿用**引擎当前的**授权列表，不携带草稿中的值。
+    const sanitized: Partial<Settings> = { ...patch };
+    if (sanitized.permissions) {
+      const { trustedWorkspaces: _draftTrust, ...restPermissions } = sanitized.permissions;
+      sanitized.permissions = {
+        ...restPermissions,
+        trustedWorkspaces: this.settings?.permissions?.trustedWorkspaces ?? [],
+      };
+    }
+    this.settings = await this.client.updateSettings(sanitized);
     this.notify();
   }
 

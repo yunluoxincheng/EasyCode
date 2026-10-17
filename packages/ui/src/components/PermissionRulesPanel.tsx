@@ -89,6 +89,18 @@ export function PermissionRulesPanel({
       const updated = await client.setProjectTrust(workspaceRoot, next);
       // 引擎是授权的唯一事实来源：写回后再回读一次，避免 UI 与引擎判断不一致
       store.applySettings(updated);
+      // 必须同步设置页草稿（PR #9 第六轮复审 P1）：
+      // 草稿只在为 null 时初始化，之后不会跟随 store.settings 变化。若不同步，
+      // 用户撤销信任后只要再点「保存设置」，旧草稿就会把刚删掉的授权原样写回，
+      // 造成「撤销了但没真正撤销」。这里只覆盖 trustedWorkspaces，
+      // 保留草稿中其它未保存的编辑（enabled / rules）。
+      patch({
+        permissions: {
+          enabled: draft.permissions?.enabled !== false,
+          rules: draft.permissions?.rules ?? [],
+          trustedWorkspaces: updated.permissions?.trustedWorkspaces ?? [],
+        },
+      });
       await refreshTrust();
       store.showToast(next ? '已信任此项目的 allow 规则' : '已撤销该项目信任');
     } catch (err) {

@@ -11,7 +11,7 @@ import {
   resolveWorkspaceRelative,
   type PermissionRule,
 } from '../permissions.js';
-import { resolveRealPathInWorkspace } from '../path-guard.js';
+import { resolveRealPathInWorkspace, sameAbsolutePath } from '../path-guard.js';
 import type { BackgroundTaskManager } from '../tasks.js';
 import { readFileTool, writeFileTool, editFileTool, listDirTool } from './fs.js';
 import { searchFilesTool } from './search.js';
@@ -257,6 +257,13 @@ export async function executeTool(
   let permissionInput = validated.value;
   /** 文件类工具经校验后的「真实相对路径」——实际执行必须用它，否则会出现检查/使用不一致 */
   let verifiedRelative: string | undefined;
+  /**
+   * 经校验的**真实绝对路径**。必须与相对路径一起记下：
+   * 若工作区根本身是符号链接，审批期间整个工作区被指向另一个项目时，
+   * 两个不同项目里的同名文件会得到相同的 `realRelative`（都是 `config.txt`），
+   * 只比较相对路径会漏判（PR #9 第六轮复审 P1）。
+   */
+  let verifiedAbsolute: string | undefined;
   let rawPathForRecheck: string | undefined;
   if (PATH_PATTERN_TOOLS.has(name) && ctx.workspace) {
     const args = validated.value as Record<string, unknown>;
@@ -276,6 +283,7 @@ export async function executeTool(
     // 用真实相对路径参与裁决：别名路径也会命中针对真实目标的规则
     permissionInput = { ...args, path: real.value.realRelative };
     verifiedRelative = real.value.realRelative;
+    verifiedAbsolute = real.value.realPath;
     rawPathForRecheck = rawPath;
   }
   // 权限规则裁决（TODOS #47）：deny 直接拒绝、ask 强制审批、allow 免审批；
@@ -362,17 +370,28 @@ export async function executeTool(
     // （PR #9 第五轮复审 P1）。单次复检不能彻底消除竞态，但能把
     // 「等待用户点同意」这段最长的窗口收掉；真正的强约束需要宿主级
     // 句柄/O_NOFOLLOW 能力，见 README「安全设计」的边界说明。
-    if (verifiedRelative !== undefined && ctx.workspace && rawPathForRecheck !== undefined) {
+    if (
+      verifiedRelative !== undefined &&
+      ctx.workspace &&
+      rawPathForRecheck !== undefined &&
+      verifiedAbsolute !== undefined
+    ) {
       const recheck = await resolveRealPathInWorkspace(
         ctx.host,
         ctx.workspace,
         rawPathForRecheck,
         ctx.host.paths,
       );
-      if (!recheck.ok || recheck.value.realRelative !== verifiedRelative) {
+      // 必须比较**绝对**真实目标：只比相对路径会漏掉「整个工作区根被改指到另一个
+      // 项目」这种情形（两边都叫 config.txt）。工作区物理身份漂移同样在此暴露。
+      const unchanged =
+        recheck.ok &&
+        recheck.value.realRelative === verifiedRelative &&
+        sameAbsolutePath(recheck.value.realPath, verifiedAbsolute, ctx.host.paths.sep);
+      if (!unchanged) {
         return {
           content:
-            '路径在审批期间发生变化（真实目标已被替换），为避免写入/读取非预期位置，本次调用已取消。请重新发起操作。',
+            '路径在审批期间发生变化（真实目标或工作区物理位置已被替换），为避免写入/读取非预期位置，本次调用已取消。请重新发起操作。',
           approved: false,
           isError: false,
           durationMs: Date.now() - started,
