@@ -91,6 +91,7 @@ export async function createTauriHost(): Promise<Host> {
       stat: (p) => invoke<FsDirent extends never ? never : { isDirectory: boolean; size: number; mtimeMs: number } | null>('fs_stat', { path: p }),
       unlink: (p) => invoke<void>('fs_unlink', { path: p }),
       rename: (from, to) => invoke<void>('fs_rename', { from, to }),
+      realpath: (p) => invoke<string | null>('fs_realpath', { path: p }),
     },
     process: {
       run: async (command, opts) => {
@@ -380,6 +381,10 @@ export async function createTauriClient(options?: { reflexPolicy?: DecisionPolic
     reviewDecision: (sessionId, recordId, label) => server.reviewDecision(sessionId, recordId, label),
     runTestLoop: (id, options) => server.runTestLoop(id, options),
     detectSessionTestCommand: (id) => server.detectSessionTestCommand(id),
+    isProjectTrusted: async (workspaceRoot) => server.isProjectTrusted(workspaceRoot),
+    setProjectTrust: (workspaceRoot, trusted) => server.setProjectTrust(workspaceRoot, trusted),
+    countIgnoredProjectAllowRules: (workspaceRoot) =>
+      server.countIgnoredProjectAllowRules(workspaceRoot),
     onEvent: (listener) => server.onEvent(listener),
   };
 }

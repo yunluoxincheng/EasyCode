@@ -1,3 +1,4 @@
+import { useCallback, useEffect, useState } from 'react';
 import { TerminalSelect } from './TerminalSelect.js';
 import { useStore } from '../useStore.js';
 import type { PermissionRule } from '@easycode/core';
@@ -46,12 +47,57 @@ export function PermissionRulesPanel({
   const enabled = draft.permissions?.enabled !== false;
   const trustedWorkspaces = draft.permissions?.trustedWorkspaces ?? [];
   const rules = draft.permissions?.rules ?? [];
-  /** 当前工作区是否已被信任（按规范化路径比对由引擎负责，这里只做展示与写入） */
-  const trusted = workspaceRoot
-    ? trustedWorkspaces.some(
-        (w) => w === workspaceRoot || w.replace(/\\/g, '/') === workspaceRoot.replace(/\\/g, '/'),
-      )
-    : false;
+
+  // 信任状态与忽略条数一律向引擎查询：路径规范化（分隔符 / Windows 大小写）只有
+  // 引擎一份实现，UI 不再自行比对字符串——否则会出现「显示已信任但撤销无效」
+  // 这类授权撤销失败（PR #9 第三轮复审 P1）
+  const [trusted, setTrusted] = useState(false);
+  const [ignoredAllow, setIgnoredAllow] = useState(0);
+  const [trustBusy, setTrustBusy] = useState(false);
+
+  const refreshTrust = useCallback(async () => {
+    const client = store.client;
+    if (!workspaceRoot || !client.isProjectTrusted) {
+      setTrusted(false);
+      setIgnoredAllow(0);
+      return;
+    }
+    try {
+      setTrusted(await client.isProjectTrusted(workspaceRoot));
+      setIgnoredAllow(
+        client.countIgnoredProjectAllowRules
+          ? await client.countIgnoredProjectAllowRules(workspaceRoot)
+          : 0,
+      );
+    } catch {
+      // 查询失败时保守展示为未信任，绝不误报「已授权」
+      setTrusted(false);
+      setIgnoredAllow(0);
+    }
+  }, [store, workspaceRoot]);
+
+  useEffect(() => {
+    void refreshTrust();
+  }, [refreshTrust]);
+
+  const toggleTrust = async () => {
+    const client = store.client;
+    if (!workspaceRoot || !client.setProjectTrust || trustBusy) return;
+    setTrustBusy(true);
+    try {
+      const next = !trusted;
+      const updated = await client.setProjectTrust(workspaceRoot, next);
+      // 引擎是授权的唯一事实来源：写回后再回读一次，避免 UI 与引擎判断不一致
+      store.applySettings(updated);
+      await refreshTrust();
+      store.showToast(next ? '已信任此项目的 allow 规则' : '已撤销该项目信任');
+    } catch (err) {
+      store.showToast(err instanceof Error ? err.message : '信任设置失败', 'err');
+      await refreshTrust();
+    } finally {
+      setTrustBusy(false);
+    }
+  };
 
   const update = (next: PermissionRule[]): void => {
     patch({ permissions: { enabled, trustedWorkspaces, rules: next } });
@@ -101,19 +147,15 @@ export function PermissionRulesPanel({
               </code>
               <button
                 className={`btn ${trusted ? 'primary' : ''}`}
+                disabled={trustBusy}
                 title={
                   trusted
                     ? '该项目自带的 allow 规则当前生效（点击撤销）'
                     : '该项目自带的 allow 规则被忽略（点击信任以启用）'
                 }
-                onClick={() => {
-                  const next = trusted
-                    ? trustedWorkspaces.filter((w) => w !== workspaceRoot)
-                    : [...trustedWorkspaces, workspaceRoot];
-                  patch({ permissions: { enabled, trustedWorkspaces: next, rules } });
-                }}
+                onClick={() => void toggleTrust()}
               >
-                {trusted ? '✓ 已信任此项目' : '信任此项目'}
+                {trustBusy ? '[ WAIT ] 处理中' : trusted ? '[ OK ] 已信任此项目' : '信任此项目'}
               </button>
             </>
           )}
@@ -123,6 +165,11 @@ export function PermissionRulesPanel({
             ? '已信任：该项目自带 allow 规则会生效，请确认仓库来源可信'
             : '未信任（推荐）：项目级 deny / ask 生效，allow 被忽略'}
         </span>
+        {ignoredAllow > 0 && (
+          <span className="auto-scroll-text perm-ignored">
+            [ DENY ] {ignoredAllow} 条项目级 allow 规则已被忽略
+          </span>
+        )}
       </div>
 
       <div className="perm-list">
@@ -162,7 +209,7 @@ export function PermissionRulesPanel({
                 title="删除该规则"
                 onClick={() => removeRule(index)}
               >
-                ✕
+                [ DEL ]
               </button>
             </div>
             <input
@@ -177,7 +224,7 @@ export function PermissionRulesPanel({
 
       <div className="perm-actions">
         <button className="btn" onClick={addRule}>
-          ＋ 添加规则
+          [ ADD ] 添加规则
         </button>
       </div>
 

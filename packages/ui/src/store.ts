@@ -1331,6 +1331,15 @@ export class AppStore {
     this.notify();
   }
 
+  /**
+   * 接受引擎返回的最新设置（如信任授权后由引擎写回）。
+   * 授权类操作的唯一事实来源是引擎，UI 只负责回读，不自行推导。
+   */
+  applySettings(next: Settings): void {
+    this.settings = next;
+    this.notify();
+  }
+
   /** 用系统文件管理器打开路径 */
   openPath(path: string): void {
     void this.client.openPath(path).catch(() => {/* 静默：路径可能不存在 */});

@@ -51,7 +51,7 @@ import { Settings, DEFAULT_SETTINGS, PROVIDER_PRESETS } from './settings.js';
 import type { ModelTestResult, ProviderEntry, ProviderModel, ProviderModelInfo } from './settings.js';
 import { loadModelDirectory, resolveModelMeta } from './model-catalog.js';
 import { buildSystemPrompt } from './prompts.js';
-import { WorkspaceLockManager } from './workspace-lock.js';
+import { Mutex, WorkspaceLockManager } from './workspace-lock.js';
 import { DecisionStatsManager } from './stats.js';
 import { ShadowDecisionPolicy } from './shadow.js';
 import { runTestLoop, type TestLoopResult } from './test-loop.js';
@@ -126,6 +126,15 @@ interface SessionRuntime {
   running: boolean;
   /** 测试自愈循环执行中（TODOS #39）：与 running 一同阻止并发发送 */
   busy?: boolean;
+  /**
+   * 抑制常规 `done` 事件（TODOS #39 第三轮复审 P2）。
+   *
+   * 测试自愈循环的修复回合是一次**内部** Agent 回合：它结束后外层循环还要继续跑测试。
+   * 若照常发 `done`，前端会立即关闭当前回合、恢复 idle，并可能弹出「任务完成」通知，
+   * 而实际上自愈尚未结束——表现为一个任务被拆成多段 UI 回合、未完成就先提示完成。
+   * 因此修复回合期间置位本标记，由外层 `test_loop_done` 掌握最终结束语义。
+   */
+  suppressDone?: boolean;
 }
 
 export interface SessionEventPayload {
@@ -142,6 +151,18 @@ export class AgentServer {
   private sessions = new Map<string, SessionRuntime>();
   private readonly events = new Emitter<SessionEventPayload>();
   private readonly workspaceLocks = new WorkspaceLockManager();
+  /**
+   * 会话级「运行上下文操作」互斥锁（PR #9 第三轮复审 P1）。
+   *
+   * 仅靠入口处 `isSessionBusy()` 检查存在 TOCTOU：某操作通过检查后停在异步等待
+   * （如 `host.fs.stat()` / 快照查询），期间测试自愈循环启动进入 busy，
+   * 该操作随后仍会完成，导致会话上下文中途被改。
+   *
+   * 约定：所有会改写运行上下文或磁盘文件的操作，都在**临界区内**重新检查 busy，
+   * 而不是只在入口检查一次；`runTestLoop` 只在临界区内完成「检查 + 置 busy」，
+   * 之后立即释放，避免长时间占锁阻塞交互。
+   */
+  private readonly sessionOpLocks = new Map<string, Mutex>();
   /** 会话绑定的后台任务池（TODOS #37）：懒创建，会话删除/应用退出统一清场 */
   private readonly bgManagers = new Map<string, BackgroundTaskManager>();
   private readonly decisionStats: DecisionStatsManager;
@@ -225,10 +246,18 @@ export class AgentServer {
   ): Promise<SessionMeta> {
     await this.ensureSettings();
     const rt = this.requireSession(sessionId);
-    if (this.isSessionBusy(sessionId)) {
-      throw new Error('原会话正在运行中，请等待完成或停止后再分叉');
-    }
+    // 分叉读取并克隆历史：必须与测试循环互斥，否则可能克隆到执行中的不一致状态
+    return this.withSessionOpLock(
+      sessionId,
+      '原会话正在运行中，请等待完成或停止后再分叉',
+      () => this.forkSessionLocked(rt, options),
+    );
+  }
 
+  private async forkSessionLocked(
+    rt: SessionRuntime,
+    options?: { upToMessageId?: string; beforeUserIndex?: number },
+  ): Promise<SessionMeta> {
     let slicedMessages: ChatMessage[] = [];
     if (options?.beforeUserIndex !== undefined) {
       const targetUserIndex = options.beforeUserIndex;
@@ -301,37 +330,40 @@ export class AgentServer {
   async trimSessionHistory(id: string, keepRecentTurns = 2): Promise<SessionData> {
     await this.ensureSettings();
     const rt = this.requireSession(id);
-    if (this.isSessionBusy(id)) {
-      throw new Error('会话正在运行中，请先等待完成或点击停止');
-    }
+    // 压缩会改写历史消息（会话运行上下文），与测试循环互斥
+    return this.withSessionOpLock(id, '会话正在运行中，请先等待完成或点击停止', async () => {
+      if (rt.data.messages.length === 0) return rt.data;
 
-    if (rt.data.messages.length === 0) return rt.data;
+      const compRes = compactHistoryMessages(rt.data.messages, {
+        keepRecentTurns,
+        pruneTools: true,
+      });
 
-    const compRes = compactHistoryMessages(rt.data.messages, {
-      keepRecentTurns,
-      pruneTools: true,
-    });
-
-    if (compRes.compacted) {
-      rt.data.messages = compRes.messages;
-      const latestTodos = extractLatestTodos(rt.data.messages);
-      if (latestTodos) {
-        rt.data.todos = structuredClone(latestTodos);
-      }
-      rt.data.meta.updatedAt = new Date().toISOString();
-      await this.persistSession(rt);
-    } else {
-      // 即使轮数未超过 keepRecentTurns，也对历史旧工具的长输出执行折叠压缩
-      const pruneRes = pruneHistoricalToolResults(rt.data.messages, { keepRecentTurns: 1 });
-      if (pruneRes.modified) {
+      if (compRes.compacted) {
+        rt.data.messages = compRes.messages;
+        const latestTodos = extractLatestTodos(rt.data.messages);
+        if (latestTodos) {
+          rt.data.todos = structuredClone(latestTodos);
+        }
         rt.data.meta.updatedAt = new Date().toISOString();
         await this.persistSession(rt);
+      } else {
+        // 即使轮数未超过 keepRecentTurns，也对历史旧工具的长输出执行折叠压缩
+        const pruneRes = pruneHistoricalToolResults(rt.data.messages, { keepRecentTurns: 1 });
+        if (pruneRes.modified) {
+          rt.data.meta.updatedAt = new Date().toISOString();
+          await this.persistSession(rt);
+        }
       }
-    }
-    return rt.data;
+      return rt.data;
+    });
   }
 
   async listSessions(): Promise<SessionMeta[]> {
+    // 冷启动恢复会话时会用 settings.defaultApprovalMode 等默认值构造运行时，
+    // 必须先加载设置：否则历史会话的审批模式会退回 DEFAULT_SETTINGS（ask），
+    // 导致用户配置的 yolo 在重启后失效、测试自愈卡在审批上（PR #9 第三轮复审发现）
+    await this.ensureSettings();
     const metas = [...this.sessions.values()].map((rt) => rt.data.meta);
     if (metas.length > 0) return metas.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
     // 冷启动：从磁盘恢复
@@ -642,6 +674,10 @@ export class AgentServer {
             });
             return;
           }
+          // 内部修复回合不向外发 done：外层 test_loop_done 才是真正的结束语义。
+          // 否则前端会提前关闭回合、误报「任务完成」，且自愈中途误发桌面通知
+          // （PR #9 第三轮复审 P2）
+          if (event.type === 'done' && rt.suppressDone) return;
           this.emitterFor(id)(event);
         },
         reasoningEffort: rt.data.meta.reasoningEffort ?? '',
@@ -712,6 +748,32 @@ export class AgentServer {
     return !!rt && (rt.running || rt.busy === true);
   }
 
+  /** 取会话级执行互斥锁（同一会话的上下文变更串行化） */
+  private sessionOpLock(id: string): Mutex {
+    let lock = this.sessionOpLocks.get(id);
+    if (!lock) {
+      lock = new Mutex();
+      this.sessionOpLocks.set(id, lock);
+    }
+    return lock;
+  }
+
+  /**
+   * 在执行期互斥中执行「会改写运行上下文或磁盘文件」的操作：
+   * 临界区内**重新**检查 busy，消除「入口检查通过 → 异步等待期间循环启动」的 TOCTOU。
+   * `busyMessage` 为拒绝时的提示文案。
+   */
+  private async withSessionOpLock<T>(
+    id: string,
+    busyMessage: string,
+    fn: () => Promise<T> | T,
+  ): Promise<T> {
+    return this.sessionOpLock(id).withLock(async () => {
+      if (this.isSessionBusy(id)) throw new Error(busyMessage);
+      return fn();
+    });
+  }
+
   setApprovalMode(id: string, mode: ApprovalMode): void {
     this.requireSession(id).approval.setMode(mode);
   }
@@ -723,11 +785,10 @@ export class AgentServer {
   /** 会话级模型覆盖（'' = 跟随供应商默认，即第一个启用模型） */
   async setSessionModel(id: string, model: string): Promise<SessionMeta> {
     const rt = this.requireSession(id);
-    if (this.isSessionBusy(id)) {
-      throw new Error('会话运行中，暂不能切换模型');
-    }
-    rt.data.meta.model = model.trim();
-    rt.data.meta.updatedAt = new Date().toISOString();
+    await this.withSessionOpLock(id, '会话运行中，暂不能切换模型', () => {
+      rt.data.meta.model = model.trim();
+      rt.data.meta.updatedAt = new Date().toISOString();
+    });
     await this.persistSession(rt);
     return rt.data.meta;
   }
@@ -736,14 +797,15 @@ export class AgentServer {
   async setSessionProvider(id: string, providerId: string, model?: string): Promise<SessionMeta> {
     await this.ensureSettings();
     const rt = this.requireSession(id);
-    if (this.isSessionBusy(id)) throw new Error('会话运行中，暂不能切换模型服务');
     const entry = this.settings.providers[providerId];
     if (!entry) throw new Error(`未配置的模型服务: ${providerId}`);
     const enabledModels = (entry.models ?? []).filter((m) => m.enabled !== false).map((m) => m.name);
-    rt.data.meta.providerId = providerId;
-    rt.data.meta.model = model?.trim() ?? enabledModels[0] ?? '';
-    rt.data.meta.reasoningEffort = '';
-    rt.data.meta.updatedAt = new Date().toISOString();
+    await this.withSessionOpLock(id, '会话运行中，暂不能切换模型服务', () => {
+      rt.data.meta.providerId = providerId;
+      rt.data.meta.model = model?.trim() ?? enabledModels[0] ?? '';
+      rt.data.meta.reasoningEffort = '';
+      rt.data.meta.updatedAt = new Date().toISOString();
+    });
     await this.persistSession(rt);
     return rt.data.meta;
   }
@@ -760,20 +822,20 @@ export class AgentServer {
   /** 绑定/更换会话的工作区（传空串表示解绑，纯对话） */
   async setSessionWorkspace(id: string, workspace: string): Promise<SessionMeta> {
     const rt = this.requireSession(id);
-    // 循环期间更换工作区会让修复回合改到另一个项目（复审 P1）：
-    // 必须在解析目标目录之前就拦住，避免出现「测试在 A、修复改 B」
-    if (this.isSessionBusy(id)) {
-      throw new Error('会话运行中，暂不能更换工作区');
-    }
     const ws = workspace.trim();
+    // 目标目录校验放在锁外：它是纯读取，且可能较慢（网络盘）
     if (ws) {
       const stat = await this.host.fs.stat(ws);
       if (!stat || !stat.isDirectory) {
         throw new Error(`工作区不存在或不是目录: ${ws}`);
       }
     }
-    rt.data.meta.workspaceRoot = ws;
-    rt.data.meta.updatedAt = new Date().toISOString();
+    // 真正的「检查 + 写入」必须在同一临界区内：入口检查（上方无）与写入之间的
+    // 任何 await 都可能被测试循环插队（PR #9 第三轮复审 P1 TOCTOU）
+    await this.withSessionOpLock(id, '会话运行中，暂不能更换工作区', () => {
+      rt.data.meta.workspaceRoot = ws;
+      rt.data.meta.updatedAt = new Date().toISOString();
+    });
     await this.persistSession(rt);
     return rt.data.meta;
   }
@@ -1558,13 +1620,11 @@ export class AgentServer {
   async runTestLoop(sessionId: string, options?: RunTestLoopRequest): Promise<TestLoopResult> {
     await this.ensureSettings();
     const rt = this.requireSession(sessionId);
-    if (this.isSessionBusy(sessionId)) {
-      throw new Error('会话正在运行中，请先等待完成或点击停止');
-    }
-    // 同步占位：检查与占位之间不得有任何 await。否则两次快速点击都能通过上面的检查，
-    // 后续读项目配置 / 探测命令 / 解析规则期间并发启动两个循环，导致重复跑测试、
-    // 同一会话并发执行修复回合，并互相覆盖 rt.controller。
-    rt.busy = true;
+    // 占位必须与检查处于同一临界区：否则「检查通过 → 异步探测命令期间」
+    // 另一个上下文操作（如工作区切换）可能插入（PR #9 第三轮复审 TOCTOU）
+    await this.withSessionOpLock(sessionId, '会话正在运行中，请先等待完成或点击停止', () => {
+      rt.busy = true;
+    });
     const controller = new AbortController();
     // 只要本次调用已经让前端进入运行态（发出了审批请求或启动了循环），
     // 就必须在退出时补发终止事件，否则 UI 会永久停在 running（复审 P1）。
@@ -1679,12 +1739,20 @@ export class AgentServer {
             id: `m_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
             createdAt: new Date().toISOString(),
           });
-          // 修复回合的结果必须回传给循环：error / aborted 都要收敛循环，
-          // 否则「修复没成功也继续重跑测试」会白白烧掉剩余轮次
-          const turn = await this.runTurn(rt);
-          // runTurn 结束会复位运行态；循环期间保持 busy 阻止并发发送，并把中止信号接管回循环
-          rt.running = false;
-          rt.controller = controller;
+          // 修复回合是**内部**回合：抑制常规 done，由外层 test_loop_done 收敛 UI
+          // （否则前端会提前结束回合并误报任务完成，PR #9 第三轮复审 P2）
+          rt.suppressDone = true;
+          let turn: LoopResult;
+          try {
+            // 修复回合的结果必须回传给循环：error / aborted 都要收敛循环，
+            // 否则「修复没成功也继续重跑测试」会白白烧掉剩余轮次
+            turn = await this.runTurn(rt);
+          } finally {
+            rt.suppressDone = false;
+            // runTurn 结束会复位运行态；循环期间保持 busy 阻止并发发送，并把中止信号接管回循环
+            rt.running = false;
+            rt.controller = controller;
+          }
           if (turn.reason === 'aborted') return { ok: false, aborted: true };
           if (turn.reason === 'error') {
             return { ok: false, message: turn.errorMessage ?? '修复回合执行失败' };
@@ -1743,55 +1811,54 @@ export class AgentServer {
     optionsOrPaths?: RevertTurnOptions | string[],
   ): Promise<TurnUndoResult> {
     const rt = this.requireSession(sessionId);
-    // 快照回退会改写磁盘文件：测试循环运行期间回退，会让下一轮测试跑在被回退的代码上，
-    // 并可能与修复回合的写操作交叉（复审 P1）。统一用 isSessionBusy 判断。
-    if (this.isSessionBusy(sessionId)) {
-      throw new Error('会话正在运行中，请先等待完成或点击停止');
-    }
+    // 快照回退会改写磁盘文件。仅入口检查存在 TOCTOU：检查通过后还要 await 快照查询，
+    // 期间测试循环可能启动，回退仍会执行（PR #9 第三轮复审 P1）。
+    // 因此整个「查询 + 回退 + 追加通知」都在执行期互斥内完成，临界区再复核 busy。
+    return this.withSessionOpLock(sessionId, '会话正在运行中，请先等待完成或点击停止', async () => {
+      // P1 #1：先解析目标快照，严格按快照记录的 workspaceRoot 加锁并失效缓存
+      const targetRecord = await this.checkpoints.getTargetRecord(sessionId, turnId);
+      const targetWorkspace = targetRecord.workspaceRoot?.trim();
+      const doRevert = () =>
+        this.checkpoints.revertTurn(sessionId, targetRecord.turnId, optionsOrPaths);
+      const { record, revertedPaths } = targetWorkspace
+        ? await this.workspaceLocks.getLock(targetWorkspace).withLock(doRevert)
+        : await doRevert();
 
-    // P1 #1：先解析目标快照，严格按快照记录的 workspaceRoot 加锁并失效缓存
-    const targetRecord = await this.checkpoints.getTargetRecord(sessionId, turnId);
-    const targetWorkspace = targetRecord.workspaceRoot?.trim();
-    const doRevert = () =>
-      this.checkpoints.revertTurn(sessionId, targetRecord.turnId, optionsOrPaths);
-    const { record, revertedPaths } = targetWorkspace
-      ? await this.workspaceLocks.getLock(targetWorkspace).withLock(doRevert)
-      : await doRevert();
+      if (targetWorkspace) {
+        this.workspaceFilesCache.delete(targetWorkspace);
+      }
+      if (rt.data.meta.workspaceRoot && rt.data.meta.workspaceRoot !== targetWorkspace) {
+        this.workspaceFilesCache.delete(rt.data.meta.workspaceRoot);
+      }
 
-    if (targetWorkspace) {
-      this.workspaceFilesCache.delete(targetWorkspace);
-    }
-    if (rt.data.meta.workspaceRoot && rt.data.meta.workspaceRoot !== targetWorkspace) {
-      this.workspaceFilesCache.delete(rt.data.meta.workspaceRoot);
-    }
+      const pathListStr = revertedPaths.map((p) => `\`${p}\``).join('、');
+      const noticeText = `> **[系统通知 · 快照回退]** 已撤销第 ${record.turnNumber} 回合的文件变更（恢复至修改前状态）：${pathListStr}`;
+      const lastMsg = rt.data.messages[rt.data.messages.length - 1];
+      if (lastMsg && lastMsg.role === 'assistant') {
+        lastMsg.blocks.push({
+          type: 'text',
+          text: `\n\n${noticeText}`,
+        });
+      } else {
+        rt.data.messages.push({
+          role: 'assistant',
+          blocks: [{ type: 'text', text: noticeText }],
+          id: `m_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+          createdAt: new Date().toISOString(),
+        });
+      }
 
-    const pathListStr = revertedPaths.map((p) => `\`${p}\``).join('、');
-    const noticeText = `> **[系统通知 · 快照回退]** 已撤销第 ${record.turnNumber} 回合的文件变更（恢复至修改前状态）：${pathListStr}`;
-    const lastMsg = rt.data.messages[rt.data.messages.length - 1];
-    if (lastMsg && lastMsg.role === 'assistant') {
-      lastMsg.blocks.push({
-        type: 'text',
-        text: `\n\n${noticeText}`,
-      });
-    } else {
-      rt.data.messages.push({
-        role: 'assistant',
-        blocks: [{ type: 'text', text: noticeText }],
-        id: `m_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
-        createdAt: new Date().toISOString(),
-      });
-    }
-
-    rt.data.meta.updatedAt = new Date().toISOString();
-    await this.persistSession(rt);
-    const checkpoints = await this.checkpoints.listCheckpoints(sessionId);
-    return {
-      turnId: record.turnId,
-      turnNumber: record.turnNumber,
-      revertedPaths,
-      checkpoints,
-      session: rt.data,
-    };
+      rt.data.meta.updatedAt = new Date().toISOString();
+      await this.persistSession(rt);
+      const checkpoints = await this.checkpoints.listCheckpoints(sessionId);
+      return {
+        turnId: record.turnId,
+        turnNumber: record.turnNumber,
+        revertedPaths,
+        checkpoints,
+        session: rt.data,
+      };
+    });
   }
 
   /* -------------------- 工作区文件轻量预览 (TODOS #38) -------------------- */

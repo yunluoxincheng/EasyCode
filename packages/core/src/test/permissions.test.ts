@@ -297,6 +297,16 @@ const winPathApi: PathApi = {
     return `${drive}\\${segs.join('\\')}`;
   },
   isAbsolute: (p: string): boolean => /^[A-Za-z]:[\\/]/.test(p) || p.startsWith('\\\\'),
+  dirname: (p: string): string => {
+    const idx = p.lastIndexOf('\\');
+    if (idx < 0) return '.';
+    if (idx === 2 && /^[A-Za-z]:/.test(p)) return `${p.slice(0, 2)}\\`;
+    return p.slice(0, idx);
+  },
+  basename: (p: string): string => {
+    const idx = p.lastIndexOf('\\');
+    return idx < 0 ? p : p.slice(idx + 1);
+  },
   sep: '\\',
 };
 

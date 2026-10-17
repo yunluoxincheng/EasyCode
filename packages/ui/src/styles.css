@@ -4609,3 +4609,5 @@ select:focus-visible,
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* 被忽略的项目级 allow 规则提示（TODOS #47 第三轮复审 P3：接入 UI） */
+.perm-ignored { color: var(--amber); }

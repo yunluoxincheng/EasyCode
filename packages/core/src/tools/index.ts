@@ -6,10 +6,12 @@ import {
   describePermissionRule,
   evaluatePermission,
   normalizeShellCommand,
+  PATH_PATTERN_TOOLS,
   resolveApprovalRequirement,
   resolveWorkspaceRelative,
   type PermissionRule,
 } from '../permissions.js';
+import { resolveRealPathInWorkspace } from '../path-guard.js';
 import type { BackgroundTaskManager } from '../tasks.js';
 import { readFileTool, writeFileTool, editFileTool, listDirTool } from './fs.js';
 import { searchFilesTool } from './search.js';
@@ -247,12 +249,36 @@ export async function executeTool(
       durationMs: 0,
     };
   }
+  // 真实路径守卫（TODOS #47 第三轮复审 P1）：`paths.resolve()` 只做词法归一化，
+  // 不识别符号链接。工作区内 `public/key.txt -> ../private/key.txt` 这类别名会让
+  // 针对 `private/**` 的 deny 规则静默失效；指向工作区外部的 symlink 还会绕过
+  // 词法 containment。因此文件路径类工具在裁决前必须取得真实目标：
+  // 已存在目标消解全部链接，新建文件则校验其最近存在的父目录。
+  let permissionInput = validated.value;
+  if (PATH_PATTERN_TOOLS.has(name) && ctx.workspace) {
+    const args = validated.value as Record<string, unknown>;
+    const rawPath = typeof args.path === 'string' ? args.path.trim() : '.';
+    const real = await resolveRealPathInWorkspace(ctx.host, ctx.workspace, rawPath, ctx.host.paths);
+    if (!real.ok) {
+      // 无法安全解析时保守拒绝，绝不退化成「当作安全」
+      return {
+        content:
+          `${real.message}。请改用工作区内的普通路径重试；` +
+          '若确需访问该位置，请让用户把它纳入工作区或调整权限规则。',
+        approved: false,
+        isError: false,
+        durationMs: Date.now() - started,
+      };
+    }
+    // 用真实相对路径参与裁决：别名路径也会命中针对真实目标的规则
+    permissionInput = { ...args, path: real.value.realRelative };
+  }
   // 权限规则裁决（TODOS #47）：deny 直接拒绝、ask 强制审批、allow 免审批；
   // 无规则命中时保持既有「敏感工具在 ask 模式下审批」语义
   const permission = evaluatePermission(
     ctx.permissionRules,
     name,
-    validated.value,
+    permissionInput,
     ctx.workspace,
     ctx.host.paths,
   );

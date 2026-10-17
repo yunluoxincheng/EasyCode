@@ -136,5 +136,17 @@ export interface AgentClient {
   runTestLoop?(id: string, options?: RunTestLoopRequest): Promise<TestLoopResult>;
   /** 探测该会话将要执行的测试命令（供 UI 展示探测结果，TODOS #39） */
   detectSessionTestCommand?(id: string): Promise<TestCommandDetection | null>;
+  /**
+   * 查询某个工作区是否已被用户显式信任（可启用项目级 allow 规则）。
+   *
+   * 信任判定必须由引擎统一负责：路径规范化（分隔符 / Windows 大小写）只有一份实现，
+   * UI 若自行比对字符串，会出现「显示已信任但撤销无效」这类权限撤销失败
+   * （PR #9 第三轮复审 P1）。
+   */
+  isProjectTrusted?(workspaceRoot: string): Promise<boolean>;
+  /** 授予 / 撤销某个工作区的项目级 allow 信任（由引擎写回本地设置） */
+  setProjectTrust?(workspaceRoot: string, trusted: boolean): Promise<Settings>;
+  /** 该项目中被信任策略忽略的 allow 规则条数（供 UI 提示） */
+  countIgnoredProjectAllowRules?(workspaceRoot: string): Promise<number>;
   onEvent(listener: (payload: { sessionId: string; event: AgentEvent }) => void): () => void;
 }

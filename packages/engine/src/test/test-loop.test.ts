@@ -125,7 +125,7 @@ test('executeTool：无规则命中时保持既有审批语义（只读工具免
   const { events, emit } = collectEvents();
   const approval = new ApprovalManager(emit, 'yolo');
   const result = await executeTool(registry, 'read_file', { path: '.env' }, {
-    host: new MemoryHost(),
+    host: new MemoryHost({ '/ws/.env': 'A=1' }),
     workspace: '/ws',
     signal: new AbortController().signal,
     approval,
@@ -652,6 +652,161 @@ test('【P1 信任边界】不可信项目自带 allow 规则不得取消用户�
   await server.setProjectTrust('/ws', false);
   assert.equal(server.isProjectTrusted('/ws'), false);
   assert.equal(await server.countIgnoredProjectAllowRules('/ws'), 1);
+});
+
+test('【P1 复审】信任撤销必须真正生效（分隔符 / 大小写差异不得留下残留授权）', async () => {
+  const host = new ScriptedTestHost(
+    {
+      '/ws/package.json': JSON.stringify({ scripts: { test: 'vitest run' } }),
+      '/ws/pnpm-lock.yaml': '',
+      '/ws/.easycode/permissions.json': JSON.stringify({
+        rules: [{ tool: 'run_command', decision: 'allow' }],
+      }),
+    },
+    [],
+  );
+  const server = new AgentServer(host);
+  await server.updateSettings({
+    providers: {
+      mock: { kind: 'mock', baseURL: '', name: 'Mock', enabled: true, models: [{ name: 'mock-1', enabled: true }] },
+    },
+    defaultProvider: 'mock',
+    defaultApprovalMode: 'yolo',
+    permissions: { enabled: true, rules: [] },
+  });
+  await server.createSession({ workspaceRoot: '/ws', providerId: 'mock', title: '撤销信任' });
+
+  // 授予后生效
+  await server.setProjectTrust('/ws', true);
+  assert.equal(server.isProjectTrusted('/ws'), true);
+  assert.equal((await server.resolvePermissionRules('/ws'))?.some((r) => r.decision === 'allow'), true);
+
+  // 用等价但字符串不同的写法重复授予 → 不得产生重复条目
+  await server.setProjectTrust('/ws/', true);
+  const list = (await server.getSettings()).permissions?.trustedWorkspaces ?? [];
+  assert.equal(list.length, 1, `重复授权不得累积: ${JSON.stringify(list)}`);
+
+  // 用等价写法撤销 → 必须真正移除（UI 曾因严格字符串比较而撤销无效）
+  await server.setProjectTrust('/ws/', false);
+  assert.equal(server.isProjectTrusted('/ws'), false, '等价路径写法撤销后必须为未信任');
+  assert.equal((await server.getSettings()).permissions?.trustedWorkspaces?.length, 0);
+  // 撤销后仅剩下被忽略的 allow（无有效规则）→ 裁决规则为空
+  assert.equal(
+    (await server.resolvePermissionRules('/ws'))?.some((r) => r.decision === 'allow') ?? false,
+    false,
+  );
+  assert.equal(await server.countIgnoredProjectAllowRules('/ws'), 1);
+});
+
+test('【P2 复审】修复回合内部 done 不得提前结束 UI 回合', async () => {
+  const host = new ScriptedTestHost(
+    {
+      '/ws/package.json': JSON.stringify({ scripts: { test: 'vitest run' } }),
+      '/ws/pnpm-lock.yaml': '',
+    },
+    [
+      { code: 1, stdout: 'FAIL  src/a.test.ts\nTests  1 failed (1)' },
+      { code: 0, stdout: 'Tests  1 passed (1)' },
+    ],
+  );
+  const server = new AgentServer(host);
+  await server.updateSettings({
+    providers: {
+      mock: { kind: 'mock', baseURL: '', name: 'Mock', enabled: true, models: [{ name: 'mock-1', enabled: true }] },
+    },
+    defaultProvider: 'mock',
+    defaultApprovalMode: 'yolo',
+  });
+  const session = await server.createSession({
+    workspaceRoot: '/ws',
+    providerId: 'mock',
+    title: '内部 done',
+  });
+  const events: AgentEvent[] = [];
+  server.onEvent((payload) => {
+    if (payload.sessionId === session.id) events.push(payload.event);
+  });
+
+  const result = await server.runTestLoop(session.id, { maxRounds: 2 });
+  assert.equal(result.ok, true);
+
+  const doneCount = events.filter((e) => e.type === 'done').length;
+  const loopDone = events.filter((e) => e.type === 'test_loop_done');
+  assert.equal(doneCount, 0, '修复回合是内部回合，不得向外发 done（否则 UI 提前结束回合）');
+  assert.equal(loopDone.length, 1, '结束语义必须由 test_loop_done 唯一掌握');
+  // 过程事件仍然可见（助手输出、工具调用不能被一起吞掉）
+  assert.ok(events.some((e) => e.type === 'text_delta'), '修复过程仍需可见');
+});
+
+test('【P1 复审】工作区切换与测试循环启动不得交错（TOCTOU）', async () => {
+  const host = new ScriptedTestHost(
+    {
+      '/ws/package.json': JSON.stringify({ scripts: { test: 'vitest run' } }),
+      '/ws/pnpm-lock.yaml': '',
+      '/ws2/keep.txt': 'x',
+    },
+    [{ code: 0, stdout: 'Tests  1 passed (1)' }],
+  );
+  const bootHost = new AgentServer(host);
+  await bootHost.updateSettings({
+    providers: {
+      mock: { kind: 'mock', baseURL: '', name: 'Mock', enabled: true, models: [{ name: 'mock-1', enabled: true }] },
+    },
+    defaultProvider: 'mock',
+    defaultApprovalMode: 'yolo',
+  });
+  await bootHost.createSession({
+    workspaceRoot: '/ws',
+    providerId: 'mock',
+    title: 'TOCTOU',
+  });
+
+  // 让 setSessionWorkspace 的目标目录 stat 变慢，制造「检查后 await」窗口；
+  // 在窗口内启动测试循环，验证工作区切换不会穿过 busy 生效
+  let releaseStat: (() => void) | undefined;
+  const statGate = new Promise<void>((resolve) => {
+    releaseStat = resolve;
+  });
+  let gatedPath = false;
+  // fs 是只读属性：不改宿主实例，而是包一层再交给引擎（runs 等状态仍共享同一对象）
+  const gatedHost = {
+    ...host,
+    fs: {
+      ...host.fs,
+      stat: async (p: string) => {
+        // Windows 宿主会返回反斜杠路径，匹配前统一分隔符
+        const normalized = p.replace(/\\/g, '/');
+        if (!gatedPath && normalized.endsWith('/ws2')) {
+          gatedPath = true;
+          await statGate;
+        }
+        return host.fs.stat(p);
+      },
+    },
+  } as unknown as typeof host;
+  const server = new AgentServer(gatedHost);
+  const sessions = await server.listSessions();
+  const sessionId = sessions[0].id;
+
+  const switching = server.setSessionWorkspace(sessionId, '/ws2');
+  // 等切换调用确实停在 stat 里
+  const deadline = Date.now() + 5000;
+  while (!gatedPath) {
+    if (Date.now() > deadline) throw new Error('等待 workpsace stat 进入超时');
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  const loop = server.runTestLoop(sessionId, { maxRounds: 1 });
+  releaseStat?.();
+
+  // 二者互斥：要么切换先完成（循环被拒），要么循环先占位（切换被拒），绝不能都成功
+  const [switchOutcome, loopOutcome] = await Promise.allSettled([switching, loop]);
+  const bothOk = switchOutcome.status === 'fulfilled' && loopOutcome.status === 'fulfilled';
+  assert.equal(bothOk, false, '工作区切换与测试循环不得同时成功');
+  const data = await server.getSession(sessionId);
+  if (loopOutcome.status === 'fulfilled') {
+    // 循环成功 → 工作区必须仍是原值（不允许中途被改）
+    assert.equal(data.meta.workspaceRoot, '/ws', '循环进行中工作区不得被切走');
+  }
 });
 
 test('【P2 统一裁决】测试命令命中 allow 时 ask 模式下免审批直接执行', async () => {

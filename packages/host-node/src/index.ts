@@ -65,6 +65,20 @@ export class NodeHost implements Host {
     },
     unlink: (p: string) => fsp.unlink(p),
     rename: (from: string, to: string) => fsp.rename(from, to),
+    /**
+     * 真实路径解析（消解 symlink）：权限裁决与工作区包含性校验依赖它。
+     * 目标不存在返回 null；其它错误（权限不足、循环链接等）原样抛出，
+     * 由调用方保守拒绝——绝不把「解析失败」当成「无风险」。
+     */
+    realpath: async (p: string) => {
+      try {
+        return await fsp.realpath(p);
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException)?.code;
+        if (code === 'ENOENT' || code === 'ENOTDIR') return null;
+        throw err;
+      }
+    },
   };
   readonly process = {
     run: (command: string, opts: ProcessRunOptions) =>

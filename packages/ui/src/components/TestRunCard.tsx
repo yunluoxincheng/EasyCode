@@ -39,10 +39,10 @@ export function TestRunCard({ item }: { item: TestRunItem }) {
         </span>
         <span className="spacer" />
         {running ? (
-          <span className="testrun-status waiting">◍ 运行中…</span>
+          <span className="testrun-status waiting">[ WAIT ] 运行中…</span>
         ) : (
           <span className={`testrun-status ${ok ? 'ok' : 'err'}`}>
-            {ok ? '✓ 全部通过' : '✕ 存在失败'}
+            {ok ? '[ OK ] 全部通过' : '[ ERR ] 存在失败'}
             {counts.length > 0 ? ` · ${counts.join(' / ')}` : ''}
             {exitLabel}
             {duration}

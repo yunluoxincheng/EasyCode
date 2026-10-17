@@ -412,6 +412,18 @@ fn fs_unlink(path: String) -> Result<(), String> {
     }
 }
 
+/// 真实路径解析（消解符号链接）：权限裁决与工作区包含性校验依赖它。
+/// 目标不存在返回 None；其它错误（权限不足、循环链接等）原样返回，
+/// 由调用方保守拒绝——绝不把「解析失败」当成「无风险」。
+#[tauri::command]
+fn fs_realpath(path: String) -> Result<Option<String>, String> {
+    match std::fs::canonicalize(&path) {
+        Ok(p) => Ok(Some(p.to_string_lossy().into_owned())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 struct ShellInfo {
@@ -1327,6 +1339,7 @@ fn main() {
             fs_stat,
             fs_unlink,
             fs_rename,
+            fs_realpath,
             proc_run,
             proc_kill,
             proc_spawn,

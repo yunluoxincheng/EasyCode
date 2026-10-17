@@ -208,6 +208,15 @@ export class IpcAgentClient implements AgentClient {
   detectSessionTestCommand(id: string) {
     return this.invoke<TestCommandDetection | null>('detect-session-test-command', { id });
   }
+  isProjectTrusted(workspaceRoot: string) {
+    return this.invoke<boolean>('is-project-trusted', { workspaceRoot });
+  }
+  setProjectTrust(workspaceRoot: string, trusted: boolean) {
+    return this.invoke<Settings>('set-project-trust', { workspaceRoot, trusted });
+  }
+  countIgnoredProjectAllowRules(workspaceRoot: string) {
+    return this.invoke<number>('count-ignored-project-allow', { workspaceRoot });
+  }
   onEvent(listener: (payload: { sessionId: string; event: AgentEvent }) => void) {
     this.bridge.onEvent(listener);
     return () => this.bridge.offEvent(listener);
@@ -357,6 +366,10 @@ export function createDemoClient(): AgentClient {
     reviewDecision: (sid, rid, label) => wrap(() => server.reviewDecision(sid, rid, label)),
     runTestLoop: (id, options) => wrap(() => server.runTestLoop(id, options)),
     detectSessionTestCommand: (id) => wrap(() => server.detectSessionTestCommand(id)),
+    isProjectTrusted: (root) => wrap(async () => server.isProjectTrusted(root)),
+    setProjectTrust: (root, trusted) => wrap(() => server.setProjectTrust(root, trusted)),
+    countIgnoredProjectAllowRules: (root) =>
+      wrap(() => server.countIgnoredProjectAllowRules(root)),
     onEvent: (listener) => server.onEvent(listener),
   };
 }

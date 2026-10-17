@@ -10,6 +10,8 @@ export * from './tasks.js';
 export * from './approval.js';
 // 权限规则引擎（TODOS #47）
 export * from './permissions.js';
+// 真实路径守卫：符号链接消解与工作区边界校验（TODOS #47 第三轮复审）
+export * from './path-guard.js';
 // 测试运行探知与失败解析（TODOS #39）
 export * from './test-runner.js';
 // 工具

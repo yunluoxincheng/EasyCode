@@ -35,7 +35,7 @@ export interface PermissionEvaluation {
 const DECISION_RANK: Record<PermissionDecision, number> = { allow: 0, ask: 1, deny: 2 };
 
 /** 支持路径 glob 匹配的工具体系 */
-const PATH_PATTERN_TOOLS = new Set([
+export const PATH_PATTERN_TOOLS = new Set([
   'read_file',
   'write_file',
   'edit_file',
@@ -155,6 +155,10 @@ export function normalizeRelativePath(value: string): string {
 export interface PathApi {
   resolve(...parts: string[]): string;
   isAbsolute(p: string): boolean;
+  /** 取父目录（真实路径解析回溯最近存在祖先时需要） */
+  dirname(p: string): string;
+  /** 取末段文件名 */
+  basename(p: string): string;
   sep: string;
 }
 
@@ -185,6 +189,19 @@ export const defaultPathApi: PathApi = {
     return joined || '.';
   },
   isAbsolute: (p: string): boolean => p.startsWith('/') || /^[A-Za-z]:[\\/]/.test(p),
+  dirname: (p: string): string => {
+    const norm = p.replace(/\\/g, '/').replace(/\/+$/, '');
+    const idx = norm.lastIndexOf('/');
+    if (idx < 0) return '.';
+    if (idx === 0) return '/';
+    const head = norm.slice(0, idx);
+    return /^[A-Za-z]:$/.test(head) ? `${head}/` : head;
+  },
+  basename: (p: string): string => {
+    const norm = p.replace(/\\/g, '/').replace(/\/+$/, '');
+    const idx = norm.lastIndexOf('/');
+    return idx < 0 ? norm : norm.slice(idx + 1);
+  },
   sep: '/',
 };
 
