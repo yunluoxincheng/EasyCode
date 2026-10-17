@@ -90,6 +90,7 @@ export async function createTauriHost(): Promise<Host> {
       readdir: (p) => invoke<FsDirent[]>('fs_readdir', { path: p }),
       stat: (p) => invoke<FsDirent extends never ? never : { isDirectory: boolean; size: number; mtimeMs: number } | null>('fs_stat', { path: p }),
       unlink: (p) => invoke<void>('fs_unlink', { path: p }),
+      rename: (from, to) => invoke<void>('fs_rename', { from, to }),
     },
     process: {
       run: async (command, opts) => {

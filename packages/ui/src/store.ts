@@ -710,6 +710,15 @@ export class AppStore {
     this.notify(false);
   }
 
+  /** 消费并清理 Composer 插入指令（防止进入设置页再返回聊天页重新挂载时重复执行旧插入请求） */
+  consumeComposerInsert(tick?: number): string {
+    if (tick !== undefined && tick !== this.composerInsertTick) return '';
+    const snippet = this.composerInsertText;
+    if (!snippet) return '';
+    this.composerInsertText = '';
+    return snippet;
+  }
+
   private _noopAfterCloseGitModal(): void {
     this.gitModalOpen = false;
     this.notify();

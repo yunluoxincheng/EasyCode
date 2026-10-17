@@ -160,7 +160,8 @@ export function Composer() {
   const insertRef = useRef(insertPaths);
   useEffect(() => {
     if (!store.composerInsertTick || !store.composerInsertText) return;
-    const snippet = store.composerInsertText;
+    const snippet = store.consumeComposerInsert(store.composerInsertTick);
+    if (!snippet) return;
     const ta = taRef.current;
     if (!ta) {
       setText((prev) => (prev && !/\s$/.test(prev) ? `${prev} ${snippet}` : `${prev}${snippet}`));

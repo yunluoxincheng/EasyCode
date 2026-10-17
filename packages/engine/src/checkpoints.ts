@@ -217,20 +217,115 @@ export class CheckpointManager {
     return this.host.paths.sep === '\\' ? clean.toLowerCase() : clean;
   }
 
+  private parseCheckpointJson(raw: string, label: string): TurnCheckpointRecord[] {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (err) {
+      throw new Error(
+        `会话快照文件已损坏，JSON 解析失败 (${label}): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    if (!Array.isArray(parsed)) {
+      throw new Error(`会话快照文件已损坏，根节点不是数组 (${label})`);
+    }
+    return parsed as TurnCheckpointRecord[];
+  }
+
+  private async tryRecoverFromTmpFile(
+    sessionId: string,
+    tmpFile: string,
+    targetFile: string,
+  ): Promise<TurnCheckpointRecord[] | null> {
+    let tmpStat: { isDirectory: boolean; size: number; mtimeMs: number } | null;
+    try {
+      tmpStat = await this.host.fs.stat(tmpFile);
+    } catch (err) {
+      throw new Error(
+        `读取会话快照临时文件状态失败 (${sessionId}): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    if (!tmpStat || tmpStat.isDirectory) return null;
+    let tmpRaw: string;
+    try {
+      tmpRaw = await this.host.fs.readFile(tmpFile);
+    } catch (err) {
+      throw new Error(
+        `读取会话快照临时文件失败 (${sessionId}): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    const list = this.parseCheckpointJson(tmpRaw, `${sessionId}.tmp`);
+    try {
+      if (this.host.fs.rename) {
+        await this.host.fs.rename(tmpFile, targetFile);
+      } else {
+        await this.host.fs.writeFile(targetFile, tmpRaw);
+        await this.host.fs.unlink?.(tmpFile);
+      }
+    } catch {
+      // 恢复晋升写回失败不阻断内存恢复结果
+    }
+    return list;
+  }
+
+  /**
+   * 加载会话快照记录（P1 修复）：
+   * 严格区分「文件不存在」「读取失败」「JSON 已损坏」：
+   * - 仅当正式文件与 .tmp 临时文件均明确不存在（stat === null）时，才初始化为空数组；
+   * - 若正式文件缺失或损坏但同目录存在完好的 .tmp 文件，自动从 .tmp 恢复并原子晋升；
+   * - 若发生读取权限/I/O 错误或 JSON 损坏，直接向上抛错且绝不缓存空数组，防止覆盖或静默清空历史快照。
+   */
   private async loadSessionRecords(sessionId: string): Promise<TurnCheckpointRecord[]> {
     const cached = this.cache.get(sessionId);
     if (cached) return cached;
+
+    const targetFile = this.sessionCheckpointFile(sessionId);
+    const tmpFile = `${targetFile}.tmp`;
+
+    let targetStat: { isDirectory: boolean; size: number; mtimeMs: number } | null;
     try {
-      const raw = await this.host.fs.readFile(this.sessionCheckpointFile(sessionId));
-      const parsed = JSON.parse(raw);
-      const list = Array.isArray(parsed) ? (parsed as TurnCheckpointRecord[]) : [];
-      this.cache.set(sessionId, list);
-      return list;
-    } catch {
-      const empty: TurnCheckpointRecord[] = [];
-      this.cache.set(sessionId, empty);
-      return empty;
+      targetStat = await this.host.fs.stat(targetFile);
+    } catch (err) {
+      throw new Error(
+        `读取会话快照文件状态失败 (${sessionId}): ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
+
+    if (targetStat) {
+      if (targetStat.isDirectory) {
+        throw new Error(`会话快照路径异常：目标为目录 (${sessionId})`);
+      }
+      let raw: string;
+      try {
+        raw = await this.host.fs.readFile(targetFile);
+      } catch (err) {
+        throw new Error(
+          `读取会话快照文件失败 (${sessionId}): ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+      try {
+        const list = this.parseCheckpointJson(raw, sessionId);
+        this.cache.set(sessionId, list);
+        return list;
+      } catch (parseErr) {
+        const recovered = await this.tryRecoverFromTmpFile(sessionId, tmpFile, targetFile);
+        if (recovered) {
+          this.cache.set(sessionId, recovered);
+          return recovered;
+        }
+        throw parseErr;
+      }
+    }
+
+    const recovered = await this.tryRecoverFromTmpFile(sessionId, tmpFile, targetFile);
+    if (recovered) {
+      this.cache.set(sessionId, recovered);
+      return recovered;
+    }
+
+    const empty: TurnCheckpointRecord[] = [];
+    this.cache.set(sessionId, empty);
+    return empty;
   }
 
   private async persistSessionRecords(sessionId: string): Promise<void> {
@@ -243,13 +338,17 @@ export class CheckpointManager {
         await this.host.fs.mkdir(this.checkpointsDir(), { recursive: true });
         const targetFile = this.sessionCheckpointFile(sessionId);
         const tmpFile = `${targetFile}.tmp`;
-        // 先写临时文件再写正式文件并清理 tmp，降低中途异常破坏已有记录的风险
+        // P1 修复：先完整写入同目录临时文件 .tmp，再通过宿主 rename 执行原子文件替换提交
         await this.host.fs.writeFile(tmpFile, payload);
-        await this.host.fs.writeFile(targetFile, payload);
-        try {
-          await this.host.fs.unlink?.(tmpFile);
-        } catch {
-          // 忽略临时文件清理异常
+        if (this.host.fs.rename) {
+          await this.host.fs.rename(tmpFile, targetFile);
+        } else {
+          await this.host.fs.writeFile(targetFile, payload);
+          try {
+            await this.host.fs.unlink?.(tmpFile);
+          } catch {
+            // 忽略临时文件清理异常
+          }
         }
       });
     this.writeQueues.set(sessionId, next);
@@ -400,10 +499,14 @@ export class CheckpointManager {
     currentTurnSeq: number | undefined,
     fallbackCount: number,
   ): Promise<number> {
-    const records = await this.loadSessionRecords(sessionId);
     let maxInRecords = 0;
-    for (const r of records) {
-      if (r.turnNumber > maxInRecords) maxInRecords = r.turnNumber;
+    try {
+      const records = await this.loadSessionRecords(sessionId);
+      for (const r of records) {
+        if (r.turnNumber > maxInRecords) maxInRecords = r.turnNumber;
+      }
+    } catch {
+      // 快照文件损坏或不可读时不静默清空缓存，仅用 meta.turnSeq 推进序号；实际写文件时由 recordFileChange 严格阻断
     }
     const base = Math.max(currentTurnSeq ?? 0, maxInRecords);
     return Math.max(base + 1, fallbackCount);
@@ -423,10 +526,14 @@ export class CheckpointManager {
         const beforeLen = change.beforeContent?.length ?? 0;
         const afterLen = change.afterContent.length;
         if (beforeLen > MAX_SNAPSHOT_FILE_BYTES || afterLen > MAX_SNAPSHOT_FILE_BYTES) {
-          return;
+          throw new Error(
+            `文件体积超过回合快照上限 (${Math.round(MAX_SNAPSHOT_FILE_BYTES / 1024 / 1024)}MB)，拒绝执行未受快照保护的文件修改`,
+          );
         }
 
         const records = await this.loadSessionRecords(ctx.sessionId);
+        const prevRecordsSnapshot: TurnCheckpointRecord[] = JSON.parse(JSON.stringify(records));
+        const hadRecordBefore = record !== null;
         const relPath = this.normalizeRelPath(ctx.workspaceRoot, change.relPath, change.absPath);
         const key = this.pathKey(relPath);
 
@@ -495,7 +602,16 @@ export class CheckpointManager {
           this.enforceStorageQuota(records, record);
         }
 
-        await this.persistSessionRecords(ctx.sessionId);
+        try {
+          await this.persistSessionRecords(ctx.sessionId);
+        } catch (persistErr) {
+          // 落盘失败时回滚内存缓存与当前回合追踪器状态，杜绝内存态与磁盘态分裂
+          this.cache.set(ctx.sessionId, prevRecordsSnapshot);
+          record = hadRecordBefore
+            ? (prevRecordsSnapshot.find((r) => r.turnId === turnId) ?? null)
+            : null;
+          throw persistErr;
+        }
       },
     };
   }

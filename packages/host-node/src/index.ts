@@ -64,6 +64,7 @@ export class NodeHost implements Host {
       }
     },
     unlink: (p: string) => fsp.unlink(p),
+    rename: (from: string, to: string) => fsp.rename(from, to),
   };
   readonly process = {
     run: (command: string, opts: ProcessRunOptions) =>

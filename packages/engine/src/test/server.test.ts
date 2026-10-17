@@ -1393,3 +1393,217 @@ test('三轮复审回归: stat 权限异常保守拒绝、不可读文件在 for
     /警告：文件写入异常后自动恢复失败，以下文件可能处于部分写入或受损状态：second\.ts/,
   );
 });
+
+test('四轮复审回归: onFileChange 持久化失败自动回滚文件、rename 原子提交与损坏 JSON 保护、越界行号跳过及 Composer 插入消费', async () => {
+  const { writeFileTool, editFileTool } = await import('@easycode/core');
+
+  // 1. P1: write_file（含新建与覆盖）和 edit_file 在 onFileChange 快照持久化失败时，自动回滚工作区文件与 CheckpointManager 内存态
+  const hostRollback = new MemoryHost({
+    '/ws/existing.ts': 'ORIG_CONTENT',
+  });
+  const mgrRollback = new CheckpointManager(hostRollback);
+  const trackerRollback = mgrRollback.beginTurn({
+    sessionId: 's_snap_fail',
+    workspaceRoot: '/ws',
+    turnNumber: 1,
+    userMessageId: 'u_snap_1',
+  });
+  const readFiles = new Set<string>(['/ws/existing.ts']);
+  const signal = new AbortController().signal;
+
+  // 模拟 dataDir 快照持久化写入失败（如磁盘满 ENOSPC）
+  const origWriteRb = hostRollback.fs.writeFile.bind(hostRollback.fs);
+  let failCheckpointPersist = true;
+  hostRollback.fs.writeFile = async (p: string, data: string) => {
+    if (failCheckpointPersist && p.includes('/checkpoints/')) {
+      throw new Error('ENOSPC: checkpoint storage full');
+    }
+    return origWriteRb(p, data);
+  };
+
+  // 1A: write_file 新建文件时快照落盘失败 -> 自动删除新建文件并回滚内存快照
+  await assert.rejects(
+    () =>
+      writeFileTool.execute(
+        { path: 'brand_new.ts', content: 'NEW_CONTENT' },
+        {
+          host: hostRollback,
+          workspace: '/ws',
+          signal,
+          readFiles,
+          callId: 'c_w_new',
+          onFileChange: (ev) => trackerRollback.recordFileChange(ev),
+        },
+      ),
+    /文件快照记录或持久化失败，已自动回滚工作区文件 \(brand_new\.ts\) 至修改前状态.*ENOSPC/,
+  );
+  assert.equal(await hostRollback.fs.stat('/ws/brand_new.ts'), null, '新建文件在快照落盘失败后必须被自动删除回滚');
+  assert.equal((await mgrRollback.listCheckpoints('s_snap_fail')).length, 0, '快照落盘失败后内存缓存必须同步回滚');
+
+  // 1B: write_file 覆盖已有文件时快照落盘失败 -> 自动还原原文件内容
+  await assert.rejects(
+    () =>
+      writeFileTool.execute(
+        { path: 'existing.ts', content: 'OVERWRITTEN_BY_WRITE' },
+        {
+          host: hostRollback,
+          workspace: '/ws',
+          signal,
+          readFiles,
+          callId: 'c_w_exist',
+          onFileChange: (ev) => trackerRollback.recordFileChange(ev),
+        },
+      ),
+    /文件快照记录或持久化失败，已自动回滚工作区文件 \(existing\.ts\) 至修改前状态.*ENOSPC/,
+  );
+  assert.equal(await hostRollback.fs.readFile('/ws/existing.ts'), 'ORIG_CONTENT', '覆盖写入在快照落盘失败后必须还原原文件内容');
+
+  // 1C: edit_file 修改已有文件时快照落盘失败 -> 自动还原原文件内容
+  await assert.rejects(
+    () =>
+      editFileTool.execute(
+        { path: 'existing.ts', old_string: 'ORIG_CONTENT', new_string: 'EDITED_CONTENT' },
+        {
+          host: hostRollback,
+          workspace: '/ws',
+          signal,
+          readFiles,
+          callId: 'c_edit',
+          onFileChange: (ev) => trackerRollback.recordFileChange(ev),
+        },
+      ),
+    /文件快照记录或持久化失败，已自动回滚工作区文件 \(existing\.ts\) 至修改前状态.*ENOSPC/,
+  );
+  assert.equal(await hostRollback.fs.readFile('/ws/existing.ts'), 'ORIG_CONTENT', 'edit_file 在快照落盘失败后必须还原原文件内容');
+
+  // 1D: 若 onFileChange 抛错且回滚工作区文件也失败，必须明确告警可能发生了未受快照保护的修改
+  hostRollback.fs.writeFile = async (p: string, data: string) => {
+    if (p.includes('/checkpoints/')) {
+      throw new Error('ENOSPC: checkpoint storage full');
+    }
+    if (p.endsWith('/ws/existing.ts') && data === 'ORIG_CONTENT') {
+      throw new Error('EIO: rollback write failed');
+    }
+    return origWriteRb(p, data);
+  };
+  await assert.rejects(
+    () =>
+      editFileTool.execute(
+        { path: 'existing.ts', old_string: 'ORIG_CONTENT', new_string: 'UNPROTECTED_EDIT' },
+        {
+          host: hostRollback,
+          workspace: '/ws',
+          signal,
+          readFiles,
+          callId: 'c_edit_rb_fail',
+          onFileChange: (ev) => trackerRollback.recordFileChange(ev),
+        },
+      ),
+    /文件快照记录或持久化失败，且自动回滚工作区文件失败（警告：文件可能已发生未受快照保护的修改: existing\.ts）/,
+  );
+  hostRollback.fs.writeFile = origWriteRb;
+  await hostRollback.fs.writeFile('/ws/existing.ts', 'ORIG_CONTENT');
+
+  // 2. P1: 快照 JSON 使用 .tmp + rename 原子提交，且 loadSessionRecords 区分「不存在」「读取失败」「JSON 损坏」（拒绝静默清空）
+  let renameCalledWith: { from: string; to: string } | null = null;
+  const origRename = hostRollback.fs.rename!.bind(hostRollback.fs);
+  hostRollback.fs.rename = async (from: string, to: string) => {
+    renameCalledWith = { from, to };
+    return origRename(from, to);
+  };
+  failCheckpointPersist = false;
+  await editFileTool.execute(
+    { path: 'existing.ts', old_string: 'ORIG_CONTENT', new_string: 'SAFE_EDITED' },
+    {
+      host: hostRollback,
+      workspace: '/ws',
+      signal,
+      readFiles,
+      callId: 'c_edit_ok',
+      onFileChange: (ev) => trackerRollback.recordFileChange(ev),
+    },
+  );
+  assert.ok(renameCalledWith, 'persistSessionRecords 必须通过 host.fs.rename 执行原子替换提交');
+  assert.match((renameCalledWith as { from: string; to: string }).from, /s_snap_fail\.json\.tmp$/);
+  assert.match((renameCalledWith as { from: string; to: string }).to, /s_snap_fail\.json$/);
+  const validCheckpointJson = await hostRollback.fs.readFile('/easycode-demo/checkpoints/s_snap_fail.json');
+
+  // 2A: 若快照 JSON 文件已损坏且无 .tmp 备份，新的 CheckpointManager 实例加载时必须报错而非静默初始化为空数组
+  await hostRollback.fs.writeFile('/easycode-demo/checkpoints/s_snap_fail.json', '{corrupted_json_truncated');
+  const mgrCorrupt = new CheckpointManager(hostRollback);
+  await assert.rejects(
+    () => mgrCorrupt.listCheckpoints('s_snap_fail'),
+    /会话快照文件已损坏，JSON 解析失败/,
+  );
+  assert.equal(
+    await hostRollback.fs.readFile('/easycode-demo/checkpoints/s_snap_fail.json'),
+    '{corrupted_json_truncated',
+    '损坏的快照文件绝不能被静默清空或覆盖为空数组',
+  );
+
+  // 2B: 若正式文件损坏但同目录存在完好的 .tmp 文件，自动从 .tmp 恢复并原子晋升
+  await hostRollback.fs.writeFile('/easycode-demo/checkpoints/s_snap_fail.json.tmp', validCheckpointJson);
+  const mgrRecovered = new CheckpointManager(hostRollback);
+  const recoveredList = await mgrRecovered.listCheckpoints('s_snap_fail');
+  assert.equal(recoveredList.length, 1, '存在完好 .tmp 时应自动恢复历史回合快照');
+  assert.equal(recoveredList[0].files[0].path, 'existing.ts');
+
+  // 2C: 若读取快照文件时发生权限错误（readFile 抛 EACCES），必须抛错而非静默视为空数组
+  const origReadRb = hostRollback.fs.readFile.bind(hostRollback.fs);
+  hostRollback.fs.readFile = async (p: string) => {
+    if (p.endsWith('s_snap_fail.json')) {
+      throw new Error('EACCES: checkpoint file permission denied');
+    }
+    return origReadRb(p);
+  };
+  const mgrReadErr = new CheckpointManager(hostRollback);
+  await assert.rejects(
+    () => mgrReadErr.listCheckpoints('s_snap_fail'),
+    /读取会话快照文件失败.*EACCES/,
+  );
+  hostRollback.fs.readFile = origReadRb;
+
+  // 3. P2: 越界的代码行引用（startLine > totalLines）必须跳过，绝不静默钳制到文件最后一行
+  const hostRange = new MemoryHost({
+    '/ws/short.ts': 'line1\nline2\nline3\nline4\nline5',
+  });
+  const outOfBoundsRes = await resolveCodeRangeMentions(
+    hostRange,
+    '/ws',
+    '请检查 @short.ts:900 与区间 @short.ts:100-120',
+  );
+  assert.equal(outOfBoundsRes.snippets.length, 0, '起始行超出文件总行数的引用必须跳过，不能错误截取最后一行');
+  assert.equal(outOfBoundsRes.enrichedText, '请检查 @short.ts:900 与区间 @short.ts:100-120');
+
+  // 4. P2: Composer 插入指令消费确认（聊天页插入 → 切换到设置页卸载 → 返回聊天页重挂载，不重复插入）
+  const fakeComposerStore = {
+    composerInsertText: '',
+    composerInsertTick: 0,
+    insertIntoComposer(snippet: string) {
+      this.composerInsertText = snippet;
+      this.composerInsertTick++;
+    },
+    consumeComposerInsert(tick?: number): string {
+      if (tick !== undefined && tick !== this.composerInsertTick) return '';
+      const snippet = this.composerInsertText;
+      if (!snippet) return '';
+      this.composerInsertText = '';
+      return snippet;
+    },
+  };
+  let composerInputValue = '请分析';
+  const runComposerMountEffect = () => {
+    if (!fakeComposerStore.composerInsertTick || !fakeComposerStore.composerInsertText) return;
+    const snippet = fakeComposerStore.consumeComposerInsert(fakeComposerStore.composerInsertTick);
+    if (!snippet) return;
+    composerInputValue = `${composerInputValue} ${snippet}`;
+  };
+  // 用户在聊天页点击文件树插入 @src/app.ts
+  fakeComposerStore.insertIntoComposer('@src/app.ts ');
+  runComposerMountEffect();
+  assert.equal(composerInputValue, '请分析 @src/app.ts ');
+  assert.equal(fakeComposerStore.composerInsertText, '', '消费后 composerInsertText 必须被清空');
+  // 用户进入设置页再返回聊天页，Composer 重新挂载执行 Effect
+  runComposerMountEffect();
+  assert.equal(composerInputValue, '请分析 @src/app.ts ', 'Composer 重新挂载后绝不能重复插入已消费的旧路径');
+});

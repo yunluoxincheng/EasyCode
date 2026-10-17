@@ -58,6 +58,7 @@ export interface Host {
     readdir(path: string): Promise<FsDirent[]>;
     stat(path: string): Promise<null | { isDirectory: boolean; size: number; mtimeMs: number }>;
     unlink?(path: string): Promise<void>;
+    rename?(from: string, to: string): Promise<void>;
   };
   process: {
     run(
@@ -175,6 +176,14 @@ export class MemoryHost implements Host {
     },
     unlink: async (p: string) => {
       this.files.delete(this.norm(p));
+    },
+    rename: async (from: string, to: string) => {
+      const fromKey = this.norm(from);
+      const toKey = this.norm(to);
+      const data = this.files.get(fromKey);
+      if (data === undefined) throw new Error(`文件不存在: ${from}`);
+      this.files.set(toKey, data);
+      if (fromKey !== toKey) this.files.delete(fromKey);
     },
   };
 

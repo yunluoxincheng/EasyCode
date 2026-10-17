@@ -400,6 +400,11 @@ fn fs_stat(path: String) -> Result<Option<StatOut>, String> {
 }
 
 #[tauri::command]
+fn fs_rename(from: String, to: String) -> Result<(), String> {
+    std::fs::rename(&from, &to).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn fs_unlink(path: String) -> Result<(), String> {
     match std::fs::remove_file(&path) {
         Ok(()) => Ok(()),
@@ -1321,6 +1326,7 @@ fn main() {
             fs_readdir,
             fs_stat,
             fs_unlink,
+            fs_rename,
             proc_run,
             proc_kill,
             proc_spawn,

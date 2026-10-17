@@ -114,9 +114,9 @@ export async function resolveCodeRangeMentions(
       const normalized = rawContent.replace(/\r\n/g, '\n');
       const lines = normalized.split('\n');
       const totalLines = lines.length;
-      if (totalLines === 0) continue;
+      if (totalLines === 0 || m.startLine > totalLines) continue;
 
-      const startLine = Math.max(1, Math.min(m.startLine, totalLines));
+      const startLine = Math.max(1, m.startLine);
       const endLine = Math.max(
         startLine,
         Math.min(m.endLine, totalLines, startLine + MAX_RANGE_LINES - 1),
@@ -212,6 +212,46 @@ export const readFileTool: Tool = {
   },
 };
 
+async function rollbackWorkspaceFileOnSnapshotFailure(
+  host: Host,
+  abs: string,
+  rel: string,
+  existedBefore: boolean,
+  beforeContent: string | null,
+  snapErr: unknown,
+): Promise<never> {
+  const snapMsg = snapErr instanceof Error ? snapErr.message : String(snapErr);
+  try {
+    if (!existedBefore) {
+      if (!host.fs.unlink) {
+        throw new Error('当前宿主不支持 unlink 删除文件');
+      }
+      await host.fs.unlink(abs);
+      const st = await host.fs.stat(abs);
+      if (st !== null) {
+        throw new Error('回滚删除后目标文件仍存在');
+      }
+    } else {
+      if (beforeContent === null) {
+        throw new Error('缺少写前原始内容基准');
+      }
+      await host.fs.writeFile(abs, beforeContent);
+      const verify = await host.fs.readFile(abs);
+      if (verify !== beforeContent) {
+        throw new Error('回滚写回后文件内容校验不一致');
+      }
+    }
+  } catch (rbErr) {
+    const rbMsg = rbErr instanceof Error ? rbErr.message : String(rbErr);
+    throw new Error(
+      `文件快照记录或持久化失败，且自动回滚工作区文件失败（警告：文件可能已发生未受快照保护的修改: ${rel}）: ${snapMsg}（回滚失败原因: ${rbMsg}）`,
+    );
+  }
+  throw new Error(
+    `文件快照记录或持久化失败，已自动回滚工作区文件 (${rel}) 至修改前状态: ${snapMsg}`,
+  );
+}
+
 export const writeFileTool: Tool = {
   spec: {
     name: 'write_file',
@@ -231,16 +271,15 @@ export const writeFileTool: Tool = {
     const { path: rel, content } = input as { path: string; content: string };
     const abs = resolveWorkspacePath(workspace, rel, host);
     const stat = await host.fs.stat(abs);
+    if (stat?.isDirectory) {
+      throw new Error(`目标是目录，无法作为文件写入: ${rel}`);
+    }
     if (stat && readFiles && !readFiles.has(abs)) {
       throw new Error(`覆盖已有文件前请先 read_file: ${rel}（防盲改保护）`);
     }
     const existedBefore = Boolean(stat && !stat.isDirectory);
-    const canSnapshot =
-      Boolean(onFileChange) &&
-      (!existedBefore || (stat?.size ?? 0) <= MAX_RANGE_FILE_BYTES) &&
-      content.length <= MAX_RANGE_FILE_BYTES;
     let beforeContent: string | null = null;
-    if (existedBefore && canSnapshot) {
+    if (existedBefore && onFileChange) {
       try {
         beforeContent = await host.fs.readFile(abs);
       } catch (err) {
@@ -252,15 +291,26 @@ export const writeFileTool: Tool = {
     const dir = host.paths.dirname(abs);
     if (dir && dir !== abs) await host.fs.mkdir(dir, { recursive: true });
     await host.fs.writeFile(abs, content);
-    if (canSnapshot && onFileChange) {
-      await onFileChange({
-        callId,
-        relPath: rel,
-        absPath: abs,
-        existedBefore,
-        beforeContent,
-        afterContent: content,
-      });
+    if (onFileChange) {
+      try {
+        await onFileChange({
+          callId,
+          relPath: rel,
+          absPath: abs,
+          existedBefore,
+          beforeContent,
+          afterContent: content,
+        });
+      } catch (snapErr) {
+        await rollbackWorkspaceFileOnSnapshotFailure(
+          host,
+          abs,
+          rel,
+          existedBefore,
+          beforeContent,
+          snapErr,
+        );
+      }
     }
     readFiles?.add(abs);
     return `已写入 ${rel}（${content.split('\n').length} 行, ${content.length} 字符）`;
@@ -306,14 +356,25 @@ export const editFileTool: Tool = {
     const next = replace_all ? content.split(oldStr).join(newStr) : content.replace(oldStr, newStr);
     await host.fs.writeFile(abs, next);
     if (onFileChange) {
-      await onFileChange({
-        callId,
-        relPath: rel,
-        absPath: abs,
-        existedBefore: true,
-        beforeContent: content,
-        afterContent: next,
-      });
+      try {
+        await onFileChange({
+          callId,
+          relPath: rel,
+          absPath: abs,
+          existedBefore: true,
+          beforeContent: content,
+          afterContent: next,
+        });
+      } catch (snapErr) {
+        await rollbackWorkspaceFileOnSnapshotFailure(
+          host,
+          abs,
+          rel,
+          true,
+          content,
+          snapErr,
+        );
+      }
     }
     readFiles?.add(abs);
     return `已修改 ${rel}（替换 ${replace_all ? count : 1} 处）`;
