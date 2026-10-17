@@ -136,6 +136,15 @@ interface SessionRuntime {
    * 因此修复回合期间置位本标记，由外层 `test_loop_done` 掌握最终结束语义。
    */
   suppressDone?: boolean;
+  /**
+   * 已从会话表删除（PR #9 第七轮复审 P2）。
+   *
+   * 删除发生在测试循环启动早期时，循环仍持有原 rt 对象，退出时还会调用
+   * `persistSession(rt)` —— 若不拦，已删除的会话文件会被重新写回磁盘（会话「复活」）。
+   */
+  deleted?: boolean;
+  /** 在途落盘任务：删除会话时必须等它落定，否则 unlink 会被随后完成的写入覆盖 */
+  persisting?: Promise<void>;
 }
 
 export interface SessionEventPayload {
@@ -404,8 +413,25 @@ export class AgentServer {
   }
 
   async deleteSession(id: string): Promise<void> {
+    const rt = this.sessions.get(id);
+    if (rt) {
+      // 删除标记必须先于 abort 落下：会话删除后，任何仍在运行的异步流程
+      // （测试循环、修复回合）都不得把它重新持久化回来（PR #9 第七轮复审 P2）。
+      // persistSession 见到该标记直接放弃写入。
+      rt.deleted = true;
+    }
+    // abort 会中止 controller；测试循环启动早期就已挂上 controller，
+    // 因此「探测命令 / 审批」阶段被删除同样能收到中止信号。
     this.abort(id);
     this.sessions.delete(id);
+    if (rt?.persisting) {
+      // 等已经在途的落盘完成，否则紧接着的 unlink 会被这次写入覆盖（文件重新出现）
+      try {
+        await rt.persisting;
+      } catch {
+        // 写入本身失败时无需补偿：文件不会存在，后续 unlink 幂等
+      }
+    }
     // 会话删除同步终止其后台任务，杜绝僵尸进程与孤儿端口（TODOS #37）。
     // 仍有清理失败（存活）任务时保留 manager —— 引用已从会话表摘除，
     // 供应用退出 stopAllBackgroundTasks 兜底再清一次
@@ -512,7 +538,10 @@ export class AgentServer {
     rt.running = true;
     // 测试自愈循环（TODOS #39）在修复回合中复用循环持有的 controller：
     // 否则用户点停止只会打断修复回合，循环的 signal 依然存活，下一轮测试会继续跑起来。
-    rt.controller = (rt.busy && rt.controller) || new AbortController();
+    // 复用时本方法**不拥有**该 controller，收尾阶段不得解除注册（见 finally）。
+    const inheritedController = rt.busy && rt.controller ? rt.controller : undefined;
+    const turnController = inheritedController ?? new AbortController();
+    rt.controller = turnController;
     let loopResult: LoopResult | undefined;
     let shadowPolicy: ShadowDecisionPolicy | undefined;
     const cleanUserMap = new Map<
@@ -712,13 +741,19 @@ export class AgentServer {
         }
       }
       rt.running = false;
-      rt.controller = undefined;
       rt.data.meta.updatedAt = new Date().toISOString();
       const latestTodos = extractLatestTodos(rt.data.messages);
       if (latestTodos) {
         rt.data.todos = latestTodos;
       }
       await this.persistSession(rt);
+      // controller 的释放在持久化**之后**，且只释放本方法自己创建的那个：      // 若在 persistSession 之前就注销（或误释放外层循环的 controller），
+      // 用户恰好在落盘等待期间点停止时 abort() 会找不到 controller，
+      // 循环 signal 不受影响，恢复后又继续跑下一轮测试（PR #9 第七轮复审 P2）。
+      // 继承自测试循环的 controller 由循环的 finally 统一释放。
+      if (!inheritedController && rt.controller === turnController) {
+        rt.controller = undefined;
+      }
     }
     // 理论上 finally 前一定已赋值；兜底按失败返回，避免调用方误判成功
     return loopResult ?? { reason: 'error', errorMessage: '回合未产生结果' };
@@ -1165,8 +1200,20 @@ export class AgentServer {
   }
 
   private async persistSession(rt: SessionRuntime): Promise<void> {
-    await this.host.fs.mkdir(this.sessionsDir(), { recursive: true });
-    await this.host.fs.writeFile(this.sessionFile(rt.data.meta.id), JSON.stringify(rt.data));
+    // 已删除的会话不得被仍在收尾的异步流程写回磁盘（会话「复活」防护）
+    if (rt.deleted) return;
+    const task = (async () => {
+      await this.host.fs.mkdir(this.sessionsDir(), { recursive: true });
+      await this.host.fs.writeFile(this.sessionFile(rt.data.meta.id), JSON.stringify(rt.data));
+    })();
+    // 登记在途写入：deleteSession 需要等它落定后再删文件，
+    // 否则「先 unlink、后写入完成」会把已删除的会话文件重新创建出来
+    rt.persisting = task;
+    try {
+      await task;
+    } finally {
+      if (rt.persisting === task) rt.persisting = undefined;
+    }
   }
 
   private async ensureSettings(): Promise<void> {
@@ -1673,6 +1720,11 @@ export class AgentServer {
       rt.busy = true;
     });
     const controller = new AbortController();
+    // 占位后立刻挂上 controller：从这一刻起到循环结束，用户点停止与
+    // deleteSession 都必须能中止本循环。若等到审批通过后才挂，
+    // 「探测命令 / 等待审批」这段窗口里的停止就是空操作
+    // （PR #9 第七轮复审 P2）。
+    rt.controller = controller;
     // 只要本次调用已经让前端进入运行态（发出了审批请求或启动了循环），
     // 就必须在退出时补发终止事件，否则 UI 会永久停在 running（复审 P1）。
     let uiEngaged = false;
@@ -1703,6 +1755,12 @@ export class AgentServer {
         5,
       );
       const timeoutMs = clampInt(this.settings.testLoop?.timeoutMs ?? 600_000, 10_000, 1_800_000);
+
+      // 探测/读配置期间可能已被停止或删除会话：此时 signal 已中止，
+      // 直接收敛，不要继续走审批与测试执行
+      if (controller.signal.aborted) {
+        return { ok: false, rounds: 0, reason: 'aborted', message: '测试自愈循环已中止' };
+      }
 
       // 测试命令同样要过权限规则：该命令可能来自仓库内的 package.json / .easycode/test.json，
       // 属于不可信输入，绝不能让 deny 规则被「换个执行入口」绕过

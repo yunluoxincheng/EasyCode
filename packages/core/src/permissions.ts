@@ -60,39 +60,66 @@ const ENV_ASSIGN_HEAD_RE = /^[A-Za-z_][A-Za-z0-9_]*=/;
  * 遇到无法可靠识别的写法（引号未闭合、赋值与后续字符无空白分隔）时**原样返回**，
  * 绝不假装已经清洗干净——调用方不得把前缀匹配当作危险命令筛查的保证。
  */
-function stripEnvAssignments(input: string): string {
-  let rest = input;
-  for (;;) {
-    rest = rest.replace(/^\s+/, '');
-    const head = ENV_ASSIGN_HEAD_RE.exec(rest);
-    if (!head) return rest;
-    let i = head[0].length;
-    const quote = rest[i];
-    if (quote === '"' || quote === "'") {
+/**
+ * 从 `start` 开始消费一个完整的 Shell word，返回结束位置（指向分隔空白或字符串结尾）。
+ *
+ * Shell 中同一个 word 可以由引号片段与裸文本**拼接**而成：`FOO="a"b`、`FOO=x"a b"`
+ * 都是一个赋值单词，赋值之后紧跟的才是命令。只识别「整段引号」或「整段裸值」会让
+ * 这类写法漏过归一化（PR #9 第七轮复审 P1）。
+ *
+ * 返回 -1 表示引号未闭合：视为不可解析，调用方应原样返回而不声称已清洗。
+ */
+function consumeShellWord(input: string, start: number): number {
+  let i = start;
+  while (i < input.length) {
+    const ch = input[i];
+    if (ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r') return i;
+    if (ch === '\\') {
+      // 裸文本或双引号内的反斜杠转义：连转义字符一起吞掉
+      i += 2;
+      continue;
+    }
+    if (ch === "'") {
+      // 单引号内全部是字面量，只可能被下一个 ' 收尾
+      i += 1;
+      while (i < input.length && input[i] !== "'") i += 1;
+      if (i >= input.length) return -1;
+      i += 1;
+      continue;
+    }
+    if (ch === '"') {
       i += 1;
       let closed = false;
-      while (i < rest.length) {
-        const ch = rest[i];
-        // 双引号内的反斜杠转义：连转义字符一起吞掉，避免被 \" 提前收尾
-        if (ch === '\\' && quote === '"' && i + 1 < rest.length) {
+      while (i < input.length) {
+        if (input[i] === '\\' && i + 1 < input.length) {
           i += 2;
           continue;
         }
-        if (ch === quote) {
+        if (input[i] === '"') {
           i += 1;
           closed = true;
           break;
         }
         i += 1;
       }
-      // 引号未闭合：写法不可解析，原样返回（保守，不声称已清洗）
-      if (!closed) return rest;
-    } else {
-      while (i < rest.length && !/\s/.test(rest[i])) i += 1;
+      if (!closed) return -1;
+      continue;
     }
-    // 赋值后必须紧跟空白（或已到结尾），否则是 `FOO=1rm` 这类无法解析的复合写法
-    if (i < rest.length && !/\s/.test(rest[i])) return rest;
-    rest = rest.slice(i);
+    i += 1;
+  }
+  return i;
+}
+
+function stripEnvAssignments(input: string): string {
+  let rest = input;
+  for (;;) {
+    rest = rest.replace(/^\s+/, '');
+    const head = ENV_ASSIGN_HEAD_RE.exec(rest);
+    if (!head) return rest;
+    // 消费完整的赋值单词（可含多段引号/裸文本拼接），而不是只认一种写法
+    const end = consumeShellWord(rest, head[0].length);
+    if (end < 0) return rest;
+    rest = rest.slice(end);
   }
 }
 
