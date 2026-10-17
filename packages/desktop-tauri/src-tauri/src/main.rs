@@ -796,7 +796,10 @@ async fn proc_run(
     timeout_ms: Option<u64>,
     shell: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    let timeout = Duration::from_millis(timeout_ms.unwrap_or(120_000).clamp(1_000, 600_000));
+    // 超时上限必须与引擎/设置页保持一致（1800s）。早期硬编码 600s，
+    // 导致用户设置 20/30 分钟时 Tauri 主力端会在 10 分钟强行终止命令
+    // （PR #9 第五轮复审 P2）。
+    let timeout = Duration::from_millis(timeout_ms.unwrap_or(120_000).clamp(1_000, 1_800_000));
 
     let mut cmd = make_shell_command(&command, cwd.as_deref(), shell.as_deref());
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).stdin(Stdio::null());

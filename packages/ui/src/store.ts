@@ -1646,9 +1646,9 @@ export class AppStore {
           this.fileTreeRefreshTick++;
           this.notify(true);
           if (event.reason === 'passed') {
-            this.showToast(`✓ 测试自愈完成：第 ${event.rounds} 轮全部通过`);
+            this.showToast(`[ OK ] 测试自愈完成：第 ${event.rounds} 轮全部通过`);
           } else if (event.reason === 'max_rounds') {
-            this.showToast(`测试仍有失败：已达 ${event.rounds} 轮自愈上限，请人工介入`, 'err');
+            this.showToast(`[ ERR ] 测试仍有失败：已达 ${event.rounds} 轮自愈上限，请人工介入`, 'err');
           } else if (event.reason === 'error') {
             this.showToast(event.message ?? '测试自愈循环异常中断', 'err');
           } else if (event.message) {

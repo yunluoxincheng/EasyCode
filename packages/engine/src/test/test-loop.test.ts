@@ -921,6 +921,53 @@ test('【P2 四轮】跨会话：一个会话持锁时另一会话的测试循�
   assert.equal(server.isSessionBusy(a.id), false);
 });
 
+test('【P2 五轮】设置页允许的超时必须原样传到宿主（>600s 不得被裁剪）', async () => {
+  const host = new ScriptedTestHost(
+    {
+      '/ws/package.json': JSON.stringify({ scripts: { test: 'vitest run' } }),
+      '/ws/pnpm-lock.yaml': '',
+    },
+    [{ code: 0, stdout: 'Tests  1 passed (1)' }],
+  );
+  const server = new AgentServer(host);
+  await server.updateSettings({
+    providers: {
+      mock: { kind: 'mock', baseURL: '', name: 'Mock', enabled: true, models: [{ name: 'mock-1', enabled: true }] },
+    },
+    defaultProvider: 'mock',
+    defaultApprovalMode: 'yolo',
+    // 20 分钟：早期 Tauri proc_run 会硬裁剪到 600s，导致实际 10 分钟就被杀
+    testLoop: { maxRounds: 1, timeoutMs: 1_200_000 },
+  });
+  const session = await server.createSession({
+    workspaceRoot: '/ws',
+    providerId: 'mock',
+    title: '超时透传',
+  });
+
+  const seen: Array<number | undefined> = [];
+  const originalRun = host.process.run as unknown as (
+    command: string,
+    options?: ProcessRunOptions,
+  ) => Promise<ProcessResult>;
+  host.process = {
+    ...host.process,
+    run: async (command: string, options?: ProcessRunOptions) => {
+      if (!/^\s*git\b/.test(command)) seen.push(options?.timeoutMs);
+      return originalRun(command, options);
+    },
+  } as unknown as typeof host.process;
+
+  await server.runTestLoop(session.id, { maxRounds: 1 });
+  assert.equal(seen.length, 1, '应当只执行一次测试命令');
+  assert.equal(seen[0], 1_200_000, `超时必须原样透传，实际: ${seen[0]}`);
+
+  // 越界值仍被引擎钳制到 1800s 上限（与设置页 / 宿主上限一致）
+  await server.updateSettings({ testLoop: { maxRounds: 1, timeoutMs: 99_999_999 } });
+  await server.runTestLoop(session.id, { maxRounds: 1 });
+  assert.equal(seen[1], 1_800_000, `上限应钳制到 1800s，实际: ${seen[1]}`);
+});
+
 test('【P2 统一裁决】测试命令命中 allow 时 ask 模式下免审批直接执行', async () => {
   const host = new ScriptedTestHost(
     {

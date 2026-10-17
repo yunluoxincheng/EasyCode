@@ -1,6 +1,7 @@
 import type { Host } from '../host.js';
 import type { Tool } from './index.js';
 import { resolveWorkspacePath } from './index.js';
+import { resolveRealPathInWorkspace } from '../path-guard.js';
 
 const MAX_READ_BYTES = 64 * 1024;
 const MAX_RANGE_LINES = 500;
@@ -106,7 +107,12 @@ export async function resolveCodeRangeMentions(
   const snippets: CodeRangeSnippet[] = [];
   for (const m of mentions) {
     try {
-      const abs = resolveWorkspacePath(workspace, m.path, host);
+      // 旁路读取入口同样受工作区边界约束（PR #9 第五轮复审 P1）：
+      // @file 引用会把片段注入模型上下文，若跟随工作区内指向外部文件的符号链接，
+      // 就等于把工作区外内容发给模型。因此先取真实目标，再读取真实路径。
+      const guard = await resolveRealPathInWorkspace(host, workspace, m.path, host.paths);
+      if (!guard.ok) continue;
+      const abs = guard.value.realPath;
       const stat = await host.fs.stat(abs);
       if (!stat || stat.isDirectory || stat.size > MAX_RANGE_FILE_BYTES) continue;
       const rawContent = await host.fs.readFile(abs);

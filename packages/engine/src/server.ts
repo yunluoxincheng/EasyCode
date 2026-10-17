@@ -43,6 +43,7 @@ import {
   describePermissionRule,
   evaluatePermission,
   resolveApprovalRequirement,
+  resolveRealPathInWorkspace,
   type PermissionRule,
   type PermissionRuleSource,
   type TestCommandDetection,
@@ -618,8 +619,11 @@ export class AgentServer {
           ? baseMessages
           : mergeSystemIntoUser(baseMessages, systemPrompt);
 
-
-
+      // 工作区物理身份（消解符号链接别名）——锁键与别名登记都以此为准，
+      // 保证同一物理目录的不同写法共享同一把锁（PR #9 第五轮复审 P2）
+      const workspaceIdentity = await this.resolveWorkspaceIdentity(
+        rt.data.meta.workspaceRoot ?? '',
+      );
 
       // 装配微型决策策略（TODOS #40：Shadow Mode 旁路观测）
       // 门控：仅当用户开启 reflexShadowMode 开关时挂载，关闭时 policy 为 undefined（零 CPU 额外计算、零日志写入）
@@ -686,7 +690,7 @@ export class AgentServer {
         contextWindow: autoCompact ? contextWindow : undefined,
         autoCompactThreshold: compactThreshold,
         workspaceLock: rt.data.meta.workspaceRoot
-          ? this.workspaceLocks.getLock(rt.data.meta.workspaceRoot)
+          ? this.workspaceLocks.getLock(workspaceIdentity)
           : undefined,
       });
       if (loopResult.reason === 'error' && loopResult.errorMessage) {
@@ -756,6 +760,29 @@ export class AgentServer {
       this.sessionOpLocks.set(id, lock);
     }
     return lock;
+  }
+
+  /**
+   * 解析工作区的**物理身份**并把别名登记给锁管理器，返回该身份。
+   *
+   * `/tmp/project` 与 `/tmp/project-link` 是同一目录；若锁只按字符串分槽，
+   * 两个会话绑定不同写法就会各拿一把锁，工作区互斥失效（PR #9 第五轮复审 P2）。
+   * 解析失败时退回词法路径——锁仍能保护同一写法的并发，只是不合并别名。
+   */
+  async resolveWorkspaceIdentity(workspaceRoot: string): Promise<string> {
+    const root = workspaceRoot?.trim();
+    if (!root) return '';
+    const lexical = this.host.paths.resolve(root);
+    let identity = lexical;
+    try {
+      const real = await this.host.fs.realpath?.(lexical);
+      if (real) identity = real;
+    } catch {
+      // 解析失败（权限不足 / 循环链接）不阻断主流程，退回词法身份
+    }
+    this.workspaceLocks.registerAlias(root, identity);
+    this.workspaceLocks.registerAlias(lexical, identity);
+    return identity;
   }
 
   /**
@@ -1722,7 +1749,12 @@ export class AgentServer {
               shell: this.settings.shell ?? 'auto',
               signal: controller.signal,
             });
-          const res = await this.workspaceLocks.withLock(root, run, controller.signal);
+          // 用物理身份取锁：同一工作区的不同写法（别名路径）必须共享同一把锁
+          const res = await this.workspaceLocks.withLock(
+            await this.resolveWorkspaceIdentity(root),
+            run,
+            controller.signal,
+          );
           const output = [res.stdout, res.stderr]
             .filter((part) => typeof part === 'string' && part.trim().length > 0)
             .join('\n');
@@ -1827,7 +1859,9 @@ export class AgentServer {
       const doRevert = () =>
         this.checkpoints.revertTurn(sessionId, targetRecord.turnId, optionsOrPaths);
       const { record, revertedPaths } = targetWorkspace
-        ? await this.workspaceLocks.getLock(targetWorkspace).withLock(doRevert)
+        ? await this.workspaceLocks
+            .getLock(await this.resolveWorkspaceIdentity(targetWorkspace))
+            .withLock(doRevert)
         : await doRevert();
 
       if (targetWorkspace) {
@@ -1875,7 +1909,12 @@ export class AgentServer {
     const root = rt.data.meta.workspaceRoot?.trim();
     if (!root) throw new Error('当前会话未绑定工作区');
     const cleanRel = relPath.replace(/\\/g, '/').replace(/^\.\//, '');
-    const abs = resolveWorkspacePath(root, cleanRel, this.host);
+    // 预览入口同样必须落在工作区内（PR #9 第五轮复审 P1）：
+    // 克隆仓库里 `notes.md -> /home/user/private.txt` 外观与普通文件无异，
+    // 单靠词法检查会让用户在文件树里点开就直接泄露工作区外内容。
+    const guard = await resolveRealPathInWorkspace(this.host, root, cleanRel, this.host.paths);
+    if (!guard.ok) throw new Error(guard.message);
+    const abs = guard.value.realPath;
     const stat = await this.host.fs.stat(abs);
     if (!stat) throw new Error(`文件不存在: ${cleanRel}`);
     if (stat.isDirectory) throw new Error(`目标是目录，无法作为文件预览: ${cleanRel}`);

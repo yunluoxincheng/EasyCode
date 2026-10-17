@@ -255,6 +255,9 @@ export async function executeTool(
   // 词法 containment。因此文件路径类工具在裁决前必须取得真实目标：
   // 已存在目标消解全部链接，新建文件则校验其最近存在的父目录。
   let permissionInput = validated.value;
+  /** 文件类工具经校验后的「真实相对路径」——实际执行必须用它，否则会出现检查/使用不一致 */
+  let verifiedRelative: string | undefined;
+  let rawPathForRecheck: string | undefined;
   if (PATH_PATTERN_TOOLS.has(name) && ctx.workspace) {
     const args = validated.value as Record<string, unknown>;
     const rawPath = typeof args.path === 'string' ? args.path.trim() : '.';
@@ -272,6 +275,8 @@ export async function executeTool(
     }
     // 用真实相对路径参与裁决：别名路径也会命中针对真实目标的规则
     permissionInput = { ...args, path: real.value.realRelative };
+    verifiedRelative = real.value.realRelative;
+    rawPathForRecheck = rawPath;
   }
   // 权限规则裁决（TODOS #47）：deny 直接拒绝、ask 强制审批、allow 免审批；
   // 无规则命中时保持既有「敏感工具在 ask 模式下审批」语义
@@ -320,8 +325,13 @@ export async function executeTool(
   const requirement = resolveApprovalRequirement(permission, registry.isSensitive(name));
   const ruleAsk = requirement.force;
   const ruleAllow = permission?.decision === 'allow';
+  // 审批请求展示真实目标：用户看到的是实际会被写入/读取的位置，而不是可能被替换的链接
+  const approvalInput =
+    verifiedRelative !== undefined
+      ? { ...(permissionInput as Record<string, unknown>) }
+      : validated.value;
   const approved = requirement.needApproval
-    ? await ctx.approval.request(name, validated.value, {
+    ? await ctx.approval.request(name, approvalInput, {
         force: requirement.force,
         reason: requirement.reason,
       })
@@ -348,7 +358,33 @@ export async function executeTool(
     };
   }
   try {
-    const run = () => tool.execute(validated.value, ctx);
+    // 审批通过后必须复核：审批期间另一个进程可能把符号链接换成别的目标
+    // （PR #9 第五轮复审 P1）。单次复检不能彻底消除竞态，但能把
+    // 「等待用户点同意」这段最长的窗口收掉；真正的强约束需要宿主级
+    // 句柄/O_NOFOLLOW 能力，见 README「安全设计」的边界说明。
+    if (verifiedRelative !== undefined && ctx.workspace && rawPathForRecheck !== undefined) {
+      const recheck = await resolveRealPathInWorkspace(
+        ctx.host,
+        ctx.workspace,
+        rawPathForRecheck,
+        ctx.host.paths,
+      );
+      if (!recheck.ok || recheck.value.realRelative !== verifiedRelative) {
+        return {
+          content:
+            '路径在审批期间发生变化（真实目标已被替换），为避免写入/读取非预期位置，本次调用已取消。请重新发起操作。',
+          approved: false,
+          isError: false,
+          durationMs: Date.now() - started,
+        };
+      }
+    }
+    // 实际 I/O 使用**已验证的真实路径**：不能用原始路径，否则检查与使用落在不同目标上
+    const executeInput =
+      verifiedRelative !== undefined
+        ? { ...(permissionInput as Record<string, unknown>) }
+        : validated.value;
+    const run = () => tool.execute(executeInput, ctx);
     const content =
       registry.isSensitive(name) && ctx.workspaceLock
         ? await ctx.workspaceLock.withLock(run, ctx.signal)
