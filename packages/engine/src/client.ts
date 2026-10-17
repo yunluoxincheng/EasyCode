@@ -142,6 +142,9 @@ export interface AgentClient {
    * 信任判定必须由引擎统一负责：路径规范化（分隔符 / Windows 大小写）只有一份实现，
    * UI 若自行比对字符串，会出现「显示已信任但撤销无效」这类权限撤销失败
    * （PR #9 第三轮复审 P1）。
+   *
+   * 实现须在比较前刷新工作区的**物理身份**：符号链接被改指后词法路径不变，
+   * 只按字符串比对会把给旧项目的授权转移给新目标（PR #9 第八轮复审 P1）。
    */
   isProjectTrusted?(workspaceRoot: string): Promise<boolean>;
   /** 授予 / 撤销某个工作区的项目级 allow 信任（由引擎写回本地设置） */

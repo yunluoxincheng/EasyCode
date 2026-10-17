@@ -366,7 +366,7 @@ export function createDemoClient(): AgentClient {
     reviewDecision: (sid, rid, label) => wrap(() => server.reviewDecision(sid, rid, label)),
     runTestLoop: (id, options) => wrap(() => server.runTestLoop(id, options)),
     detectSessionTestCommand: (id) => wrap(() => server.detectSessionTestCommand(id)),
-    isProjectTrusted: (root) => wrap(async () => server.isProjectTrusted(root)),
+    isProjectTrusted: (root) => wrap(async () => server.getProjectTrust(root)),
     setProjectTrust: (root, trusted) => wrap(() => server.setProjectTrust(root, trusted)),
     countIgnoredProjectAllowRules: (root) =>
       wrap(() => server.countIgnoredProjectAllowRules(root)),

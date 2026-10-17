@@ -143,8 +143,10 @@ interface SessionRuntime {
    * `persistSession(rt)` —— 若不拦，已删除的会话文件会被重新写回磁盘（会话「复活」）。
    */
   deleted?: boolean;
-  /** 在途落盘任务：删除会话时必须等它落定，否则 unlink 会被随后完成的写入覆盖 */
-  persisting?: Promise<void>;
+  /** 在途落盘任务：删除会话时必须等**全部**落定，否则较早写入完成时会把文件重新创建 */
+  persisting?: Set<Promise<void>>;
+  /** 落盘串行链尾：同一会话的写入排队，避免旧快照晚于新快照落盘 */
+  persistQueue?: Promise<void>;
 }
 
 export interface SessionEventPayload {
@@ -180,6 +182,13 @@ export class AgentServer {
   private reflexPolicy: DecisionPolicy = new NoopDecisionPolicy();
   private settings: Settings = structuredClone(DEFAULT_SETTINGS);
   private settingsLoaded = false;
+  /**
+   * 词法工作区键 → 已解析的物理身份（`realpath` 归一化结果）。
+   *
+   * `isProjectTrusted()` 是同步接口（UI 与多处裁决都要即时判断），而物理身份
+   * 解析是异步的，因此由授予信任、裁决入口等异步路径刷新此缓存，同步查询只读缓存。
+   */
+  private readonly workspaceIdentities = new Map<string, string>();
 
   constructor(private readonly host: Host) {
     this.decisionStats = new DecisionStatsManager(host);
@@ -425,11 +434,13 @@ export class AgentServer {
     this.abort(id);
     this.sessions.delete(id);
     if (rt?.persisting) {
-      // 等已经在途的落盘完成，否则紧接着的 unlink 会被这次写入覆盖（文件重新出现）
-      try {
-        await rt.persisting;
-      } catch {
-        // 写入本身失败时无需补偿：文件不会存在，后续 unlink 幂等
+      // 等**所有**在途落盘落定（不能只等最后一个：串行链上较早的任务完成时
+      // 可能晚于 unlink，把已删除的文件重新创建出来）。deleted 标记已置位，
+      // 排队中的任务轮到时也会自行放弃，因此这里不会无限等待。
+      for (;;) {
+        const pending = rt.persisting;
+        if (!pending || pending.size === 0) break;
+        await Promise.allSettled([...pending]);
       }
     }
     // 会话删除同步终止其后台任务，杜绝僵尸进程与孤儿端口（TODOS #37）。
@@ -1202,17 +1213,30 @@ export class AgentServer {
   private async persistSession(rt: SessionRuntime): Promise<void> {
     // 已删除的会话不得被仍在收尾的异步流程写回磁盘（会话「复活」防护）
     if (rt.deleted) return;
-    const task = (async () => {
-      await this.host.fs.mkdir(this.sessionsDir(), { recursive: true });
-      await this.host.fs.writeFile(this.sessionFile(rt.data.meta.id), JSON.stringify(rt.data));
-    })();
-    // 登记在途写入：deleteSession 需要等它落定后再删文件，
-    // 否则「先 unlink、后写入完成」会把已删除的会话文件重新创建出来
-    rt.persisting = task;
+    // 串行化同一会话的落盘：
+    // ① 并发写入会让旧快照晚于新快照落盘（后写入的其实是更早的状态）；
+    // ② 若用单个字段记录「在途任务」，第二个任务会覆盖第一个的引用，
+    //    删除时只能等到最后一个，被覆盖的早期任务仍会在删除后把文件写回来
+    //    （PR #9 第八轮复审 P2）。
+    const previous = rt.persistQueue ?? Promise.resolve();
+    const task = previous
+      .catch(() => {
+        // 前一次失败不能阻断后续写入
+      })
+      .then(async () => {
+        // 轮到本次执行时可能已被删除：再次确认，避免排队期间会话被删还写回
+        if (rt.deleted) return;
+        await this.host.fs.mkdir(this.sessionsDir(), { recursive: true });
+        await this.host.fs.writeFile(this.sessionFile(rt.data.meta.id), JSON.stringify(rt.data));
+      });
+    rt.persistQueue = task;
+    const pending = rt.persisting ?? (rt.persisting = new Set());
+    pending.add(task);
     try {
       await task;
     } finally {
-      if (rt.persisting === task) rt.persisting = undefined;
+      pending.delete(task);
+      if (rt.persistQueue === task) rt.persistQueue = undefined;
     }
   }
 
@@ -1604,6 +1628,9 @@ export class AgentServer {
   /**
    * 工作区规范化键：用于信任白名单比对，避免「只凭目录名或未规范化字符串」授权。
    * Windows 大小写不敏感，统一小写；分隔符由宿主 paths.resolve 归一。
+   *
+   * 注意：这只是**词法**键，用于给物理身份缓存索引；信任判定本身走物理身份
+   * （见 `resolveTrustIdentity` / `isProjectTrusted`）。
    */
   private workspaceTrustKey(workspaceRoot: string): string {
     const root = workspaceRoot?.trim();
@@ -1614,25 +1641,95 @@ export class AgentServer {
     } catch {
       return '';
     }
-    return this.host.paths.sep === '\\' ? resolved.toLowerCase() : resolved;
+    // 必须与物理身份键走同一套归一化（分隔符 + Windows 大小写），
+    // 否则缓存索引与白名单比对会因 `\` vs `/` 而永不相等
+    return this.normalizeTrustKey(resolved);
   }
 
-  /** 指定工作区是否已被用户显式信任（可启用项目级 allow 规则） */
+  /** 归一化一条已解析的绝对路径，用作物理信任键 */
+  private normalizeTrustKey(absolutePath: string): string {
+    const trimmed = absolutePath?.trim();
+    if (!trimmed) return '';
+    const normalized = trimmed.replace(/[\\/]+$/, '').replace(/\\/g, '/');
+    return this.host.paths.sep === '\\' ? normalized.toLowerCase() : normalized;
+  }
+
+  /**
+   * 解析工作区的**物理身份**（消解符号链接）并写入缓存。
+   *
+   * 信任必须绑定物理项目而非词法别名：`ws-link -> projectA` 被授权后，
+   * 若链接改指 `projectB`，词法键不变但已不是同一个项目——按词法比对会把
+   * 给 A 的免审批权限转移给 B（PR #9 第八轮复审 P1）。
+   * 解析失败（宿主无 realpath / 权限不足）时退回词法路径，此时只承认
+   * 与词法键完全一致的记录，不放宽到「同名前缀」比较。
+   */
+  private async resolveTrustIdentity(
+    workspaceRoot: string,
+  ): Promise<{ lexical: string; identity: string; stored: string } | null> {
+    const root = workspaceRoot?.trim();
+    if (!root) return null;
+    let stored: string;
+    try {
+      stored = this.host.paths.resolve(root);
+    } catch {
+      return null;
+    }
+    const lexical = this.normalizeTrustKey(stored);
+    if (!lexical) return null;
+    let identity = lexical;
+    try {
+      const real = await this.host.fs.realpath?.(stored);
+      if (real) {
+        stored = real;
+        identity = this.normalizeTrustKey(real);
+      }
+    } catch {
+      // 解析失败：退回词法身份
+    }
+    // 每次解析都覆盖缓存：符号链接改指后必须让旧身份失效
+    this.workspaceIdentities.set(lexical, identity);
+    if (identity !== lexical) this.workspaceIdentities.set(identity, identity);
+    return { lexical, identity, stored };
+  }
+
+  /**
+   * 指定工作区是否已被用户显式信任（可启用项目级 allow 规则）。
+   *
+   * 这是**同步**查询，只读已解析的物理身份缓存；符号链接改指后必须由异步入口
+   * （`getProjectTrust` / `resolvePermissionRules` / `setProjectTrust`）刷新。
+   * 内部裁决路径（`resolvePermissionRules`）总是先刷新再调用，因此不会用过期身份放行；
+   * 面向用户的查询请用 `getProjectTrust`。
+   */
   isProjectTrusted(workspaceRoot: string): boolean {
     const key = this.workspaceTrustKey(workspaceRoot);
     if (!key) return false;
-    const list = this.settings.permissions?.trustedWorkspaces ?? [];
-    return list.some((entry) => this.workspaceTrustKey(entry) === key);
+    const entries = new Set(
+      (this.settings.permissions?.trustedWorkspaces ?? [])
+        .map((entry) => this.normalizeTrustKey(entry))
+        .filter(Boolean),
+    );
+    if (entries.size === 0) return false;
+    // 优先按**物理身份**比对：符号链接改指后词法路径不变，只有物理目标能分辨
+    // 「授权给哪个项目」（PR #9 第八轮复审 P1）
+    const identity = this.workspaceIdentities.get(key);
+    if (identity) return entries.has(identity);
+    // 尚未解析过物理身份：只接受与词法键完全一致的记录（本身就是物理路径的情形），
+    // 无法确认身份时不放行，绝不退化成「看起来信任过就算信任」
+    return entries.has(key);
   }
 
   /** 授予/撤销某个工作区的项目级 allow 信任（写回本地设置，绝不写入项目仓库） */
   async setProjectTrust(workspaceRoot: string, trusted: boolean): Promise<Settings> {
     await this.ensureSettings();
-    const key = this.workspaceTrustKey(workspaceRoot);
-    if (!key) throw new Error('工作区路径无效，无法设置信任');
+    const keys = await this.resolveTrustIdentity(workspaceRoot);
+    if (!keys) throw new Error('工作区路径无效，无法设置信任');
     const current = this.settings.permissions?.trustedWorkspaces ?? [];
-    const kept = current.filter((entry) => this.workspaceTrustKey(entry) !== key);
-    const next = trusted ? [...kept, this.host.paths.resolve(workspaceRoot.trim())] : kept;
+    // 旧记录可能是词法路径（升级前写入的），两种写法一并清理，避免重复累积
+    const kept = current.filter((entry) => {
+      const normalized = this.normalizeTrustKey(entry);
+      return normalized !== keys.identity && normalized !== keys.lexical;
+    });
+    const next = trusted ? [...kept, keys.stored] : kept;
     return this.updateSettings({
       permissions: {
         enabled: this.settings.permissions?.enabled !== false,
@@ -1652,6 +1749,10 @@ export class AgentServer {
    */
   async resolvePermissionRules(workspaceRoot: string): Promise<PermissionRule[] | undefined> {
     if (this.settings.permissions?.enabled === false) return undefined;
+    // 裁决前刷新物理身份：符号链接改指后必须重新解析，否则会把给旧项目的授权
+    // 继承给新目标（PR #9 第八轮复审 P1）。isProjectTrusted 本身保持同步，
+    // 由这里（以及授予信任时）负责把身份写入缓存。
+    await this.resolveTrustIdentity(workspaceRoot);
     const globalRules = (this.settings.permissions?.rules ?? [])
       .map((rule) => normalizePermissionRule(rule, 'global'))
       .filter((rule): rule is PermissionRule => rule !== null);
@@ -1663,9 +1764,23 @@ export class AgentServer {
     return rules.length > 0 ? rules : undefined;
   }
 
+  /**
+   * 异步查询信任状态：先刷新工作区物理身份再判定。
+   *
+   * UI 与任何面向用户的「是否已信任」查询都应走这里——符号链接可能已被改指，
+   * 只读缓存的同步版本会给出过期答案（PR #9 第八轮复审 P1）。
+   */
+  async getProjectTrust(workspaceRoot: string): Promise<boolean> {
+    await this.ensureSettings();
+    await this.resolveTrustIdentity(workspaceRoot);
+    return this.isProjectTrusted(workspaceRoot);
+  }
+
   /** 项目级配置里被信任策略忽略的 allow 规则条数（供 UI 提示，不参与裁决） */
   async countIgnoredProjectAllowRules(workspaceRoot: string): Promise<number> {
     if (this.settings.permissions?.enabled === false) return 0;
+    // 同样先刷新物理身份，避免用过期信任状态计算提示数量
+    await this.resolveTrustIdentity(workspaceRoot);
     if (this.isProjectTrusted(workspaceRoot)) return 0;
     const projectRules = await this.loadProjectPermissions(workspaceRoot);
     return projectRules.filter((rule) => rule.decision === 'allow').length;
@@ -1765,6 +1880,11 @@ export class AgentServer {
       // 测试命令同样要过权限规则：该命令可能来自仓库内的 package.json / .easycode/test.json，
       // 属于不可信输入，绝不能让 deny 规则被「换个执行入口」绕过
       const permissionRules = await this.resolvePermissionRules(root);
+      // 加载规则是异步的，期间用户可能已经点了停止：必须复核，否则紧接着会
+      // 新建一个审批请求并永久挂起（PR #9 第八轮复审 P2）
+      if (controller.signal.aborted) {
+        return { ok: false, rounds: 0, reason: 'aborted', message: '测试自愈循环已中止' };
+      }
       const verdict = evaluatePermission(
         permissionRules,
         'run_command',
@@ -1795,6 +1915,9 @@ export class AgentServer {
           {
             force: requirement.force,
             reason: requirement.reason ?? '测试自愈循环',
+            // 审批监听同一个中止信号：即使停止发生在规则加载与弹窗之间，
+            // 也能立即按拒绝收敛，而不是留下一个悬挂的审批请求
+            signal: controller.signal,
           },
         );
       }
