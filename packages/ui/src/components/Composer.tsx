@@ -1,14 +1,16 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { formatFileMention } from '@easycode/core';
 import { useStore } from '../useStore.js';
 import type { UserItem } from '../store.js';
 import { ProjectSwitcher } from './ProjectSwitcher.js';
 import { ModelEffortPicker } from './ModelEffortPicker.js';
 import { UsageChip } from './UsageChip.js';
-import { ContextChip } from './ContextChip.js';
 import { RulesChip } from './RulesChip.js';
 import { BUILTIN_SLASH_COMMANDS, type SlashCommand } from '../commands/index.js';
 import { downloadFile, getExportFilename, sessionToMarkdown } from '../utils/exportSession.js';
+
+// 精确分词词表较大，仅在存在活动会话时加载。
+const ContextChip = lazy(() => import('./ContextChip.js').then((mod) => ({ default: mod.ContextChip })));
 
 /** 自适应撑高的高度上限（TODOS #20）：约 8 行，超出后出纵向滚动条 */
 const TA_MAX_HEIGHT = 181;
@@ -789,7 +791,11 @@ export function Composer() {
         {session && <ModelEffortPicker />}
         {session && <RulesChip compact={compact} />}
         {session && <UsageChip compact={compact} />}
-        {session && <ContextChip compact={compact} />}
+        {session && (
+          <Suspense fallback={<span className="chip ctx-chip" role="status" title="正在加载上下文统计">[ WAIT ]</span>}>
+            <ContextChip compact={compact} />
+          </Suspense>
+        )}
         <span className="spacer" />
         {store.running && <span className="running-dot" title="Agent 运行中" />}
       </div>

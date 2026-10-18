@@ -1,93 +1,152 @@
 import type { DecisionPolicy, DecisionRequest, DecisionResult } from '@easycode/core';
+import type { InferenceSession } from 'onnxruntime-web';
 
 export class ReflexWebPolicy implements DecisionPolicy {
-  private session: any = null;
+  private session: InferenceSession | null = null;
   private tokenizer: any = null;
   private runtimeConfig: any = null;
-  private initializing: Promise<boolean> | null = null;
   private isReady = false;
+  private enabled = false;
+  private generation = 0;
+  private queue: Promise<void> = Promise.resolve();
+  private loadController: AbortController | null = null;
+  private pendingDecisions = 0;
 
-  constructor() {
-    // 空闲时后台预热，避免首轮决策产生冷启动耗时
-    if (typeof window !== 'undefined') {
-      const startPreload = () => {
-        void this.init().catch(() => {});
-      };
-      if ('requestIdleCallback' in window) {
-        (window as any).requestIdleCallback(startPreload);
-      } else {
-        setTimeout(startPreload, 1500);
+  /** 只响应已保存的设置；构造实例本身不会加载运行时或模型。 */
+  setEnabled(enabled: boolean): void {
+    if (this.enabled === enabled) return;
+    this.enabled = enabled;
+    const generation = ++this.generation;
+    this.loadController?.abort();
+    // 初始化、推理、释放共享队列：关闭时不得释放仍在 run() 的会话，
+    // 快速开关产生的旧任务也不得把迟到模型发布到新一代生命周期。
+    void this.enqueue(async () => {
+      await this.release();
+      if (this.isCurrent(generation)) await this.init(generation);
+    }).catch((err) => {
+      console.warn('[Reflex] Model lifecycle error:', err);
+    });
+  }
+
+  private enqueue<T>(operation: () => Promise<T>): Promise<T> {
+    const task = this.queue.then(operation);
+    this.queue = task.then(() => {}, () => {});
+    return task;
+  }
+
+  private isCurrent(generation: number): boolean {
+    return this.enabled && this.generation === generation;
+  }
+
+  private async release(): Promise<void> {
+    this.isReady = false;
+    if (this.session) {
+      // 释放失败时保留句柄，下一次切换或初始化可以重试。
+      await this.session.release();
+      this.session = null;
+      console.log('[Reflex] On-device ONNX Web engine released.');
+    }
+    this.tokenizer = null;
+    this.runtimeConfig = null;
+  }
+
+  private async init(generation: number): Promise<boolean> {
+    if (!this.isCurrent(generation)) return false;
+    if (this.isReady) return true;
+    await this.release();
+    if (!this.isCurrent(generation)) return false;
+    const controller = new AbortController();
+    this.loadController = controller;
+    try {
+      console.log('[Reflex] Initializing on-device ONNX Web engine...');
+      // 1. 动态按需引入 onnxruntime-web
+      const ort = await import('onnxruntime-web');
+      if (!this.isCurrent(generation)) return false;
+      // wasmPaths 必须是绝对 URL：ORT 内部用 new URL(filename, prefix) 解析 .mjs/.wasm，
+      // 相对前缀 './ort/' 在 URL 构造器中非法，会回退为相对动态 import，
+      // 被 Vite 解析到 .vite/deps 或产物 assets 下的错误路径，导致后端加载失败。
+      ort.env.wasm.wasmPaths = new URL('./ort/', document.baseURI).href;
+      ort.env.wasm.numThreads = 1;
+
+      // 2. 动态按需引入分词器
+      const { AutoTokenizer, env } = await import('@huggingface/transformers');
+      if (!this.isCurrent(generation)) return false;
+      env.allowLocalModels = true;
+      env.allowRemoteModels = false;
+
+      // 3. 读取伴生配置
+      const configResp = await fetch('./models/reflex/runtime_config.json', { signal: controller.signal });
+      if (!configResp.ok) throw new Error('runtime_config.json not found');
+      const runtimeConfig = await configResp.json();
+      if (!this.isCurrent(generation)) return false;
+
+      // 4. 加载 Fast Tokenizer
+      const tokenizer = await AutoTokenizer.from_pretrained('./models/reflex');
+      if (!this.isCurrent(generation)) return false;
+
+      // 5. 加载 80MB INT8 ONNX 模型
+      const modelResp = await fetch('./models/reflex/model_int8.onnx', { signal: controller.signal });
+      if (!modelResp.ok) throw new Error('model_int8.onnx not found');
+      const modelBuffer = await modelResp.arrayBuffer();
+      if (!this.isCurrent(generation)) return false;
+
+      this.session = await ort.InferenceSession.create(modelBuffer, {
+        executionProviders: ['wasm'],
+        graphOptimizationLevel: 'all',
+      });
+      if (!this.isCurrent(generation)) return false;
+
+      this.tokenizer = tokenizer;
+      this.runtimeConfig = runtimeConfig;
+      this.isReady = true;
+      console.log('[Reflex] On-device ONNX Web engine ready.');
+      return true;
+    } catch (err) {
+      if (this.isCurrent(generation)) {
+        console.warn('[Reflex] Failed to initialize on-device Reflex model, fallback to Noop:', err);
       }
+      this.isReady = false;
+      return false;
+    } finally {
+      if (this.loadController === controller) this.loadController = null;
+      if (!this.isCurrent(generation)) await this.release();
     }
   }
 
-  private async init(): Promise<boolean> {
-    if (this.isReady) return true;
-    if (this.initializing) return this.initializing;
-
-    this.initializing = (async () => {
-      try {
-        console.log('[Reflex] Initializing on-device ONNX Web engine...');
-        // 1. 动态按需引入 onnxruntime-web
-        const ort = await import('onnxruntime-web');
-        // wasmPaths 必须是绝对 URL：ORT 内部用 new URL(filename, prefix) 解析 .mjs/.wasm，
-        // 相对前缀 './ort/' 在 URL 构造器中非法，会回退为相对动态 import，
-        // 被 Vite 解析到 .vite/deps 或产物 assets 下的错误路径，导致后端加载失败。
-        ort.env.wasm.wasmPaths = new URL('./ort/', document.baseURI).href;
-        ort.env.wasm.numThreads = 1;
-
-        // 2. 动态按需引入分词器
-        const { AutoTokenizer, env } = await import('@huggingface/transformers');
-        env.allowLocalModels = true;
-        env.allowRemoteModels = false;
-
-        // 3. 读取伴生配置
-        const configResp = await fetch('./models/reflex/runtime_config.json');
-        if (!configResp.ok) throw new Error('runtime_config.json not found');
-        this.runtimeConfig = await configResp.json();
-
-        // 4. 加载 Fast Tokenizer
-        this.tokenizer = await AutoTokenizer.from_pretrained('./models/reflex');
-
-        // 5. 加载 80MB INT8 ONNX 模型
-        const modelResp = await fetch('./models/reflex/model_int8.onnx');
-        if (!modelResp.ok) throw new Error('model_int8.onnx not found');
-        const modelBuffer = await modelResp.arrayBuffer();
-
-        this.session = await ort.InferenceSession.create(modelBuffer, {
-          executionProviders: ['wasm'],
-          graphOptimizationLevel: 'all',
-        });
-
-        this.isReady = true;
-        console.log('[Reflex] On-device ONNX Web engine ready.');
-        return true;
-      } catch (err) {
-        console.warn('[Reflex] Failed to initialize on-device Reflex model, fallback to Noop:', err);
-        this.isReady = false;
-        return false;
-      } finally {
-        this.initializing = null;
-      }
-    })();
-
-    return this.initializing;
+  private deferred(req: DecisionRequest): DecisionResult {
+    return {
+      selectedId: req.candidates[0]?.id ?? 'none',
+      selectedText: req.candidates[0]?.text ?? 'None',
+      confidence: 0,
+      defer: true,
+      scores: {},
+      latencyMs: 0,
+    };
   }
 
-  async decide(req: DecisionRequest): Promise<DecisionResult> {
-    const started = performance.now();
-    const ready = await this.init();
+  decide(req: DecisionRequest): Promise<DecisionResult> {
+    const generation = this.generation;
+    // 旁路观察允许放弃过载预测，不能无界积压请求及其上下文。
+    if (!this.enabled || this.pendingDecisions >= 32) return Promise.resolve(this.deferred(req));
+    this.pendingDecisions++;
+    return this.enqueue(async () => {
+      if (!this.isCurrent(generation)) return this.deferred(req);
+      const result = await this.decideCurrent(req, generation);
+      // 关闭前已开始的推理允许安全结束，但不得记录成有效预测。
+      return this.isCurrent(generation) ? result : this.deferred(req);
+    }).catch((err) => {
+      console.warn('[Reflex] Decision lifecycle error, fallback to Noop:', err);
+      return this.deferred(req);
+    }).finally(() => { this.pendingDecisions--; });
+  }
 
-    if (!ready || !this.session || !this.tokenizer) {
+  private async decideCurrent(req: DecisionRequest, generation: number): Promise<DecisionResult> {
+    const started = performance.now();
+    const ready = await this.init(generation);
+
+    if (!ready || !this.isCurrent(generation) || !this.session || !this.tokenizer) {
       // 未就绪时不记录假数据，返回 defer
-      return {
-        selectedId: req.candidates[0]?.id ?? 'none',
-        selectedText: req.candidates[0]?.text ?? 'None',
-        confidence: 0,
-        defer: true,
-        scores: {},
-        latencyMs: 0,
-      };
+      return this.deferred(req);
     }
 
     try {
@@ -113,6 +172,7 @@ export class ReflexWebPolicy implements DecisionPolicy {
         max_length: 512,
         truncation: true,
       });
+      if (!this.isCurrent(generation)) return this.deferred(req);
 
       const inputIdsArray = Array.from(encoded.input_ids.data as Iterable<number | bigint>, Number);
       const seqLen = inputIdsArray.length;
@@ -148,6 +208,7 @@ export class ReflexWebPolicy implements DecisionPolicy {
       }
 
       const ort = await import('onnxruntime-web');
+      if (!this.isCurrent(generation)) return this.deferred(req);
       const inputIdsTensor = new ort.Tensor('int64', BigInt64Array.from(inputIdsArray.map(BigInt)), [1, seqLen]);
       const attentionMaskTensor = new ort.Tensor('int64', new BigInt64Array(seqLen).fill(1n), [1, seqLen]);
       const candPositionsTensor = new ort.Tensor('int64', BigInt64Array.from(candPositions.slice(0, numCands).map(BigInt)), [1, numCands]);
@@ -204,15 +265,8 @@ export class ReflexWebPolicy implements DecisionPolicy {
       };
     } catch (err) {
       console.warn('[Reflex] Inference error:', err);
-      return {
-        selectedId: req.candidates[0]?.id ?? 'none',
-        selectedText: req.candidates[0]?.text ?? 'None',
-        confidence: 0,
-        defer: true,
-        scores: {},
-        // 推理失败不是有效模型输出：latencyMs 置 0，让影子门禁拒绝落盘，杜绝垃圾数据
-        latencyMs: 0,
-      };
+      // 推理失败不是有效模型输出：latencyMs 置 0，让影子门禁拒绝落盘。
+      return this.deferred(req);
     }
   }
 }
