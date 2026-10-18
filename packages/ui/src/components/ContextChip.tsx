@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useStore } from '../useStore.js';
 import type { TurnItem, TurnEntry, UserItem } from '../store.js';
 import { createBuiltinTools, type Host } from '@easycode/core';
@@ -179,8 +179,35 @@ const RING_C = 2 * Math.PI * RING_R;
 /** 上下文容量 chip + 面板（ZCode 同款）：当前会话在模型上下文窗口中的精确占用；紧凑态收敛为进度环 + 悬停浮出看板（TODOS #20） */
 export function ContextChip({ compact = false }: { compact?: boolean }) {
   const store = useStore();
+  const session = store.activeSession;
+  const activeId = session?.id;
+  const running = store.running;
   const [open, setOpen] = useState(false);
+  const [sampledVersion, setSampledVersion] = useState(store.version);
   const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!activeId || !running) return;
+    // 固定周期采样而非每个 delta 重置防抖，持续输出时也能更新，
+    // 尾部增量即使暂时停止也会在下一次采样中计入。
+    const timer = setInterval(() => setSampledVersion(store.version), 200);
+    return () => clearInterval(timer);
+  }, [store, activeId, running]);
+
+  const displayVersion = running ? sampledVersion : store.version;
+  // 只缓存显示值；模型切换仍直接调用同步 estimateSessionTokens()。
+  // 结构/配置/会话/运行状态改变时越过采样周期，立即刷新。
+  const estimate = useMemo(() => estimateSessionTokens(store), [
+    store,
+    activeId,
+    session?.providerId,
+    session?.model,
+    session?.workspaceRoot,
+    store.settings,
+    store.structureVersion,
+    running,
+    displayVersion,
+  ]);
 
   useEffect(() => {
     if (!open) return;
@@ -191,10 +218,9 @@ export function ContextChip({ compact = false }: { compact?: boolean }) {
     return () => document.removeEventListener('mousedown', onDown);
   }, [open]);
 
-  const session = store.activeSession;
   if (!session) return null;
 
-  const { used, windowTok, pct, rows } = estimateSessionTokens(store);
+  const { used, windowTok, pct, rows } = estimate;
   const isWarn = pct >= 80 && pct < 95;
   const isDanger = pct >= 95;
   const userTurns = store.items.filter((it) => it.kind === 'user').length;
