@@ -47,7 +47,7 @@
   - 内嵌 Web 预览面板（#44）：右侧滑出分栏、跟随后台任务增量刷新、任务条联动一键内嵌预览；
   - 启动白屏加固：修复特殊 token 字面量引起的分词崩溃，根组件挂载 `ErrorBoundary`。
 - **v0.2 核心蜕变（Tauri 壳）**：
-  - 引入 `packages/host-tauri` + `packages/desktop-tauri`，WebView 内存仅 ~30MB，完整引擎平滑迁移至 WebView 内。
+  - 引入 `packages/host-tauri` + `packages/desktop-tauri`，完整引擎迁移至 WebView。早期约 30MB 的观测未包含当前完整进程树与模型负载，不作为现行内存指标；2026-10-19 的测量口径与结果见 TODOS #55。
 
 ---
 
@@ -157,5 +157,5 @@
 
 ### 4.2 隔离 GUI 实测工装（无毒无污染实测法）
 在需要对桌面 UI 进行端到端全链路走查（如验证审批流、后台任务条、日志抽屉、内嵌预览）时，采用以下经过实战检验的工装方案：
-1. **数据目录隔离**：启动应用时指定 `EASYCODE_DATA_DIR` 环境变量（如 `EASYCODE_DATA_DIR=E:/AllProjects/EASYCODE/.tmp-test-data`），确保完全不触碰、不污染用户的真实生产配置与会话历史。
-2. **脚本化 LLM 驱动真实引擎**：在本地启动一个极简 Node 脚本，模拟 OpenAI 兼容的 `/chat/completions` SSE 流式端点，按测试剧本返回精确的 `tool_calls`。这样无需消耗真实 Token 即可驱动真实 Electron/Tauri 壳完整走通 UI 交互、组件展开与异常流。
+1. **数据目录隔离**：Electron 支持进程级 `EASYCODE_DATA_DIR`。Tauri 当前不读取该变量，使用临时 `--config '{"identifier":"com.easycode.desktop.qa"}'` 构建覆盖来隔离数据，并先核对 `host_info`；正式 identifier 保持不变。
+2. **证据分层**：真实模型/API/搜索验证使用用户已有基础设施。源码文本经真实 Store 回放可测 UI 调用次数、布局和生命周期，但不得把回放当作真实模型端到端验证；无需模型的宿主命令与审批可直接通过真实客户端验证。不得搭建持久 Mock 服务充当验收证据。

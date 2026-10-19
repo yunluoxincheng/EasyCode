@@ -1,7 +1,7 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { formatFileMention } from '@easycode/core';
-import { useStore } from '../useStore.js';
-import type { UserItem } from '../store.js';
+import { useStoreSlice } from '../useStore.js';
+import type { AppStore, UserItem } from '../store.js';
 import { ProjectSwitcher } from './ProjectSwitcher.js';
 import { ModelEffortPicker } from './ModelEffortPicker.js';
 import { UsageChip } from './UsageChip.js';
@@ -17,8 +17,13 @@ const TA_MAX_HEIGHT = 181;
 /** 顶部栏宽度低于该值时，用量/容量 chip 收敛为紧凑态（TODOS #20） */
 const BAR_COMPACT_WIDTH = 640;
 
+const selectComposer = (s: AppStore) => [
+  s.activeId, s.activeSession, s.activeSession?.workspaceRoot,
+  s.mode, s.running, s.composerInsertTick,
+];
+
 export function Composer() {
-  const store = useStore();
+  const store = useStoreSlice(selectComposer);
   const session = store.activeSession;
   const [text, setText] = useState('');
   const [dragOver, setDragOver] = useState(false);

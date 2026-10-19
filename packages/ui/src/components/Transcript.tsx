@@ -19,7 +19,20 @@ import { TestRunCard } from './TestRunCard.js';
 
 /** Markdown 渲染（含代码块样式钩子 + React.memo 浅比对优化）；streaming 时未闭合代码块跳过高亮分词（TODOS #45） */
 const Md = memo(function Md({ text, streaming = false }: { text: string; streaming?: boolean }) {
-  return <div className="md" dangerouslySetInnerHTML={{ __html: renderMarkdown(text, streaming) }} />;
+  const [sample, setSample] = useState(text);
+  const latest = useRef(text);
+  const sampleLongText = streaming && text.length >= 8000;
+  useEffect(() => { latest.current = text; }, [text]);
+  useEffect(() => {
+    if (!sampleLongText) return;
+    // 固定周期而非尾部防抖：持续输出和暂停都可补齐，完成时直接使用原文。
+    const timer = setInterval(() => setSample(latest.current), 80);
+    return () => clearInterval(timer);
+  }, [sampleLongText]);
+  // 替换/截断不是追加流，不得显示其它消息或上一次运行的旧文本。
+  const displayed = sampleLongText && text.startsWith(sample) ? sample : text;
+  const html = useMemo(() => renderMarkdown(displayed, streaming), [displayed, streaming]);
+  return <div className="md" dangerouslySetInnerHTML={{ __html: html }} />;
 });
 
 /** 思考过程折叠卡片：统一终端极客风、支持吸顶、一键复制与字符统计 */
@@ -710,6 +723,17 @@ const TurnView = memo(function TurnView({ turn, live, revision, jumpTick, checkp
     if (!el || !live || !expanded || !localAtBottomRef.current) return;
     el.scrollTop = el.scrollHeight;
   }, [turn.items.length, revision, live, expanded]);
+
+  // Markdown 的采样更新可晚于父回合提交；直接跟随内容尺寸而非只跟随 Store 版本。
+  useEffect(() => {
+    const el = bodyRef.current;
+    if (!el || !live || !expanded) return;
+    const observer = new ResizeObserver(() => {
+      if (localAtBottomRef.current) el.scrollTop = el.scrollHeight;
+    });
+    for (const child of Array.from(el.children)) observer.observe(child);
+    return () => observer.disconnect();
+  }, [live, expanded, turn.items.length]);
 
   // 「↓ 回到底部」双层视口联动（TODOS #46）：仅在显式联动信号时重置局部贴底锁定
   // 并同步内部视窗至最底；挂载与状态切换不做无条件重置，保留用户上翻阅读的意图

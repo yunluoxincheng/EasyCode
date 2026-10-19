@@ -147,5 +147,5 @@
 - **标准验证姿势**：
   1. `pnpm -r run build`（必须确保 UI dist 已重建）；
   2. 启动桌面应用执行端到端走查；
-  3. 采用数据目录隔离（`EASYCODE_DATA_DIR`）保护用户真实数据；
+  3. 隔离数据目录：Electron 使用进程级 `EASYCODE_DATA_DIR`；Tauri 使用临时 identifier 构建覆盖并先核对 `host_info`，当前不支持该环境变量；
   4. 交付时附带具体、可复现的操作走查清单。

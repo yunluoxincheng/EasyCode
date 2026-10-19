@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { MODEL_FILES, ORT_FILES } from './reflex-assets.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -13,13 +14,6 @@ const sourceDir =
 
 const ortSourceDir = path.resolve(__dirname, '../node_modules/onnxruntime-web/dist');
 
-const REQUIRED_FILES = [
-  'model_int8.onnx',
-  'tokenizer.json',
-  'tokenizer_config.json',
-  'runtime_config.json',
-];
-
 console.log('[copy-models] Source directory:', sourceDir);
 console.log('[copy-models] Target directory:', targetDir);
 
@@ -28,7 +22,7 @@ if (!fs.existsSync(sourceDir)) {
 } else {
   fs.mkdirSync(targetDir, { recursive: true });
 
-  for (const fn of REQUIRED_FILES) {
+  for (const fn of MODEL_FILES) {
     const src = path.join(sourceDir, fn);
     const dst = path.join(targetDir, fn);
     if (fs.existsSync(src)) {
@@ -55,8 +49,7 @@ if (!fs.existsSync(sourceDir)) {
 // 拷贝 onnxruntime-web wasm 文件
 if (fs.existsSync(ortSourceDir)) {
   fs.mkdirSync(ortTargetDir, { recursive: true });
-  const files = fs.readdirSync(ortSourceDir).filter((f) => f.endsWith('.wasm') || f.endsWith('.mjs'));
-  for (const fn of files) {
+  for (const fn of ORT_FILES) {
     const src = path.join(ortSourceDir, fn);
     const dst = path.join(ortTargetDir, fn);
     if (!fs.existsSync(dst) || fs.statSync(src).size !== fs.statSync(dst).size) {

@@ -85,12 +85,12 @@
 pnpm install
 pnpm -r run build
 
-# 2. 运行单测（core 核心逻辑全覆盖）
-pnpm --filter @easycode/core test
+# 2. 运行现有 core + engine 测试
+pnpm test
 
 # 3. 启动桌面端调试
 pnpm --filter @easycode/desktop run dev         # Electron 调试壳
-pnpm --filter @easycode/desktop-tauri run tauri:build --debug # Tauri 调试构建
+pnpm --filter @easycode/desktop-tauri run tauri:build # Tauri 调试构建（脚本已含 --debug）
 
 # 4. Git 规范操作流程
 git status && git reflog -n 5                   # 先确认现场

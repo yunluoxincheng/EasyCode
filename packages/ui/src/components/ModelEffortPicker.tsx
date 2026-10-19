@@ -58,7 +58,7 @@ export function ModelEffortPicker() {
     const sourceModel = session.model;
     try {
       // 统计模块未加载时必须等待，不能跳过模型切换的上下文容量保护。
-      const { estimateSessionTokens, DEFAULT_WINDOW } = await import('./ContextChip.js');
+      const { estimateSessionTokens, DEFAULT_WINDOW } = await import('../context-tokens.js');
       const active = store.activeSession;
       if (
         version !== selectionVersion.current || store.view !== 'chat' || active?.id !== sourceId ||

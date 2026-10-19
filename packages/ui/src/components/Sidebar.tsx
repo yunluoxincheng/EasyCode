@@ -1,7 +1,13 @@
 import { useState, useRef, useEffect } from 'react';
-import { useStore } from '../useStore.js';
+import { useStoreSlice } from '../useStore.js';
+import type { AppStore } from '../store.js';
 import { UpdateBadge } from './UpdateBadge.js';
 import { WorkspaceFileTree } from './WorkspaceFileTree.js';
+
+const selectSidebar = (s: AppStore) => [
+  s.sessions, s.settings, s.activeId, s.sidebarCollapsed, s.activeProjectId,
+  ...s.sessions.map((session) => s.getSessionStatus(session.id)),
+];
 
 type SessionMetaLite = {
   id: string;
@@ -322,7 +328,7 @@ function ProjectTreeHeader({
 
 /** 左侧栏（Codex 桌面端布局）：项目树分组（含属于该项目的会话）+ 独立自由会话 */
 export function Sidebar() {
-  const store = useStore();
+  const store = useStoreSlice(selectSidebar);
   const collapsed = store.sidebarCollapsed;
   const newSession = (): void => void store.newSession().catch((err) => store.showToast(err instanceof Error ? err.message : String(err)));
 

@@ -1,5 +1,6 @@
-import React, { useEffect, useState } from 'react';
-import { useStore } from './useStore.js';
+import React, { useEffect } from 'react';
+import { useStoreSlice } from './useStore.js';
+import type { AppStore } from './store.js';
 import { Sidebar } from './components/Sidebar.js';
 import { Transcript } from './components/Transcript.js';
 import { Composer } from './components/Composer.js';
@@ -16,8 +17,13 @@ import { TurnUndoModal } from './components/TurnUndoModal.js';
 import { FilePreviewModal } from './components/WorkspaceFileTree.js';
 import { updater } from './updater.js';
 
+const selectApp = (s: AppStore) => [
+  s.view, s.settings, s.createProjectOpen, s.pendingModelSwitch, s.gitModalOpen,
+  s.turnUndoModalTurnId, s.filePreviewPath, s.toast, s.toastKind,
+];
+
 export function App() {
-  const store = useStore();
+  const store = useStoreSlice(selectApp);
 
   useEffect(() => {
     store.init();
