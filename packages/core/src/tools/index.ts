@@ -82,6 +82,8 @@ export interface ToolContext {
   onFileChange?: (change: FileChangeEvent) => Promise<void> | void;
   /** 权限规则（TODOS #47）：全局 + 项目级规则的并集，命中即优先于审批模式生效 */
   permissionRules?: PermissionRule[];
+  /** 守卫/审批及排队结束，实际工具函数运行前通知。 */
+  onExecutionStart?: () => void;
 }
 
 export interface Tool {
@@ -165,6 +167,8 @@ export interface ToolExecution {
   approved: boolean;
   isError: boolean;
   durationMs: number;
+  /** executionMs 缺省表示工具函数未运行，0 则表示已运行但不足 1ms。 */
+  timing?: { approvalMs: number; executionMs?: number };
 }
 
 /** 固定安全 Shell 动词白名单，未识别动词一律收敛至 shell_other，绝不透传私有文本 */
@@ -347,12 +351,16 @@ export async function executeTool(
     verifiedRelative !== undefined
       ? { ...(permissionInput as Record<string, unknown>) }
       : validated.value;
+  const approvalStarted = performance.now();
   const approved = requirement.needApproval
     ? await ctx.approval.request(name, approvalInput, {
         force: requirement.force,
         reason: requirement.reason,
       })
     : true;
+  const timing: NonNullable<ToolExecution['timing']> = {
+    approvalMs: Math.max(0, Math.round(performance.now() - approvalStarted)),
+  };
   safetyObservation?.actual({
     // 审批模式是配置，不是 Agent 对语义风险的判断；不可参与模型一致率。
     // 规则放行/强制询问优先于模式描述，避免把「未发生审批」写成 Approval requested 污染影子统计
@@ -372,6 +380,7 @@ export async function executeTool(
       approved: false,
       isError: false,
       durationMs: Date.now() - started,
+      timing,
     };
   }
   try {
@@ -404,6 +413,7 @@ export async function executeTool(
           approved: false,
           isError: false,
           durationMs: Date.now() - started,
+          timing,
         };
       }
     }
@@ -412,7 +422,15 @@ export async function executeTool(
       verifiedRelative !== undefined
         ? { ...(permissionInput as Record<string, unknown>) }
         : validated.value;
-    const run = () => tool.execute(executeInput, ctx);
+    const run = async () => {
+      ctx.onExecutionStart?.();
+      const executionStarted = performance.now();
+      try {
+        return await tool.execute(executeInput, ctx);
+      } finally {
+        timing.executionMs = Math.max(0, Math.round(performance.now() - executionStarted));
+      }
+    };
     const content =
       registry.isSensitive(name) && ctx.workspaceLock
         ? await ctx.workspaceLock.withLock(run, ctx.signal)
@@ -424,6 +442,7 @@ export async function executeTool(
       approved: true,
       isError: isCommandFailure,
       durationMs: Date.now() - started,
+      timing,
     };
     safetyObservation?.outcome(getToolExecutionOutcome(name, execution));
     return execution;
@@ -434,6 +453,7 @@ export async function executeTool(
       approved: true,
       isError: true,
       durationMs: Date.now() - started,
+      timing,
     };
   }
 }

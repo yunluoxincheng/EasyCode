@@ -8,7 +8,11 @@ export type AgentEvent =
   | { type: 'assistant_start' }
   | { type: 'text_delta'; delta: string }
   | { type: 'reasoning_delta'; delta: string }
+  /** 仅提示模型正在生成调用，不含参数，不进入审批或执行。 */
+  | { type: 'tool_call_preparing'; callId: string; name: string }
   | { type: 'tool_call_start'; call: ToolCallBlock }
+  /** 已通过守卫/审批并取得执行锁，实际工具函数即将运行。 */
+  | { type: 'tool_execution_start'; callId: string }
   | {
       type: 'tool_result';
       callId: string;
@@ -16,6 +20,7 @@ export type AgentEvent =
       content: string;
       isError: boolean;
       durationMs: number;
+      timing?: { approvalMs: number; executionMs?: number };
       /**
        * 是否被批准执行（TODOS #47）：`false` 表示被用户拒绝或被权限规则拒绝。
        * UI 必须据此渲染「拒绝」状态，**不得**通过匹配中文提示文本判断执行结果。

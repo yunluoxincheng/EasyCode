@@ -202,18 +202,31 @@ function ToolDiff({ name, input }: { name: string; input: unknown }) {
   return null;
 }
 
+/** 旧事件只有总耗时；新事件额外提供真实阶段计时，不从 UI 时间戳猜测执行耗时。 */
+function ToolDuration({ item, className }: { item: ToolItem; className: string }) {
+  if (item.durationMs === undefined) return null;
+  if (!item.timing) return <span className={className}>总 {item.durationMs}ms</span>;
+  const { approvalMs, executionMs } = item.timing;
+  const otherMs = Math.max(0, item.durationMs - approvalMs - (executionMs ?? 0));
+  const executed = executionMs !== undefined;
+  return <span className={className}
+    title={`总计 ${item.durationMs}ms；审批 ${approvalMs}ms；${executed ? `执行 ${executionMs}ms` : '未执行'}；检查/排队 ${otherMs}ms`}>
+    {executed ? `执行 ${executionMs}ms` : '未执行'}{approvalMs > 0 ? ` · 审批 ${approvalMs}ms` : ''}
+  </span>;
+}
+
 /** 工具调用卡片 */
 function ToolCard({ item }: { item: ToolItem }) {
   const [open, setOpen] = useState(false);
   const statusIcon =
-    item.status === 'running' ? 'RUN' : item.status === 'ok' ? 'OK' : item.status === 'denied' ? 'DENY' : 'ERR';
+    item.status === 'running' ? (item.executionStartedAt === undefined ? 'WAIT' : 'RUN') : item.status === 'ok' ? 'OK' : item.status === 'denied' ? 'DENY' : 'ERR';
   return (
     <div className={`tool-card status-${item.status} ${open ? 'open' : ''}`}>
       <button className="tool-head" onClick={() => setOpen(!open)}>
         <span className={`tool-status ${item.status}`}>{statusIcon}</span>
         <span className="tool-name">{TOOL_LABELS[item.name] ?? item.name}</span>
         <span className="tool-summary">{inputSummary(item.name, item.input)}</span>
-        {item.durationMs !== undefined && <span className="tool-duration">{item.durationMs}ms</span>}
+        <ToolDuration item={item} className="tool-duration" />
         <span className="tool-chevron">{open ? '▾' : '▸'}</span>
       </button>
       {open && (
@@ -269,7 +282,7 @@ function TerminalCard({ item }: { item: ToolItem }) {
     <div className={`term-card status-${statusClass} ${open ? 'open' : 'closed'}`}>
       <button className="term-head" onClick={() => setOpen(!open)} type="button">
         <span className={`term-status-badge ${statusClass}`}>
-          {isRunning ? 'RUN' : parsed ? (parsed.isSuccess ? 'OK' : 'ERR') : statusClass.toUpperCase()}
+          {isRunning ? (item.executionStartedAt === undefined ? 'WAIT' : 'RUN') : parsed ? (parsed.isSuccess ? 'OK' : 'ERR') : statusClass.toUpperCase()}
         </span>
         {isBackground && <span className="term-bg-badge">BG</span>}
         <span className="term-cmd-preview">$ {command}</span>
@@ -278,7 +291,7 @@ function TerminalCard({ item }: { item: ToolItem }) {
             exit: {parsed.exitCode}
           </span>
         )}
-        {item.durationMs !== undefined && <span className="term-duration">{item.durationMs}ms</span>}
+        <ToolDuration item={item} className="term-duration" />
         <span className="spacer" />
         <span className="term-chevron">{open ? '▾' : '▸'}</span>
       </button>
@@ -291,7 +304,7 @@ function TerminalCard({ item }: { item: ToolItem }) {
           <div className="term-screen">
             {isRunning && !parsed && (
               <div className="term-running-line">
-                <span className="term-prompt">$</span> {command} <span className="term-cursor">█</span>
+                <span className="term-prompt">{item.executionStartedAt === undefined ? '待执行 $' : '$'}</span> {command} <span className="term-cursor">█</span>
               </div>
             )}
             {parsed && (
@@ -575,7 +588,8 @@ function LiveTicker() {
   const [elapsed, setElapsed] = useState('0.0');
   const activeTool = store.activeTool;
   const pendingApproval = store.pendingApproval;
-  const startedAt = activeTool?.startedAt;
+  const preparingTool = store.preparingTool;
+  const startedAt = activeTool?.executionStartedAt;
 
   useEffect(() => {
     if (!startedAt) {
@@ -610,11 +624,20 @@ function LiveTicker() {
       <div className="live-ticker running">
         <span className="live-ticker-prefix">❯</span>
         <span className="live-ticker-badge run">[{label}]</span>
-        <span className="live-ticker-text">正在执行: {summary}</span>
-        <span className="live-ticker-time">(已耗时 {elapsed}s)</span>
+        <span className="live-ticker-text">{startedAt === undefined ? '正在检查并等待执行: ' : '正在执行: '}{summary}</span>
+        {startedAt !== undefined && <span className="live-ticker-time">(执行 {elapsed}s)</span>}
         <span className="live-ticker-cursor">█</span>
       </div>
     );
+  }
+
+  if (preparingTool) {
+    return <div className="live-ticker waiting">
+      <span className="live-ticker-prefix">❯</span>
+      <span className="live-ticker-badge wait">[{TOOL_LABELS[preparingTool.name] ?? preparingTool.name}]</span>
+      <span className="live-ticker-text">正在生成工具调用参数...</span>
+      <span className="live-ticker-cursor">█</span>
+    </div>;
   }
 
   return (

@@ -11,10 +11,12 @@ export interface StreamRequest {
   reasoningEffort?: string;
 }
 
-/** Provider 流式回调事件（文本/思考实时流出；工具调用在轮次结束后经 blocks 返回） */
+/** 文本/思考及工具生成元数据实时流出；可执行的完整工具调用仅在轮次结束后经 blocks 返回。 */
 export type ProviderEvent =
   | { type: 'text_delta'; delta: string }
-  | { type: 'reasoning_delta'; delta: string };
+  | { type: 'reasoning_delta'; delta: string }
+  /** 仅生成状态；不包含参数，不能触发审批或执行。 */
+  | { type: 'tool_call_preparing'; callId: string; name: string };
 
 export interface TurnResult {
   blocks: AssistantBlock[];
