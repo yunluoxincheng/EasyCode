@@ -193,9 +193,16 @@ test('Mutex & WorkspaceLockManager: FIFO 队列互斥与路径标准化', async 
   assert.deepEqual(log, ['start A', 'end A', 'start B', 'end B', 'start C', 'end C']);
 
   const wm = new WorkspaceLockManager();
-  const lock1 = wm.getLock('E:\\MyProject\\src\\');
-  const lock2 = wm.getLock('e:/myproject/src');
-  assert.equal(lock1, lock2, '不同格式的相同路径应当共享同一 Mutex 实例');
+  if (process.platform === 'win32') {
+    const lock1 = wm.getLock('E:\\MyProject\\src\\');
+    const lock2 = wm.getLock('e:/myproject/src');
+    assert.equal(lock1, lock2, 'Windows 路径大小写与分隔符差异应当共享同一 Mutex 实例');
+  } else {
+    const lock1 = wm.getLock('/workspace/MyProject/src/');
+    const lock2 = wm.getLock('/workspace/MyProject/src');
+    assert.equal(lock1, lock2, '非 Windows 路径尾斜杠差异应当共享同一 Mutex 实例');
+    assert.notEqual(lock1, wm.getLock('/workspace/myproject/src'), '非 Windows 路径应保留大小写差异');
+  }
 });
 
 test('AgentServer: 多会话并发执行互不阻塞', async () => {

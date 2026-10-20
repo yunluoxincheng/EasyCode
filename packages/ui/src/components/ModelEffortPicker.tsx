@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useStore } from '../useStore.js';
 import { fmtCtx } from '../format.js';
-import { estimateSessionTokens, DEFAULT_WINDOW } from './ContextChip.js';
 
 const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
 
@@ -11,6 +10,9 @@ export function ModelEffortPicker() {
   const session = store.activeSession;
   const [open, setOpen] = useState<'model' | 'effort' | null>(null);
   const ref = useRef<HTMLDivElement>(null);
+  const selectionVersion = useRef(0);
+
+  useEffect(() => () => { selectionVersion.current++; }, [session?.id]);
 
   useEffect(() => {
     if (!open) return;
@@ -48,48 +50,51 @@ export function ModelEffortPicker() {
     }))
     .filter((p) => p.models.length > 0);
 
-  const pickModel = (m: string): void => {
+  const pickTarget = async (providerId: string, model: string, switchProvider: boolean): Promise<void> => {
     setOpen(null);
-    const targetModelCfg = (currentEntry?.models ?? []).find((mod) => mod.name === m);
-    const targetWindow = targetModelCfg?.contextWindow ?? currentEntry?.contextWindow ?? DEFAULT_WINDOW;
-    const { used } = estimateSessionTokens(store, targetWindow);
-    if (used > targetWindow * 0.8) {
-      store.openModelSwitchGuard({
-        sessionId: session.id,
-        providerId: session.providerId,
-        providerLabel: currentProviderLabel,
-        model: m,
-        targetWindow,
-        currentTokens: used,
-      });
-      return;
+    const version = ++selectionVersion.current;
+    const sourceId = session.id;
+    const sourceProvider = session.providerId;
+    const sourceModel = session.model;
+    try {
+      // 统计模块未加载时必须等待，不能跳过模型切换的上下文容量保护。
+      const { estimateSessionTokens, DEFAULT_WINDOW } = await import('../context-tokens.js');
+      const active = store.activeSession;
+      if (
+        version !== selectionVersion.current || store.view !== 'chat' || active?.id !== sourceId ||
+        active.providerId !== sourceProvider || active.model !== sourceModel
+      ) return;
+      const targetEntry = store.settings?.providers[providerId];
+      if (!targetEntry || targetEntry.enabled === false) return;
+      if (model && !(targetEntry.models ?? []).some((mod) => mod.name === model && mod.enabled !== false)) return;
+      const targetModelCfg = (targetEntry?.models ?? []).find((mod) => mod.name === model);
+      const targetWindow = targetModelCfg?.contextWindow ?? targetEntry?.contextWindow ?? DEFAULT_WINDOW;
+      const { used } = estimateSessionTokens(store, targetWindow);
+      if (used > targetWindow * 0.8) {
+        store.openModelSwitchGuard({
+          sessionId: sourceId,
+          providerId,
+          providerLabel: store.providerLabelOf(providerId),
+          model,
+          targetWindow,
+          currentTokens: used,
+        });
+        return;
+      }
+      if (switchProvider) {
+        await store.setSessionProvider(sourceId, providerId, model);
+      } else {
+        await store.setSessionModel(sourceId, model);
+      }
+    } catch (err) {
+      if (version === selectionVersion.current && store.view === 'chat' && store.activeId === sourceId) {
+        store.showToast(err instanceof Error ? err.message : String(err), 'err');
+      }
     }
-    void store
-      .setSessionModel(session.id, m)
-      .catch((err) => store.showToast(err instanceof Error ? err.message : String(err)));
   };
 
-  const pickProvider = (providerId: string, model: string): void => {
-    setOpen(null);
-    const targetEntry = settings?.providers[providerId];
-    const targetModelCfg = (targetEntry?.models ?? []).find((mod) => mod.name === model);
-    const targetWindow = targetModelCfg?.contextWindow ?? targetEntry?.contextWindow ?? DEFAULT_WINDOW;
-    const { used } = estimateSessionTokens(store, targetWindow);
-    if (used > targetWindow * 0.8) {
-      store.openModelSwitchGuard({
-        sessionId: session.id,
-        providerId,
-        providerLabel: store.providerLabelOf(providerId),
-        model,
-        targetWindow,
-        currentTokens: used,
-      });
-      return;
-    }
-    void store
-      .setSessionProvider(session.id, providerId, model)
-      .catch((err) => store.showToast(err instanceof Error ? err.message : String(err)));
-  };
+  const pickModel = (model: string): void => { void pickTarget(session.providerId, model, false); };
+  const pickProvider = (providerId: string, model: string): void => { void pickTarget(providerId, model, true); };
 
   return (
     <div className="me-picker" ref={ref}>

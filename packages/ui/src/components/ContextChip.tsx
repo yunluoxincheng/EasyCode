@@ -1,175 +1,9 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useStore } from '../useStore.js';
-import type { TurnItem, TurnEntry, UserItem } from '../store.js';
-import { createBuiltinTools, type Host } from '@easycode/core';
-import {
-  buildSystemPrompt,
-  supportsNativeWebSearch,
-  validWebSearchBackend,
-} from '@easycode/engine';
-import { encode } from 'gpt-tokenizer/encoding/o200k_base';
+import { estimateSessionTokens } from '../context-tokens.js';
 
-/** 精确 token 计数：o200k_base 编码（OpenAI 当前分词规范，对其他模型也是良好近似） */
-function count(text: string): number {
-  if (!text) return 0;
-  // 会话/文件内容可能含 <|im_start|> 等特殊 token 字面量，默认会抛 "Disallowed special token"，
-  // 渲染期异常会卸载整棵 React 树（白屏）。这里只做估算，一律按普通文本计数。
-  return encode(text, { disallowedSpecial: new Set() }).length;
-}
 function fmtTk(n: number): string {
   return n >= 10000 ? `${(n / 10000).toFixed(1)}万` : n.toLocaleString();
-}
-
-/** 缓存已定型历史回合（turn.durationMs !== undefined）的总 token 计数 */
-const completedTurnTokensCache = new WeakMap<object, number>();
-/** 缓存已定型条目/代码块的 token 计数 */
-const itemTokensCache = new WeakMap<object, number>();
-
-/** 静态配置（系统工具规格 + 系统提示词）Token 计数缓存 */
-interface StaticTokensCache {
-  key: string;
-  toolsTokens: number;
-  promptTokens: number;
-}
-let staticTokensCache: StaticTokensCache | null = null;
-
-function countTurnItem(it: TurnEntry, isLive: boolean): number {
-  if (it.kind === 'tool') {
-    // 运行中的工具结果可能变化，完成后结果固定
-    if (it.status !== 'running') {
-      const cached = itemTokensCache.get(it);
-      if (cached !== undefined) return cached;
-      const tok = count(JSON.stringify(it.input ?? {})) + count(it.result ?? '');
-      itemTokensCache.set(it, tok);
-      return tok;
-    }
-    return count(JSON.stringify(it.input ?? {})) + count(it.result ?? '');
-  }
-
-  if (it.kind === 'approval') {
-    const cached = itemTokensCache.get(it);
-    if (cached !== undefined) return cached;
-    const tok = count(JSON.stringify(it.input ?? {}));
-    itemTokensCache.set(it, tok);
-    return tok;
-  }
-
-  if (it.kind === 'assistant') {
-    let sum = 0;
-    for (let i = 0; i < it.blocks.length; i++) {
-      const b = it.blocks[i];
-      // 最后一个 block 如果处于当前 live 运行态，可能在流式追加中，不缓存；已闭合 block 长期缓存
-      const isLiveBlock = isLive && i === it.blocks.length - 1;
-      if (!isLiveBlock) {
-        let tok = itemTokensCache.get(b);
-        if (tok === undefined) {
-          tok = count(b.text);
-          itemTokensCache.set(b, tok);
-        }
-        sum += tok;
-      } else {
-        sum += count(b.text);
-      }
-    }
-    return sum;
-  }
-
-  return 0;
-}
-
-function countTurn(turn: TurnItem, isLive: boolean): number {
-  if (!isLive && turn.durationMs !== undefined) {
-    const cached = completedTurnTokensCache.get(turn);
-    if (cached !== undefined) return cached;
-  }
-  let sum = 0;
-  for (const it of turn.items) {
-    sum += countTurnItem(it, isLive);
-  }
-  if (!isLive && turn.durationMs !== undefined) {
-    completedTurnTokensCache.set(turn, sum);
-  }
-  return sum;
-}
-
-function countUserItem(it: UserItem): number {
-  const cached = itemTokensCache.get(it);
-  if (cached !== undefined) return cached;
-  const tok = count(it.text);
-  itemTokensCache.set(it, tok);
-  return tok;
-}
-
-export const DEFAULT_WINDOW = 1_000_000;
-
-/** 估算当前会话的总 Token 占用与窗口比例（全量复用多级 WeakMap 缓存） */
-export function estimateSessionTokens(
-  store: ReturnType<typeof useStore>,
-  overrideWindow?: number,
-): { used: number; windowTok: number; pct: number; rows: Array<{ label: string; tokens: number }> } {
-  const session = store.activeSession;
-  if (!session) {
-    return { used: 0, windowTok: overrideWindow ?? DEFAULT_WINDOW, pct: 0, rows: [] };
-  }
-
-  const provider = store.settings?.providers[session.providerId];
-  const effectiveModel =
-    session.model || (provider?.models ?? []).find((m) => m.enabled !== false)?.name || '';
-  const modelCfg = (provider?.models ?? []).find((m) => m.name === effectiveModel);
-  const windowTok =
-    overrideWindow ?? modelCfg?.contextWindow ?? provider?.contextWindow ?? DEFAULT_WINDOW;
-
-  const rows: Array<{ label: string; tokens: number }> = [];
-  let msgTokens = 0;
-  for (const it of store.items) {
-    if (it.kind === 'user') {
-      msgTokens += countUserItem(it);
-    } else if (it.kind === 'turn') {
-      const isLive = store.running && it.durationMs === undefined;
-      msgTokens += countTurn(it, isLive);
-    }
-  }
-  rows.push({ label: '消息', tokens: msgTokens });
-
-  const wsCfg = store.settings?.webSearch;
-  const searchOn =
-    (modelCfg?.capabilities ?? ['system']).includes('websearch') && wsCfg?.enabled === true;
-  const useNativeSearch =
-    searchOn && supportsNativeWebSearch(effectiveModel, provider?.kind ?? 'openai-compatible');
-  const builtinSearch =
-    searchOn && !useNativeSearch && validWebSearchBackend(wsCfg)
-      ? {
-          webSearch: {
-            backend: wsCfg!.backend,
-            searxngUrl: wsCfg!.searxngUrl,
-            tavilyApiKey: wsCfg!.tavilyApiKey,
-            maxResults: wsCfg!.maxResults,
-          },
-        }
-      : undefined;
-
-  const staticCacheKey = `${effectiveModel}:${provider?.kind}:${session.workspaceRoot}:${searchOn}:${useNativeSearch}:${wsCfg?.backend}`;
-  if (!staticTokensCache || staticTokensCache.key !== staticCacheKey) {
-    const toolsTok = count(JSON.stringify(createBuiltinTools(builtinSearch).listSpecs()));
-    const stubHost = {
-      paths: { sep: navigator.platform.includes('Win') ? '\\' : '/' },
-    } as unknown as Host;
-    const promptTok = count(buildSystemPrompt(stubHost, session.workspaceRoot, { webSearch: searchOn }));
-    staticTokensCache = {
-      key: staticCacheKey,
-      toolsTokens: toolsTok,
-      promptTokens: promptTok,
-    };
-  }
-  rows.push({ label: '系统工具', tokens: staticTokensCache.toolsTokens });
-  rows.push({ label: '系统提示词', tokens: staticTokensCache.promptTokens });
-
-  const other = store.items.length * 4;
-  rows.push({ label: '其他', tokens: other });
-
-  const used = rows.reduce((a, r) => a + r.tokens, 0);
-  const pct = Math.min(100, (used / windowTok) * 100);
-  return { used, windowTok, pct, rows };
 }
 
 /** 紧凑态进度环（TODOS #20）：半径与周长，SVG 逆时针从顶部起描 */
@@ -179,8 +13,35 @@ const RING_C = 2 * Math.PI * RING_R;
 /** 上下文容量 chip + 面板（ZCode 同款）：当前会话在模型上下文窗口中的精确占用；紧凑态收敛为进度环 + 悬停浮出看板（TODOS #20） */
 export function ContextChip({ compact = false }: { compact?: boolean }) {
   const store = useStore();
+  const session = store.activeSession;
+  const activeId = session?.id;
+  const running = store.running;
   const [open, setOpen] = useState(false);
+  const [sampledVersion, setSampledVersion] = useState(store.version);
   const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!activeId || !running) return;
+    // 固定周期采样而非每个 delta 重置防抖，持续输出时也能更新，
+    // 尾部增量即使暂时停止也会在下一次采样中计入。
+    const timer = setInterval(() => setSampledVersion(store.version), 200);
+    return () => clearInterval(timer);
+  }, [store, activeId, running]);
+
+  const displayVersion = running ? sampledVersion : store.version;
+  // 只缓存显示值；模型切换仍直接调用同步 estimateSessionTokens()。
+  // 结构/配置/会话/运行状态改变时越过采样周期，立即刷新。
+  const estimate = useMemo(() => estimateSessionTokens(store), [
+    store,
+    activeId,
+    session?.providerId,
+    session?.model,
+    session?.workspaceRoot,
+    store.settings,
+    store.structureVersion,
+    running,
+    displayVersion,
+  ]);
 
   useEffect(() => {
     if (!open) return;
@@ -191,10 +52,9 @@ export function ContextChip({ compact = false }: { compact?: boolean }) {
     return () => document.removeEventListener('mousedown', onDown);
   }, [open]);
 
-  const session = store.activeSession;
   if (!session) return null;
 
-  const { used, windowTok, pct, rows } = estimateSessionTokens(store);
+  const { used, windowTok, pct, rows } = estimate;
   const isWarn = pct >= 80 && pct < 95;
   const isDanger = pct >= 95;
   const userTurns = store.items.filter((it) => it.kind === 'user').length;

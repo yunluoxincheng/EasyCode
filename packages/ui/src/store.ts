@@ -1535,15 +1535,21 @@ export class AppStore {
 
       case 'approval_resolved': {
         if (isActive) this.flushPendingNotify();
-        // 同时兼容回合内与顶层条目：旧会话或异常时序下审批卡片可能不在当前回合里，
-        // 只查 currentTurn 会让卡片永远停在「等待批准」
-        const approval =
-          state.currentTurn?.items.find(
-            (i): i is ApprovalItem => i.kind === 'approval' && i.requestId === event.requestId,
-          ) ??
-          state.items.find(
-            (i): i is ApprovalItem => i.kind === 'approval' && i.requestId === event.requestId,
-          );
+        // test_loop_done 可能先于 approval_resolved 到达；currentTurn 已清空时，
+        // 仍须按请求 ID 更新历史回合内的卡片，不能只查顶层条目。
+        let approval = state.currentTurn?.items.find(
+          (i): i is ApprovalItem => i.kind === 'approval' && i.requestId === event.requestId,
+        );
+        for (let index = state.items.length - 1; index >= 0 && !approval; index--) {
+          const item = state.items[index];
+          if (item.kind === 'turn') {
+            approval = item.items.find(
+              (i): i is ApprovalItem => i.kind === 'approval' && i.requestId === event.requestId,
+            );
+          } else if (item.kind === 'approval' && item.requestId === event.requestId) {
+            approval = item;
+          }
+        }
         if (approval) approval.status = event.approved ? 'approved' : 'denied';
         if (state.running) {
           state.status = 'running';

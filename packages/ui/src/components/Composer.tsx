@@ -1,22 +1,29 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { formatFileMention } from '@easycode/core';
-import { useStore } from '../useStore.js';
-import type { UserItem } from '../store.js';
+import { useStoreSlice } from '../useStore.js';
+import type { AppStore, UserItem } from '../store.js';
 import { ProjectSwitcher } from './ProjectSwitcher.js';
 import { ModelEffortPicker } from './ModelEffortPicker.js';
 import { UsageChip } from './UsageChip.js';
-import { ContextChip } from './ContextChip.js';
 import { RulesChip } from './RulesChip.js';
 import { BUILTIN_SLASH_COMMANDS, type SlashCommand } from '../commands/index.js';
 import { downloadFile, getExportFilename, sessionToMarkdown } from '../utils/exportSession.js';
+
+// 精确分词词表较大，仅在存在活动会话时加载。
+const ContextChip = lazy(() => import('./ContextChip.js').then((mod) => ({ default: mod.ContextChip })));
 
 /** 自适应撑高的高度上限（TODOS #20）：约 8 行，超出后出纵向滚动条 */
 const TA_MAX_HEIGHT = 181;
 /** 顶部栏宽度低于该值时，用量/容量 chip 收敛为紧凑态（TODOS #20） */
 const BAR_COMPACT_WIDTH = 640;
 
+const selectComposer = (s: AppStore) => [
+  s.activeId, s.activeSession, s.activeSession?.workspaceRoot,
+  s.mode, s.running, s.composerInsertTick,
+];
+
 export function Composer() {
-  const store = useStore();
+  const store = useStoreSlice(selectComposer);
   const session = store.activeSession;
   const [text, setText] = useState('');
   const [dragOver, setDragOver] = useState(false);
@@ -789,7 +796,11 @@ export function Composer() {
         {session && <ModelEffortPicker />}
         {session && <RulesChip compact={compact} />}
         {session && <UsageChip compact={compact} />}
-        {session && <ContextChip compact={compact} />}
+        {session && (
+          <Suspense fallback={<span className="chip ctx-chip" role="status" title="正在加载上下文统计">[ WAIT ]</span>}>
+            <ContextChip compact={compact} />
+          </Suspense>
+        )}
         <span className="spacer" />
         {store.running && <span className="running-dot" title="Agent 运行中" />}
       </div>

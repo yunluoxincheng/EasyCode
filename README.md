@@ -41,7 +41,8 @@
 ```bash
 pnpm install
 pnpm build      # 全部包构建
-pnpm test       # core 单元测试
+pnpm test       # 现有 core + engine 测试
+pnpm --filter @easycode/ui typecheck
 pnpm start      # Electron 版（开发调试用）
 
 # Tauri 版（主推，需 Rust 工具链）
@@ -50,6 +51,12 @@ pnpm --filter @easycode/desktop-tauri run tauri:bundle    # 安装包
 ```
 
 无 API Key 时可直接体验演示模式（内存文件系统 + Mock 模型，完整走通工具调用 → 审批 → 结果回传）。
+
+Node.js 要求 >=20.14.0；CI 与 Release 使用 Node 22 / pnpm 11。PR 和 master 推送的三平台检查负责 TypeScript 构建、UI 类型与现有测试，原生安装包仍由独立 Release 工作流构建。
+
+Reflex 影子模式默认关闭，首次使用时才加载本地运行时和模型。构建前可通过 `EASYCODE_REFLEX_MODEL_DIR` 指向包含 `model_int8.onnx`、`tokenizer.json`、`tokenizer_config.json`、`runtime_config.json` 的目录；默认查找相邻的 `../Reflex/models_export/deberta-v3-xsmall`。模型缺失时构建会警告，常规 Agent 可运行，Reflex 会退回无有效预测。构建仅打包当前使用的 ORT JSEP 后端；旧 `public/ort` 缓存无需删除，也不会全部进入安装产物。
+
+桌面走查必须先重建产物并隔离数据：Electron 支持进程级 `EASYCODE_DATA_DIR`，Tauri 当前按应用 identifier 选择数据目录，需要使用 `tauri build --debug --no-bundle --config '{"identifier":"com.easycode.desktop.qa"}'` 临时构建并先核对 `host_info`。该覆盖参数不应写入正式配置或用于发布。
 
 ## 架构
 
@@ -64,6 +71,8 @@ pnpm --filter @easycode/desktop-tauri run tauri:bundle    # 安装包
 ```
 
 依赖单向：`ui → engine → core ← host`。core 零运行时依赖、零 Node API，一切 IO 经 `Host` 接口注入；工具与 Provider 均为注册制扩展点。
+
+UI 的 `AppStore` 是可变事件仓库：全量订阅读取数值 `version`；局部订阅按原始值/不可变引用投影，快照仍是数值版本。仅动作回调使用 `useStoreApi()`。上下文计算在 `context-tokens.ts`，与 `ContextChip` 展示分离并按需加载；显示在流式期间按 200ms 采样，模型容量保护始终读取最新精确计数。长 Markdown 在流式期间按 80ms 采样显示，结束立即完整渲染，原始文本和复制内容始终保留最新值。
 
 ## 模型服务
 

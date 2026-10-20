@@ -1,10 +1,13 @@
-# EasyCode 技术方案与 MVP 计划
+# EasyCode 技术方案与里程碑
+
+当前主力壳为 Tauri 2，Electron 保留作辅助壳；M1–M5 为初版历史里程碑。当前版本、待办与本轮优化验收分别以 `tauri.conf.json`、`docs/TODOS.md` 和 CHANGELOG 为准。
 
 ## 1. 总体架构
 
 ```
-┌────────────────────────── packages/desktop (Electron 薄壳) ──────────────────────────┐
-│  main: 装配 Engine + NodeHost + IPC 桥 / preload: window.easycode 类型化 API          │
+┌────────────────────── packages/desktop-tauri (Tauri 2 主力壳) ──────────────────────┐
+│  Rust: 底层 IO 命令；WebView: 装配 Engine + TauriHost + React UI                    │
+│  packages/desktop: Electron 辅助壳，main 装配 Engine + NodeHost + IPC              │
 └──────────────────────────────┬───────────────────────────────────────────────────────┘
                                │ AgentClient 接口 (IPC 实现 / 内存实现)
 ┌──────────────────────────────▼───────────────┐   ┌─────────────────────────────────┐
@@ -24,7 +27,7 @@
                                                    │  fs / process / paths / dataDir │
                                                    │  实现: NodeHost(桌面/CLI)        │
                                                    │        MemoryHost(浏览器/测试)   │
-                                                   │        [未来] TauriHost(v0.2)   │
+                                                   │        TauriHost(主力桌面壳)    │
                                                    └─────────────────────────────────┘
 ```
 
@@ -41,7 +44,7 @@ AgentEvent: session_snapshot? | text_delta | reasoning_delta | tool_call_start |
             tool_result | approval_request | step_end(usage) | error | done
 ClientMessage: user_message | approval_response | abort
 ```
-传输层可替换：Electron 用 IPC 推送；CLI 直接监听 emitter；浏览器演示模式为进程内直连。
+事件清单为初版摘要，完整协议以 core 类型为准。传输层可替换：Tauri 引擎在 WebView 内直连、底层 IO 走 Rust IPC；Electron 用 IPC 推送；CLI 直接监听 emitter；浏览器演示模式为进程内直连。
 
 ### 2.2 Agent 循环（core/loop.ts）
 ```
@@ -63,8 +66,8 @@ while (steps < MAX) {
 - 内部消息格式统一为 `{role, blocks[]}`，各适配器负责映射，新增协议只加一个文件。
 
 ### 2.4 安全
-- 路径含闭校验：`resolve(workspace, rel)` 必须落在工作区内。
-- Shell：`cmd /c`（win）执行、默认 120s 超时、输出 100KB 截断。
+- 文件访问：真实路径解析、边界/权限裁决、审批后真实目标复核；并发替换的剩余限制见 README。
+- Shell：经 Host 注入平台执行与进程生命周期，超时和输出限制以当前配置及接口契约为准。
 - Electron：`contextIsolation: true`、`nodeIntegration: false`，preload 只暴露白名单 API。
 
 ## 3. 里程碑
@@ -76,8 +79,8 @@ while (steps < MAX) {
 | M3 engine+CLI | AgentServer、设置、JSONL 持久化、CLI | ✅ |
 | M4 ui+desktop | React 界面、Electron 壳、IPC | ✅ |
 | M5 验证 | build/test 通过、Electron 端到端走查 | ✅ |
-| **v0.2 Tauri 壳** | host-tauri（TS Host）+ desktop-tauri（Rust fs/proc/HTTP 流代理/文件夹选择）+ ▚ 图标，端到端验证通过（WebView 内存 ~30MB） | ✅ |
-| v0.2 剩余 | NSIS 安装包（tauri:bundle）、正式签名、API Key 钥匙串 | 规划 |
+| **Tauri 壳** | host-tauri + desktop-tauri 已落地；当前 Windows 原生验收与进程树内存口径见 TODOS #55 | 已实现 |
+| 发布与凭据后续 | 安装包已有独立 Release 工作流；正式签名、API Key 钥匙串另行规划 | 部分完成 |
 | v0.3 | MCP、worktree 并行、沙箱 | 规划 |
 
 ## v0.2 Tauri 实现备注（2026-09-19）
@@ -91,6 +94,6 @@ while (steps < MAX) {
 - 工具链：RUSTUP_HOME/CARGO_HOME 在 D:\DevCache\Rust\*，crates 走 rsproxy 镜像。
 
 ## 4. 风险与对策
-- **Electron 体积与"轻量"诉求冲突** → 壳已隔离，v0.2 换 Tauri；MVP 阶段主进程零依赖、渲染层按需加载。
+- **桌面体积与运行内存** → Tauri 主力壳、渲染层按需加载、Reflex 按开关加载与资源白名单。关闭模型释放句柄不等于 WASM 堆立即归还系统；本轮保留当前运行时，Worker 隔离需独立生命周期方案和实测，未作为已完成的内存回收能力。
 - **各模型 tool-calling 行为差异** → 统一内部 blocks 格式 + 适配器各自归一化；Mock/单测锁住循环行为。
 - **无 API Key 无法联调** → Mock Provider + MemoryHost 保证全链路可演示、可测试；Ollama/LM Studio 可作免费真实后端。

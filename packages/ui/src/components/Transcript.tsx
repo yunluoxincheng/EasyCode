@@ -1,10 +1,11 @@
-import { memo, useEffect, useRef, useState } from 'react';
-import { useStore } from '../useStore.js';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
+import { useStore, useStoreApi } from '../useStore.js';
 import { renderMarkdown } from '../markdown.js';
 import { renderAnsi } from '../ansi.js';
 import { diffLines, type TodoItem } from '@easycode/core';
 import type {
   ApprovalItem,
+  AppStore,
   AssistantItem,
   ErrorItem,
   TestRunItem,
@@ -18,7 +19,26 @@ import { TestRunCard } from './TestRunCard.js';
 
 /** Markdown 渲染（含代码块样式钩子 + React.memo 浅比对优化）；streaming 时未闭合代码块跳过高亮分词（TODOS #45） */
 const Md = memo(function Md({ text, streaming = false }: { text: string; streaming?: boolean }) {
-  return <div className="md" dangerouslySetInnerHTML={{ __html: renderMarkdown(text, streaming) }} />;
+  const sampleLongText = streaming && text.length >= 8000;
+  const [sample, setSample] = useState({ text, sampling: sampleLongText });
+  const latest = useRef(text);
+  // 模式切换/非追加替换时在本次提交前重设基线，不能回退到挂载时的短文本。
+  const resetSample = sample.sampling !== sampleLongText || !text.startsWith(sample.text);
+  if (resetSample) setSample({ text, sampling: sampleLongText });
+  useEffect(() => { latest.current = text; }, [text]);
+  useEffect(() => {
+    if (!sampleLongText) return;
+    // 固定周期而非尾部防抖：持续输出和暂停都可补齐，完成时直接使用原文。
+    const timer = setInterval(() => setSample((previous) =>
+      previous.sampling && previous.text === latest.current
+        ? previous
+        : { text: latest.current, sampling: true }), 80);
+    return () => clearInterval(timer);
+  }, [sampleLongText]);
+  // 替换/截断不是追加流，不得显示其它消息或上一次运行的旧文本。
+  const displayed = sampleLongText && !resetSample ? sample.text : text;
+  const html = useMemo(() => renderMarkdown(displayed, streaming), [displayed, streaming]);
+  return <div className="md" dangerouslySetInnerHTML={{ __html: html }} />;
 });
 
 /** 思考过程折叠卡片：统一终端极客风、支持吸顶、一键复制与字符统计 */
@@ -290,7 +310,7 @@ function TerminalCard({ item }: { item: ToolItem }) {
 
 /** 审批卡片（内联在回合里） */
 function ApprovalCard({ item }: { item: ApprovalItem }) {
-  const store = useStore();
+  const store = useStoreApi();
   const i = (item.input ?? {}) as Record<string, unknown>;
   const headline =
     item.name === 'run_command'
@@ -464,25 +484,28 @@ function CopyButton({ text }: { text: string }) {
 }
 
 /** 用户消息：气泡框 + 时间/复制/编辑（编辑仅最近一条且非运行中） */
-function UserView({ item, canEdit }: { item: UserItem; canEdit: boolean }) {
-  const store = useStore();
+const UserView = memo(function UserView({ id, text, ts, canEdit, running }: Pick<UserItem, 'id' | 'text' | 'ts'> & {
+  canEdit: boolean;
+  running: boolean;
+}) {
+  const store = useStoreApi();
   const [copied, setCopied] = useState(false);
   const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState(item.text);
-  const time = item.ts
-    ? new Date(item.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  const [draft, setDraft] = useState(text);
+  const time = ts
+    ? new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
     : '';
 
   const save = (): void => {
     setEditing(false);
-    if (draft.trim() && draft.trim() !== item.text) {
-      void store.editAndResend(item.id, draft);
+    if (draft.trim() && draft.trim() !== text) {
+      void store.editAndResend(id, draft);
     }
   };
 
   if (editing) {
     return (
-      <div className="msg user editing" data-anchor={item.id}>
+      <div className="msg user editing" data-anchor={id}>
         <textarea
           className="msg-edit-area"
           value={draft}
@@ -511,15 +534,15 @@ function UserView({ item, canEdit }: { item: UserItem; canEdit: boolean }) {
   }
 
   return (
-    <div className="msg user" data-anchor={item.id}>
-      <div className="msg-content">{item.text}</div>
+    <div className="msg user" data-anchor={id}>
+      <div className="msg-content">{text}</div>
       <div className="msg-meta">
         {time && <span className="msg-time">{time}</span>}
         <button
           className="msg-icon"
           title={copied ? '已复制' : '复制'}
           onClick={() => {
-            void navigator.clipboard.writeText(item.text).then(() => {
+            void navigator.clipboard.writeText(text).then(() => {
               setCopied(true);
               setTimeout(() => setCopied(false), 1200);
             });
@@ -532,11 +555,11 @@ function UserView({ item, canEdit }: { item: UserItem; canEdit: boolean }) {
             ✎
           </button>
         )}
-        {!store.running && (
+        {!running && (
           <button
             className="msg-icon"
             title="从此处分叉出新会话（克隆此提问前已有的上下文）"
-            onClick={() => void store.forkSession({ kind: 'beforeUser', itemId: item.id })}
+            onClick={() => void store.forkSession({ kind: 'beforeUser', itemId: id })}
           >
             ⑂
           </button>
@@ -544,7 +567,7 @@ function UserView({ item, canEdit }: { item: UserItem; canEdit: boolean }) {
       </div>
     </div>
   );
-}
+});
 
 /** 实时动作指示器（TODOS #21） */
 function LiveTicker() {
@@ -662,9 +685,17 @@ function StickyTodoBar() {
 }
 
 /** 回合块：头部（用时）+ 折叠的过程 + 常显的最终结果 */
-function TurnView({ turn }: { turn: TurnItem }) {
-  const store = useStore();
-  const live = store.running && turn.durationMs === undefined;
+interface TurnViewProps {
+  turn: TurnItem;
+  live: boolean;
+  /** 活动/未定型回合跟随完整版本，已完成回合仅跟随结构版本。 */
+  revision: number;
+  jumpTick: number;
+  checkpoints: AppStore['checkpoints'];
+}
+
+const TurnView = memo(function TurnView({ turn, live, revision, jumpTick, checkpoints }: TurnViewProps) {
+  const store = useStoreApi();
   const expanded = live ? true : !turn.collapsed;
   const [liveElapsed, setLiveElapsed] = useState(Date.now() - turn.startedAt);
 
@@ -697,17 +728,28 @@ function TurnView({ turn }: { turn: TurnItem }) {
     const el = bodyRef.current;
     if (!el || !live || !expanded || !localAtBottomRef.current) return;
     el.scrollTop = el.scrollHeight;
-  }, [turn.items.length, store.version, live, expanded]);
+  }, [turn.items.length, revision, live, expanded]);
+
+  // Markdown 的采样更新可晚于父回合提交；直接跟随内容尺寸而非只跟随 Store 版本。
+  useEffect(() => {
+    const el = bodyRef.current;
+    if (!el || !live || !expanded) return;
+    const observer = new ResizeObserver(() => {
+      if (localAtBottomRef.current) el.scrollTop = el.scrollHeight;
+    });
+    for (const child of Array.from(el.children)) observer.observe(child);
+    return () => observer.disconnect();
+  }, [live, expanded, turn.items.length]);
 
   // 「↓ 回到底部」双层视口联动（TODOS #46）：仅在显式联动信号时重置局部贴底锁定
   // 并同步内部视窗至最底；挂载与状态切换不做无条件重置，保留用户上翻阅读的意图
   // （初始贴底由上方的常规跟随 effect 负责）
   useEffect(() => {
-    if (!store.jumpTick || !live) return;
+    if (!jumpTick || !live) return;
     localAtBottomRef.current = true;
     const el = bodyRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [store.jumpTick, live]);
+  }, [jumpTick, live]);
 
   const onBodyScroll = () => {
     const el = bodyRef.current;
@@ -740,7 +782,11 @@ function TurnView({ turn }: { turn: TurnItem }) {
     .slice()
     .reverse()
     .find((i): i is ToolItem => i.kind === 'tool' && i.name === 'todo_write');
-  const checkpoint = !live ? store.getTurnCheckpointForTurn(turn) : undefined;
+  // 快照列表通过 Props 传入，非结构性刷新/撤销状态变化也必须使历史视图失效。
+  const checkpoint = useMemo(
+    () => !live ? store.getTurnCheckpointForTurn(turn) : undefined,
+    [store, turn, live, revision, checkpoints],
+  );
   /** 回合内最后一张测试自愈卡片（折叠态无最终文本时作为可见结果保留） */
   const lastTestRun = turn.items
     .slice()
@@ -847,7 +893,7 @@ function TurnView({ turn }: { turn: TurnItem }) {
       )}
     </div>
   );
-}
+});
 
 export function Transcript() {
   const store = useStore();
@@ -1155,9 +1201,21 @@ export function Transcript() {
             const isLastUser =
               !store.running &&
               store.items.lastIndexOf(item) === store.items.length - 1 - (store.items.length > 1 && store.items[store.items.length - 1].kind === 'turn' ? 1 : 0);
-            return <UserView key={item.id} item={item} canEdit={isLastUser} />;
+            return <UserView key={item.id} id={item.id} text={item.text} ts={item.ts} canEdit={isLastUser} running={store.running} />;
           }
-          if (item.kind === 'turn') return <TurnView key={item.id} turn={item} />;
+          if (item.kind === 'turn') {
+            const live = store.running && item.durationMs === undefined;
+            return (
+              <TurnView
+                key={item.id}
+                turn={item}
+                live={live}
+                revision={item.durationMs === undefined ? store.version : store.structureVersion}
+                jumpTick={live ? store.jumpTick : 0}
+                checkpoints={store.checkpoints}
+              />
+            );
+          }
           // 兜底：极端情况下（如测试自愈循环在无活动回合时起步）条目可能落在顶层，
           // 必须照常渲染，绝不能静默 return null 让用户「什么都看不到」
           return <ItemView key={item.id} item={item} />;
