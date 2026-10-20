@@ -1,6 +1,8 @@
 import type { DecisionPolicy, DecisionRequest, DecisionResult } from '@easycode/core';
 import type { InferenceSession } from 'onnxruntime-web';
 
+const INIT_RETRY_COOLDOWN_MS = 30_000;
+
 export class ReflexWebPolicy implements DecisionPolicy {
   private session: InferenceSession | null = null;
   private tokenizer: any = null;
@@ -11,18 +13,20 @@ export class ReflexWebPolicy implements DecisionPolicy {
   private queue: Promise<void> = Promise.resolve();
   private loadController: AbortController | null = null;
   private pendingDecisions = 0;
+  private initializationFailure: { generation: number; retryAt: number } | null = null;
 
   /** 只响应已保存的设置；构造实例本身不会加载运行时或模型。 */
   setEnabled(enabled: boolean): void {
     if (this.enabled === enabled) return;
     this.enabled = enabled;
     const generation = ++this.generation;
+    this.initializationFailure = null;
     this.loadController?.abort();
     // 初始化、推理、释放共享队列：关闭时不得释放仍在 run() 的会话，
     // 快速开关产生的旧任务也不得把迟到模型发布到新一代生命周期。
     void this.enqueue(async () => {
-      await this.release();
       if (this.isCurrent(generation)) await this.init(generation);
+      else if (this.generation === generation) await this.release();
     }).catch((err) => {
       console.warn('[Reflex] Model lifecycle error:', err);
     });
@@ -36,6 +40,11 @@ export class ReflexWebPolicy implements DecisionPolicy {
 
   private isCurrent(generation: number): boolean {
     return this.enabled && this.generation === generation;
+  }
+
+  private inRetryCooldown(generation: number): boolean {
+    return this.initializationFailure?.generation === generation &&
+      performance.now() < this.initializationFailure.retryAt;
   }
 
   private async release(): Promise<void> {
@@ -53,11 +62,12 @@ export class ReflexWebPolicy implements DecisionPolicy {
   private async init(generation: number): Promise<boolean> {
     if (!this.isCurrent(generation)) return false;
     if (this.isReady) return true;
-    await this.release();
-    if (!this.isCurrent(generation)) return false;
+    if (this.inRetryCooldown(generation)) return false;
     const controller = new AbortController();
     this.loadController = controller;
     try {
+      await this.release();
+      if (!this.isCurrent(generation)) return false;
       console.log('[Reflex] Initializing on-device ONNX Web engine...');
       // 1. 动态按需引入 onnxruntime-web
       const ort = await import('onnxruntime-web');
@@ -99,10 +109,12 @@ export class ReflexWebPolicy implements DecisionPolicy {
       this.tokenizer = tokenizer;
       this.runtimeConfig = runtimeConfig;
       this.isReady = true;
+      this.initializationFailure = null;
       console.log('[Reflex] On-device ONNX Web engine ready.');
       return true;
     } catch (err) {
       if (this.isCurrent(generation)) {
+        this.initializationFailure = { generation, retryAt: performance.now() + INIT_RETRY_COOLDOWN_MS };
         console.warn('[Reflex] Failed to initialize on-device Reflex model, fallback to Noop:', err);
       }
       this.isReady = false;
@@ -127,7 +139,9 @@ export class ReflexWebPolicy implements DecisionPolicy {
   decide(req: DecisionRequest): Promise<DecisionResult> {
     const generation = this.generation;
     // 旁路观察允许放弃过载预测，不能无界积压请求及其上下文。
-    if (!this.enabled || this.pendingDecisions >= 32) return Promise.resolve(this.deferred(req));
+    if (!this.enabled || this.inRetryCooldown(generation) || this.pendingDecisions >= 32) {
+      return Promise.resolve(this.deferred(req));
+    }
     this.pendingDecisions++;
     return this.enqueue(async () => {
       if (!this.isCurrent(generation)) return this.deferred(req);

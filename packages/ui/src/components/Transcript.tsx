@@ -19,18 +19,24 @@ import { TestRunCard } from './TestRunCard.js';
 
 /** Markdown 渲染（含代码块样式钩子 + React.memo 浅比对优化）；streaming 时未闭合代码块跳过高亮分词（TODOS #45） */
 const Md = memo(function Md({ text, streaming = false }: { text: string; streaming?: boolean }) {
-  const [sample, setSample] = useState(text);
-  const latest = useRef(text);
   const sampleLongText = streaming && text.length >= 8000;
+  const [sample, setSample] = useState({ text, sampling: sampleLongText });
+  const latest = useRef(text);
+  // 模式切换/非追加替换时在本次提交前重设基线，不能回退到挂载时的短文本。
+  const resetSample = sample.sampling !== sampleLongText || !text.startsWith(sample.text);
+  if (resetSample) setSample({ text, sampling: sampleLongText });
   useEffect(() => { latest.current = text; }, [text]);
   useEffect(() => {
     if (!sampleLongText) return;
     // 固定周期而非尾部防抖：持续输出和暂停都可补齐，完成时直接使用原文。
-    const timer = setInterval(() => setSample(latest.current), 80);
+    const timer = setInterval(() => setSample((previous) =>
+      previous.sampling && previous.text === latest.current
+        ? previous
+        : { text: latest.current, sampling: true }), 80);
     return () => clearInterval(timer);
   }, [sampleLongText]);
   // 替换/截断不是追加流，不得显示其它消息或上一次运行的旧文本。
-  const displayed = sampleLongText && text.startsWith(sample) ? sample : text;
+  const displayed = sampleLongText && !resetSample ? sample.text : text;
   const html = useMemo(() => renderMarkdown(displayed, streaming), [displayed, streaming]);
   return <div className="md" dangerouslySetInnerHTML={{ __html: html }} />;
 });

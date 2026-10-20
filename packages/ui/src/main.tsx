@@ -6,7 +6,7 @@ import { StoreProvider } from './useStore.js';
 import { AppStore } from './store.js';
 import { IpcAgentClient, createDemoClient } from './client.js';
 import type { AgentClient } from './client.js';
-import type { DecisionRequest } from '@easycode/core';
+import { NoopDecisionPolicy, type DecisionRequest } from '@easycode/core';
 import type { ReflexWebPolicy } from './utils/reflexEngine.js';
 import './styles.css';
 
@@ -16,6 +16,7 @@ async function bootstrap(): Promise<void> {
   try {
     let client: AgentClient;
     let reflexPolicy: ReflexWebPolicy | undefined;
+    let electronBridge: ConstructorParameters<typeof IpcAgentClient>[0] | undefined;
 
     const env = '__TAURI_INTERNALS__' in window ? 'tauri' : 'easycode' in window ? 'electron' : 'web';
     document.documentElement.classList.add(`env-${env}`);
@@ -28,11 +29,16 @@ async function bootstrap(): Promise<void> {
     } else if (env === 'electron') {
       const bridge = w.easycode as ConstructorParameters<typeof IpcAgentClient>[0];
       client = new IpcAgentClient(bridge);
+      electronBridge = bridge;
+    } else {
+      client = createDemoClient();
+    }
 
-      // 在渲染进程挂载真实 WebAssembly 端侧推理引擎，响应 Electron 主进程派发的决策请求
-      const { ReflexWebPolicy } = await import('./utils/reflexEngine.js');
-      const webPolicy = new ReflexWebPolicy();
-      reflexPolicy = webPolicy;
+    const store = new AppStore(client);
+    if (electronBridge) {
+      const bridge = electronBridge;
+      const fallback = new NoopDecisionPolicy();
+      // 导入未完成或失败时也即时回复 defer，不能让主进程等待 30 秒超时。
       bridge.onEvent((payload) => {
         const ev = payload?.event as
           | {
@@ -42,19 +48,15 @@ async function bootstrap(): Promise<void> {
             }
           | undefined;
         if (ev && ev.type === 'reflex_decide' && ev.reqId && ev.request) {
-          void webPolicy.decide(ev.request).then((result) => {
-            void bridge.invoke('reflex-decide-result', {
+          void (reflexPolicy ?? fallback).decide(ev.request).then((result) => {
+            return bridge.invoke('reflex-decide-result', {
               reqId: ev.reqId,
               result,
             });
-          });
+          }).catch((err) => console.warn('[Reflex] Decision bridge error:', err));
         }
       });
-    } else {
-      client = createDemoClient();
     }
-
-    const store = new AppStore(client);
     if (reflexPolicy) {
       const webPolicy = reflexPolicy;
       store.subscribe(() => webPolicy.setEnabled(store.settings?.reflexShadowMode === true));
@@ -68,6 +70,16 @@ async function bootstrap(): Promise<void> {
         </ErrorBoundary>
       </React.StrictMode>,
     );
+    if (electronBridge) {
+      // 可选策略的网络/模块异常不阻塞 Electron 主界面，也不升级为 BOOT ERROR。
+      void import('./utils/reflexEngine.js').then(({ ReflexWebPolicy }) => {
+        const webPolicy = new ReflexWebPolicy();
+        reflexPolicy = webPolicy;
+        const syncEnabled = () => webPolicy.setEnabled(store.settings?.reflexShadowMode === true);
+        store.subscribe(syncEnabled);
+        syncEnabled(); // 设置可能在模块加载完成前已返回，立即读取当前值。
+      }).catch((err) => console.warn('[Reflex] Optional module unavailable:', err));
+    }
   } catch (err) {
     // 启动失败直接显示在页面上，便于诊断壳层问题
     const root = document.getElementById('root')!;
