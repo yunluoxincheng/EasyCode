@@ -80,10 +80,12 @@ export class ResponsesProvider implements Provider {
     const thinkingParts: string[] = [];
     let usage: TurnResult['usage'];
     let toolCalls: ToolCallBlock[] = [];
+    const preparing = new Set<string>();
 
     type WireEvent = {
       type: string;
       delta?: string;
+      item?: { type?: string; call_id?: string; name?: string };
       response?: {
         output?: Array<{
           type: string;
@@ -106,7 +108,12 @@ export class ResponsesProvider implements Provider {
       } catch {
         continue;
       }
-      if (evt.type === 'response.output_text.delta' && evt.delta) {
+      if (evt.type === 'response.output_item.added' && evt.item?.type === 'function_call' &&
+          typeof evt.item.call_id === 'string' && typeof evt.item.name === 'string' &&
+          evt.item.call_id && evt.item.name && !preparing.has(evt.item.call_id)) {
+        preparing.add(evt.item.call_id);
+        ctx.emit({ type: 'tool_call_preparing', callId: evt.item.call_id, name: evt.item.name });
+      } else if (evt.type === 'response.output_text.delta' && evt.delta) {
         textParts.push(evt.delta);
         ctx.emit({ type: 'text_delta', delta: evt.delta });
       } else if (

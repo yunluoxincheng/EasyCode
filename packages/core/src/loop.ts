@@ -225,6 +225,7 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
           if (pe.type === 'text_delta') emit({ type: 'text_delta', delta: pe.delta });
           else if (pe.type === 'reasoning_delta')
             emit({ type: 'reasoning_delta', delta: pe.delta });
+          else if (pe.type === 'tool_call_preparing') emit(pe);
         },
       });
 
@@ -309,6 +310,7 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
           callId: call.id,
           onFileChange,
           permissionRules,
+          onExecutionStart: () => emit({ type: 'tool_execution_start', callId: call.id }),
         });
         const toolOutcome = getToolExecutionOutcome(call.name, execution);
         if (toolRoutingFollowup && call === calls[0]) {
@@ -352,6 +354,7 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
           content: execution.content,
           isError: execution.isError,
           durationMs: execution.durationMs,
+          timing: execution.timing,
           // 结构化传递「是否被批准」：权限规则拒绝也必须让 UI 显示拒绝态，
           // 不能靠匹配提示文本（TODOS #47）
           approved: execution.approved,

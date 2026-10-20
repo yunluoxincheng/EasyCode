@@ -40,6 +40,8 @@ export type ToolItem = {
   result?: string;
   durationMs?: number;
   startedAt?: number;
+  executionStartedAt?: number;
+  timing?: { approvalMs: number; executionMs?: number };
 };
 export type ApprovalItem = {
   kind: 'approval';
@@ -95,6 +97,7 @@ export type SessionRunStatus = 'idle' | 'running' | 'waiting' | 'error';
 
 /** 会话视图状态池化项（TODOS #29）：隔离存储每个会话的时间线、运行态与任务清单 */
 export interface SessionViewState {
+  preparingTool?: { callId: string; name: string };
   items: TranscriptItem[];
   currentTurn: TurnItem | null;
   currentAssistant: AssistantItem | null;
@@ -294,6 +297,11 @@ export class AppStore {
       }
     }
     return null;
+  }
+
+  get preparingTool(): SessionViewState['preparingTool'] {
+    const state = this.activeId ? this.sessionStates.get(this.activeId) : undefined;
+    return state?.running ? state.preparingTool : undefined;
   }
 
   /** 获取指定会话当前的实时运行状态（用于侧栏状态指示灯） */
@@ -1055,6 +1063,7 @@ export class AppStore {
       if (state.currentTurn) state.currentTurn.items.push(errorItem);
       else state.items.push(errorItem);
       state.running = false;
+      state.preparingTool = undefined;
       state.status = 'error';
       if (this.activeId === id) {
         this.syncActiveState(state);
@@ -1115,6 +1124,7 @@ export class AppStore {
       if (state.currentTurn) state.currentTurn.items.push(errorItem);
       else state.items.push(errorItem);
       state.running = false;
+      state.preparingTool = undefined;
       state.status = 'error';
       if (this.activeId === id) {
         this.syncActiveState(state);
@@ -1138,6 +1148,7 @@ export class AppStore {
     const state = this.sessionStates.get(id);
     if (state) {
       state.running = false;
+      state.preparingTool = undefined;
       state.status = 'idle';
       if (id === this.activeId) {
         this.syncActiveState(state);
@@ -1415,6 +1426,7 @@ export class AppStore {
 
     switch (event.type) {
       case 'assistant_start':
+        state.preparingTool = undefined;
         if (isActive) this.flushPendingNotify();
         state.running = true;
         state.status = 'running';
@@ -1446,7 +1458,25 @@ export class AppStore {
         break;
       }
 
+      case 'tool_call_preparing':
+        if (!state.running) break;
+        state.preparingTool = { callId: event.callId, name: event.name };
+        if (isActive) this.notify(false);
+        break;
+
+      case 'tool_execution_start': {
+        const tool = state.currentTurn?.items.find(
+          (i): i is ToolItem => i.kind === 'tool' && i.callId === event.callId && i.status === 'running',
+        );
+        if (tool) {
+          tool.executionStartedAt = Date.now();
+          if (isActive) this.notify(false);
+        }
+        break;
+      }
+
       case 'tool_call_start': {
+        state.preparingTool = undefined;
         if (isActive) this.flushPendingNotify();
         this.flushAssistantInState(state);
         if (event.call.name === 'todo_write') {
@@ -1490,6 +1520,7 @@ export class AppStore {
                 : 'ok';
             tool.result = event.content;
             tool.durationMs = event.durationMs;
+            tool.timing = event.timing;
             if (tool.name === 'todo_write' && !event.isError) {
               const input = tool.input as { todos?: TodoItem[] } | undefined;
               if (Array.isArray(input?.todos)) {
@@ -1564,6 +1595,7 @@ export class AppStore {
       }
 
       case 'step_end':
+        state.preparingTool = undefined;
         state.lastUsage = event.usage ?? null;
         if (event.sessionUsage) {
           state.sessionUsage = {
@@ -1681,6 +1713,7 @@ export class AppStore {
       }
 
       case 'error':
+        state.preparingTool = undefined;
         if (isActive) this.flushPendingNotify();
         this.flushAssistantInState(state);
         this.pushToTurnInState(state, { kind: 'error', id: this.nextId(), message: event.message });
@@ -1694,6 +1727,7 @@ export class AppStore {
         break;
 
       case 'done':
+        state.preparingTool = undefined;
         if (isActive) this.flushPendingNotify();
         this.flushAssistantInState(state);
         if (state.currentTurn) {
@@ -1781,6 +1815,7 @@ export class AppStore {
 
   /** 折叠并关闭当前回合（测试自愈循环收敛时复用 done 的收尾语义） */
   private closeTurnInState(state: SessionViewState): void {
+    state.preparingTool = undefined;
     const turn = state.currentTurn;
     if (!turn) return;
     this.flushAssistantInState(state);
