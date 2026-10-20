@@ -231,11 +231,12 @@ export async function executeTool(
   name: string,
   rawInput: unknown,
   ctx: ToolContext & { approval: ApprovalManager },
-): Promise<ToolExecution> {
+): Promise<ToolExecution & { timing: NonNullable<ToolExecution['timing']> }> {
   const started = Date.now();
+  const timing: NonNullable<ToolExecution['timing']> = { approvalMs: 0 };
   const tool = registry.get(name);
   if (!tool) {
-    return { content: `未知工具: ${name}`, approved: false, isError: true, durationMs: 0 };
+    return { content: `未知工具: ${name}`, approved: false, isError: true, durationMs: 0, timing };
   }
   if (!ctx.workspace && tool.requiresWorkspace !== false) {
     return {
@@ -243,6 +244,7 @@ export async function executeTool(
       approved: true,
       isError: true,
       durationMs: 0,
+      timing,
     };
   }
   const validated = validateToolInput(rawInput, tool.spec.parameters);
@@ -252,6 +254,7 @@ export async function executeTool(
       approved: false,
       isError: true,
       durationMs: 0,
+      timing,
     };
   }
   // 真实路径守卫（TODOS #47 第三轮复审 P1）：`paths.resolve()` 只做词法归一化，
@@ -283,6 +286,7 @@ export async function executeTool(
         approved: false,
         isError: false,
         durationMs: Date.now() - started,
+        timing,
       };
     }
     // 用真实相对路径参与裁决：别名路径也会命中针对真实目标的规则
@@ -308,6 +312,7 @@ export async function executeTool(
       approved: false,
       isError: false,
       durationMs: Date.now() - started,
+      timing,
     };
   }
   // 敏感操作语义安全风险评估旁路（TODOS #40 Safety）
@@ -358,9 +363,7 @@ export async function executeTool(
         reason: requirement.reason,
       })
     : true;
-  const timing: NonNullable<ToolExecution['timing']> = {
-    approvalMs: Math.max(0, Math.round(performance.now() - approvalStarted)),
-  };
+  timing.approvalMs = Math.max(0, Math.round(performance.now() - approvalStarted));
   safetyObservation?.actual({
     // 审批模式是配置，不是 Agent 对语义风险的判断；不可参与模型一致率。
     // 规则放行/强制询问优先于模式描述，避免把「未发生审批」写成 Approval requested 污染影子统计
@@ -437,13 +440,13 @@ export async function executeTool(
         : await run();
     // run_command 退出码非零（或收到 signal 中断）必须视为执行失败
     const isCommandFailure = name === 'run_command' && /^退出码: (?!0(?:\n|$))/.test(content);
-    const execution: ToolExecution = {
+    const execution = {
       content,
       approved: true,
       isError: isCommandFailure,
       durationMs: Date.now() - started,
       timing,
-    };
+    } satisfies ToolExecution;
     safetyObservation?.outcome(getToolExecutionOutcome(name, execution));
     return execution;
   } catch (err) {

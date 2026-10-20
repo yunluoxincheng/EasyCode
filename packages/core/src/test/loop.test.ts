@@ -87,6 +87,8 @@ test('【P2 拒绝态】权限规则拒绝时 tool_result 事件显式携带 app
   assert.equal(event.approved, false);
   assert.equal(event.isError, false);
   assert.match(event.content, /权限规则拒绝执行/);
+  assert.deepEqual(event.timing, { approvalMs: 0 });
+  assert.equal(event.timing.executionMs, undefined);
 });
 
 test('循环：工具调用 → 结果回传 → 第二轮完成', async () => {
