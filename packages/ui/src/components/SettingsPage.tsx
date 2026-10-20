@@ -137,7 +137,6 @@ export function SettingsPage() {
         [id]: {
           kind: 'openai-compatible',
           baseURL: '',
-          apiKey: '',
           models: [],
           enabled: true,
           name: `自定义供应商 ${n}`,
@@ -382,6 +381,12 @@ export function SettingsPage() {
       </aside>
 
       <div className="settings-content">
+        {draft.credentialStorageStatus?.warning && (
+          <p className="hint" role="status">[ WAIT ] {draft.credentialStorageStatus.warning}</p>
+        )}
+        {draft.secretStorage === 'plaintext' && (
+          <p className="hint" role="status">[ WAIT ] 当前密钥使用明文配置存储。可在「常规」中切换到系统安全存储。</p>
+        )}
         {section === 'models' && (
           <>
             <h1 className="page-title">模型服务</h1>
@@ -482,17 +487,21 @@ export function SettingsPage() {
                       </label>
 
                       <label className="field">
-                        <span>API Key</span>
+                        <span>API Key{p.hasApiKey && p.apiKey !== '' ? ' · 已保存' : p.apiKey === '' ? ' · 待清除' : ''}</span>
                         <div className="row">
                           <input
                             type={showKey ? 'text' : 'password'}
+                            autoComplete="new-password"
                             value={p.apiKey ?? ''}
                             disabled={isMock}
-                            onChange={(e) => patchProvider(id, { apiKey: e.target.value })}
-                            placeholder={isMock ? '演示模式无需 Key' : 'sk-...'}
+                            onChange={(e) => patchProvider(id, { apiKey: e.target.value || undefined })}
+                            placeholder={isMock ? '演示模式无需 Key' : p.hasApiKey ? '已保存；输入新密钥替换，留空保持' : '输入 API Key'}
                           />
                           <button className="btn" onClick={() => setShowKey(!showKey)}>
-                            {showKey ? '隐藏' : '显示'}
+                            {showKey ? '隐藏输入' : '显示输入'}
+                          </button>
+                          <button className="btn" disabled={isMock || (!p.hasApiKey && !p.apiKey)} onClick={() => patchProvider(id, { apiKey: '' })}>
+                            清除密钥
                           </button>
                         </div>
                       </label>
@@ -714,13 +723,17 @@ export function SettingsPage() {
                   )}
                   {draft.webSearch.backend === 'tavily' && (
                     <label className="field">
-                      <span>Tavily API Key</span>
+                      <span>Tavily API Key{draft.webSearch.hasTavilyApiKey && draft.webSearch.tavilyApiKey !== '' ? ' · 已保存' : draft.webSearch.tavilyApiKey === '' ? ' · 待清除' : ''}</span>
                       <input
                         type="password"
+                        autoComplete="new-password"
                         value={draft.webSearch.tavilyApiKey ?? ''}
-                        placeholder="tvly-..."
-                        onChange={(e) => patchWebSearch({ tavilyApiKey: e.target.value })}
+                        placeholder={draft.webSearch.hasTavilyApiKey ? '已保存；输入新密钥替换，留空保持' : 'tvly-...'}
+                        onChange={(e) => patchWebSearch({ tavilyApiKey: e.target.value || undefined })}
                       />
+                      <button className="btn" disabled={!draft.webSearch.hasTavilyApiKey && !draft.webSearch.tavilyApiKey} onClick={() => patchWebSearch({ tavilyApiKey: '' })}>
+                        清除密钥
+                      </button>
                     </label>
                   )}
                   {draft.webSearch.backend === 'custom' && (
@@ -791,6 +804,21 @@ export function SettingsPage() {
               </div>
             </div>
             <div className="general-panel">
+              <label className="field">
+                <span>API Key 存储方式</span>
+                <TerminalSelect
+                  value={draft.secretStorage ?? 'system'}
+                  options={[
+                    { value: 'system', label: '系统安全存储（推荐）' },
+                    { value: 'plaintext', label: '明文配置文件（不受系统凭据保护）' },
+                  ]}
+                  onChange={(v) => patch({ secretStorage: v as Settings['secretStorage'] })}
+                />
+                <span className="hint">
+                  {draft.credentialStorageStatus?.backend} · {draft.credentialStorageStatus?.available ? '可用' : '不可用'}。
+                  切换后点击保存；安全存储失败不会自动改为明文。
+                </span>
+              </label>
               <label className="field">
                 <span>新会话默认模型服务</span>
                 <TerminalSelect

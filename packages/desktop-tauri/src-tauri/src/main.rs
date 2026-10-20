@@ -16,6 +16,8 @@ use serde::Serialize;
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::DialogExt;
+mod secrets;
+use secrets::{secret_delete, secret_get, secret_set, secret_status};
 
 const MAX_PIPE: u64 = 400_000;
 const MAX_STR: usize = 200_000;
@@ -1368,6 +1370,10 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             host_info,
+            secret_status,
+            secret_get,
+            secret_set,
+            secret_delete,
             fs_read,
             fs_write,
             fs_append,

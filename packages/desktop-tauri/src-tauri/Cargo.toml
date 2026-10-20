@@ -20,6 +20,7 @@ reqwest = { version = "0.12", default-features = false, features = ["stream", "r
 tokio = { version = "1", features = ["sync", "time", "macros"] }
 base64 = "0.22"
 futures-util = "0.3"
+keyring = { version = "3.6", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust", "vendored"] }
 
 # Keep local debug builds useful without retaining large incremental caches.
 [profile.dev]
