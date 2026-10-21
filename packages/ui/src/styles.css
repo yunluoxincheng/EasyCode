@@ -4611,3 +4611,22 @@ select:focus-visible,
 }
 /* 被忽略的项目级 allow 规则提示（TODOS #47 第三轮复审 P3：接入 UI） */
 .perm-ignored { color: var(--amber); }
+
+/* MCP 配置：沿用设置页终端控件，不影响聊天滚动容器。 */
+.mcp-config-box { border: 1px solid var(--border); background: var(--panel); padding: 16px; margin: 16px 0; }
+.mcp-card-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+.mcp-state { color: var(--dim); flex: 1; min-width: 130px; }
+.mcp-state.ready { color: var(--green); }
+.mcp-state.error { color: var(--red); }
+.mcp-state.connecting { color: var(--amber); }
+.mcp-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.mcp-wide { grid-column: 1 / -1; }
+.mcp-env { display: grid; gap: 10px; margin-top: 12px; }
+.mcp-add { margin-top: 16px; }
+.mcp-env input, .mcp-add input { min-width: 0; flex: 1; }
+.mcp-config-box textarea, .mcp-env input, .mcp-add input { width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--border2); padding: 6px 10px; font: inherit; outline: none; }
+.mcp-config-box textarea { resize: vertical; }
+.mcp-config-box textarea:focus, .mcp-env input:focus, .mcp-add input:focus { border-color: var(--green); }
+.mcp-prompt-form { border: 1px solid var(--border); padding: 12px; margin-bottom: 10px; background: var(--panel); max-height: 35vh; overflow: auto; overscroll-behavior: contain; }
+.mcp-prompt-form .field { margin: 8px 0; }
+@media (max-width: 1000px) { .mcp-fields { grid-template-columns: 1fr; } }

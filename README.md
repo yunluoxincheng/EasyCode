@@ -102,6 +102,29 @@ pnpm cli "列出工作区的所有 TODO" --workspace ./some-project --provider z
 pnpm cli "运行测试并修复失败" --workspace . --provider deepseek --yolo
 ```
 
+## MCP 扩展（Stdio）
+
+在「设置 → MCP 扩展」添加本机服务，或导入兼容的配置，然后点击「保存并应用」：
+
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "E:/YourWorkspace"],
+      "enabled": true,
+      "timeoutMs": 30000
+    }
+  }
+}
+```
+
+仅配置可信服务，保存会以当前用户权限启动进程；参数使用字符串数组，工作目录使用绝对路径。JSON 使用本页示例中的字段，停用用 `enabled:false`；不支持的字段会拒绝导入。环境变量通过卡片设置或 JSON 的 `env` 输入，按常规设置选定的存储方式保存；已保存值不回显，未重新输入的已保存变量会保留，使用「清除」显式删除，不要把密钥写入命令参数。
+
+服务就绪后，Agent 可通过带命名空间的工具调用外部服务，并继承现有审批/权限规则；YOLO 模式的行为保持一致。MCP 授权按工具名配置，不能把远端参数路径当作客户端文件沙箱。Composer 的 `/` 菜单列出外部工具和 Prompt，Prompt 获取后只填入草稿，不自动发送。环境、工具目录或连接变化会使旧调用失效，失败连接需手动重连。
+
+最多配置 8 个服务；含内置工具每回合最多 128 个，外部工具规格总量最多 512 KiB。当前展示文本、结构化结果和文本资源；媒体、资源订阅、采样及远程 Streamable HTTP 尚未实现。外部进程不受工作区文件沙箱约束，外部工具的修改不进入内置回合快照/撤销。
+
 ## 安全设计
 
 - Tauri 能力白名单；Electron `contextIsolation` + `sandbox`，渲染进程拿不到 Node 能力

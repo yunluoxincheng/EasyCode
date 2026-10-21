@@ -139,9 +139,9 @@ export function estimateSessionTokens(
         }
       : undefined;
 
-  const staticCacheKey = `${effectiveModel}:${provider?.kind}:${session.workspaceRoot}:${searchOn}:${useNativeSearch}:${wsCfg?.backend}`;
+  const staticCacheKey = `${effectiveModel}:${provider?.kind}:${session.workspaceRoot}:${searchOn}:${useNativeSearch}:${wsCfg?.backend}:${store.mcpCatalogVersion}`;
   if (!staticTokensCache || staticTokensCache.key !== staticCacheKey) {
-    const toolsTok = count(JSON.stringify(createBuiltinTools(builtinSearch).listSpecs()));
+    const toolsTok = count(JSON.stringify([...createBuiltinTools(builtinSearch).listSpecs(), ...store.mcpTools]));
     const stubHost = {
       paths: { sep: navigator.platform.includes('Win') ? '\\' : '/' },
     } as unknown as Host;

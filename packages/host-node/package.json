@@ -15,9 +15,11 @@
     "build": "tsc -p tsconfig.json"
   },
   "dependencies": {
-    "@easycode/core": "workspace:*"
+    "@easycode/core": "workspace:*",
+    "cross-spawn": "^7.0.6"
   },
   "devDependencies": {
+    "@types/cross-spawn": "^6.0.6",
     "@types/node": "^26.6.1"
   }
 }

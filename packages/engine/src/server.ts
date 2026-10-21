@@ -55,6 +55,7 @@ import { loadModelDirectory, resolveModelMeta } from './model-catalog.js';
 import { buildSystemPrompt } from './prompts.js';
 import { Mutex, WorkspaceLockManager } from './workspace-lock.js';
 import { SettingsSecrets } from './settings-secrets.js';
+import { McpManager, validateMcpServers } from './mcp.js';
 import { DecisionStatsManager } from './stats.js';
 import { ShadowDecisionPolicy } from './shadow.js';
 import { runTestLoop, type TestLoopResult } from './test-loop.js';
@@ -187,6 +188,7 @@ export class AgentServer {
   private settingsLoading?: Promise<void>;
   private readonly settingsLock = new Mutex();
   private readonly settingsSecrets: SettingsSecrets;
+  private readonly mcp: McpManager;
   private readonly transientApiKeys = new Map<string, string>();
   /**
    * 词法工作区键 → 已解析的物理身份（`realpath` 归一化结果）。
@@ -198,6 +200,11 @@ export class AgentServer {
 
   constructor(private readonly host: Host) {
     this.settingsSecrets = new SettingsSecrets(host);
+    this.mcp = new McpManager(host, (id) => this.settingsLock.withLock(async () => {
+      const config = this.settings.mcpServers?.[id];
+      if (!config) throw new Error('未配置的 MCP 服务');
+      return this.settingsSecrets.mcpConfig(config);
+    }), () => this.events.emit({ sessionId: '', event: { type: 'mcp_catalog_changed' } }));
     this.decisionStats = new DecisionStatsManager(host);
     this.checkpoints = new CheckpointManager(host);
   }
@@ -615,6 +622,8 @@ export class AgentServer {
           : undefined,
       );
       // 权限规则（TODOS #47）：全局设置 + 项目级 .easycode/permissions.json 并集
+      this.mcp.sync(this.settings.mcpServers ?? {});
+      await this.mcp.register(builtinTools, turnController.signal);
       const permissionRules = await this.resolvePermissionRules(rt.data.meta.workspaceRoot);
       // 对话中系统消息：模型配置关闭时把系统提示词并入首条用户消息
       // 提取工作区规则与全局偏好并注入系统提示词（天然抗上下文压缩，TODOS #33）
@@ -936,6 +945,7 @@ export class AgentServer {
     return this.settingsLock.withLock(async () => {
       const next = this.settingsSecrets.merge(this.settings, submitted);
       this.settings = await this.settingsSecrets.save(next, this.settings, this.settingsFile());
+      this.mcp.sync(this.settings.mcpServers ?? {});
       return this.settingsSecrets.publicView(this.settings);
     });
   }
@@ -943,6 +953,35 @@ export class AgentServer {
   /** CLI 的 --api-key / 环境变量仅在本进程使用，不进入设置文件。 */
   setTransientProviderApiKey(providerId: string, apiKey: string): void {
     this.transientApiKeys.set(providerId, apiKey);
+  }
+
+  async getMcpServers() {
+    await this.ensureSettings();
+    this.mcp.sync(this.settings.mcpServers ?? {});
+    return this.mcp.statuses();
+  }
+
+  async retryMcpServer(id: string): Promise<void> {
+    await this.ensureSettings();
+    this.mcp.sync(this.settings.mcpServers ?? {});
+    await this.mcp.retry(id);
+  }
+
+  async getMcpCommands() {
+    await this.getMcpServers();
+    return this.mcp.commands();
+  }
+
+  async getMcpPrompt(server: string, name: string, args: Record<string, string>, token: string): Promise<string> {
+    await this.ensureSettings();
+    return this.mcp.prompt(server, name, args, token);
+  }
+
+  async getMcpTools() {
+    await this.getMcpServers();
+    const registry = createBuiltinTools();
+    await this.mcp.register(registry);
+    return registry.listSpecs().filter((tool) => tool.name.startsWith('mcp__'));
   }
 
   private async providerEntry(providerId: string): Promise<ProviderEntry> {
@@ -1016,11 +1055,11 @@ export class AgentServer {
   /** 终止所有会话的全部后台任务（应用退出时调用）。跨会话并行执行，总耗时以单任务为准 */
   async stopAllBackgroundTasks(): Promise<void> {
     await Promise.all(
-      [...this.bgManagers.values()].map((manager) =>
+      [this.mcp.dispose(), ...[...this.bgManagers.values()].map((manager) =>
         manager.disposeAll().catch(() => {
           // 单会话清理失败不影响其余会话
         }),
-      ),
+      )],
     );
   }
 
@@ -1285,6 +1324,7 @@ export class AgentServer {
       this.settings = stat
         ? this.migrateSettings(JSON.parse(await this.host.fs.readFile(this.settingsFile())) as Settings)
         : structuredClone(DEFAULT_SETTINGS);
+      validateMcpServers(this.settings.mcpServers ?? {});
     } catch {
       throw new Error('无法读取设置文件，请检查文件权限或恢复有效配置；原文件未修改');
     }
@@ -1296,6 +1336,7 @@ export class AgentServer {
       }
     }
     this.settingsLoaded = true;
+    this.mcp.sync(this.settings.mcpServers ?? {});
   }
 
   /** 旧版设置迁移：剔除演示供应商与 legacy 单模型字段（模型列表一律从空开始），并补齐新增预设 */

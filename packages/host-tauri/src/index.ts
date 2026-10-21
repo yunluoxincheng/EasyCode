@@ -79,8 +79,35 @@ function makePosixPaths(): Host['paths'] {
 export async function createTauriHost(): Promise<Host> {
   const info = await invoke<{ sep: string; data_dir: string }>('host_info');
   const paths = info.sep === '\\' ? makeWinPaths() : makePosixPaths();
+  let clean = false;
+  let cleaning: Promise<void> | undefined;
+  const ensureClean = (): Promise<void> => {
+    if (clean) return Promise.resolve();
+    cleaning ??= invoke<void>('stdio_reset').then(() => { clean = true; }).finally(() => { cleaning = undefined; });
+    return cleaning;
+  };
+  void ensureClean().catch(() => {});
 
   const host: Host = {
+    stdio: {
+      open: async (options, events) => {
+        await ensureClean();
+        const id = crypto.randomUUID();
+        const decoder = new TextDecoder('utf-8', { fatal: true });
+        const channel = new Channel<{ t: 'out'; data: string; seq: number } | { t: 'exit' }>();
+        channel.onmessage = (frame) => {
+          try {
+            if (frame.t === 'out') {
+              events.stdout(decoder.decode(Uint8Array.from(atob(frame.data), (c) => c.charCodeAt(0)), { stream: true }));
+              void invoke('stdio_ack', { id, seq: frame.seq }).catch(() => {});
+            }
+            else { const tail = decoder.decode(); if (tail) events.stdout(tail); events.exit(); }
+          } catch { events.exit(); void invoke('stdio_close', { id }).catch(() => {}); }
+        };
+        await invoke('stdio_open', { id, options, onEvent: channel });
+        return { write: (data) => invoke('stdio_write', { id, data }), close: () => invoke('stdio_close', { id }) };
+      },
+    },
     secrets: {
       status: () => invoke('secret_status'),
       get: (id) => invoke('secret_get', { id }),
@@ -361,6 +388,11 @@ export async function createTauriClient(options?: { reflexPolicy?: DecisionPolic
     setSessionEffort: async (id, effort) => server.setSessionEffort(id, effort),
     setSessionWorkspace: async (id, workspace) => server.setSessionWorkspace(id, workspace),
     getSettings: () => server.getSettings(),
+    getMcpServers: () => server.getMcpServers(),
+    retryMcpServer: (id) => server.retryMcpServer(id),
+    getMcpCommands: () => server.getMcpCommands(),
+    getMcpPrompt: (serverId, name, args, token) => server.getMcpPrompt(serverId, name, args, token),
+    getMcpTools: () => server.getMcpTools(),
     updateSettings: (patch) => server.updateSettings(patch),
     listProviderModels: (id) => server.listProviderModels(id),
     testProviderModel: (id, model) => server.testProviderModel(id, model),

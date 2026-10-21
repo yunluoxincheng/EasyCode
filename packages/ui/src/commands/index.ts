@@ -2,6 +2,8 @@
  * Composer 斜杠快捷指令定义（TODOS #32）
  */
 
+import type { McpCommand } from '@easycode/engine';
+
 export type CommandKind = 'action' | 'prompt';
 export type CommandCategory = 'git' | 'code' | 'session' | 'custom';
 
@@ -13,6 +15,7 @@ export interface SlashCommand {
   category: CommandCategory;
   badge: string; // 界面展示的极客标签，例如 '[Git]'
   template?: string; // prompt 模板
+  mcp?: McpCommand;
 }
 
 /** 内置快捷指令集合 */

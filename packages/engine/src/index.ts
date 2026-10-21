@@ -1,4 +1,6 @@
 export { AgentServer } from './server.js';
+export type { McpServerConfig, McpServerStatus, McpCommand } from './mcp.js';
+export { validateMcpServers } from './mcp.js';
 export type {
   CreateSessionOptions,
   SessionEventPayload,

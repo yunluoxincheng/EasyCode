@@ -200,6 +200,11 @@ const handlers: Record<string, Handler> = {
   'set-session-effort': (args) => server.setSessionEffort(args.id, args.effort),
   'set-session-workspace': (args) => server.setSessionWorkspace(args.id, args.workspace),
   'get-settings': () => server.getSettings(),
+  'get-mcp-servers': () => server.getMcpServers(),
+  'retry-mcp-server': (args) => server.retryMcpServer(args.id),
+  'get-mcp-commands': () => server.getMcpCommands(),
+  'get-mcp-prompt': (args) => server.getMcpPrompt(args.server, args.name, args.arguments, args.token),
+  'get-mcp-tools': () => server.getMcpTools(),
   'update-settings': async (args) => {
     const s = await server.updateSettings(args.patch);
     if (s.closeToTray !== undefined) {

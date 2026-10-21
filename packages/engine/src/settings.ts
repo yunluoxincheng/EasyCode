@@ -1,4 +1,5 @@
 import type { ApprovalMode, PermissionRule } from '@easycode/core';
+import type { McpServerConfig } from './mcp.js';
 
 /** 项目：命名的源文件夹，会话归属其下 */
 export interface ProjectEntry {
@@ -99,6 +100,7 @@ export interface ShellInfo {
 }
 
 export interface Settings {
+  mcpServers?: Record<string, McpServerConfig>;
   /** 缺省使用系统存储；无安全后端的 CLI / 演示使用明文模式并明示。 */
   secretStorage?: 'system' | 'plaintext';
   /** 只读运行状态，不落盘。 */

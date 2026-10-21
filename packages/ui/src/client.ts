@@ -8,6 +8,7 @@ import {
   type ProjectDecisionTree,
   type BackgroundTaskInfo,
   type TestCommandDetection,
+  type ToolSpec,
 } from '@easycode/core';
 import { AgentServer, type AgentClient, type ProviderEntry, type Settings } from '@easycode/engine';
 import type {
@@ -26,6 +27,8 @@ import type {
   WorkspaceFilePreview,
   RunTestLoopRequest,
   TestLoopResult,
+  McpServerStatus,
+  McpCommand,
 } from '@easycode/engine';
 
 export type { AgentClient };
@@ -114,6 +117,13 @@ export class IpcAgentClient implements AgentClient {
     return this.invoke<{ ok: boolean; latencyMs: number; resultCount?: number; error?: string }>(
       'test-web-search',
     );
+  }
+  getMcpServers() { return this.invoke<McpServerStatus[]>('get-mcp-servers'); }
+  retryMcpServer(id: string) { return this.invoke<void>('retry-mcp-server', { id }); }
+  getMcpCommands() { return this.invoke<McpCommand[]>('get-mcp-commands'); }
+  getMcpTools() { return this.invoke<ToolSpec[]>('get-mcp-tools'); }
+  getMcpPrompt(server: string, name: string, args: Record<string, string>, token: string) {
+    return this.invoke<string>('get-mcp-prompt', { server, name, arguments: args, token });
   }
   pickWorkspace() {
     return this.invoke<string | null>('pick-workspace');
@@ -310,6 +320,11 @@ export function createDemoClient(): AgentClient {
     setSessionEffort: (id, effort) => wrap(() => server.setSessionEffort(id, effort)),
     setSessionWorkspace: (id, workspace) => wrap(() => server.setSessionWorkspace(id, workspace)),
     getSettings: () => wrap(() => server.getSettings()),
+    getMcpServers: () => wrap(() => server.getMcpServers()),
+    retryMcpServer: (id) => wrap(() => server.retryMcpServer(id)),
+    getMcpCommands: () => wrap(() => server.getMcpCommands()),
+    getMcpTools: () => wrap(() => server.getMcpTools()),
+    getMcpPrompt: (serverId, name, args, token) => wrap(() => server.getMcpPrompt(serverId, name, args, token)),
     updateSettings: (patch) => wrap(() => server.updateSettings(patch)),
     listProviderModels: (id) => wrap(() => server.listProviderModels(id)),
     testProviderModel: (id, model) =>

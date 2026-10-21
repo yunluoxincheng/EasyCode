@@ -38,6 +38,7 @@ export function ContextChip({ compact = false }: { compact?: boolean }) {
     session?.model,
     session?.workspaceRoot,
     store.settings,
+    store.mcpCatalogVersion,
     store.structureVersion,
     running,
     displayVersion,

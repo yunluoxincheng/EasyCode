@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useState } from 'react';
+import { Fragment, lazy, Suspense, useEffect, useMemo, useState } from 'react';
 import { useStore } from '../useStore.js';
 import { updater } from '../updater.js';
 import { TerminalSelect } from './TerminalSelect.js';
@@ -6,6 +6,7 @@ import { ModelConfigDialog } from './ModelConfigDialog.js';
 import { ReflexDashboard } from './ReflexDashboard.js';
 import { PermissionRulesPanel } from './PermissionRulesPanel.js';
 import { TestLoopPanel } from './TestLoopPanel.js';
+const McpSettingsPanel = lazy(() => import('./McpSettingsPanel.js').then((m) => ({ default: m.McpSettingsPanel })));
 import { PROVIDER_PRESETS, providerLabel, validWebSearchBackend } from '@easycode/engine';
 import type {
   ModelTestResult,
@@ -46,6 +47,7 @@ function IconEdit() {
 const NAV: Array<{ id: SettingsSection; label: string; group: string }> = [
   { id: 'models', label: '模型服务', group: '配置' },
   { id: 'websearch', label: '联网搜索', group: '配置' },
+  { id: 'mcp', label: 'MCP 扩展', group: '配置' },
   { id: 'general', label: '常规', group: '配置' },
   { id: 'permissions', label: '权限规则', group: '安全与自动化' },
   { id: 'testloop', label: '测试自愈', group: '安全与自动化' },
@@ -1105,6 +1107,11 @@ export function SettingsPage() {
             <ReflexDashboard />
           </>
         )}
+
+        {section === 'mcp' && <Suspense fallback={<p className="hint">正在加载 MCP 配置…</p>}>
+          <McpSettingsPanel draft={draft} patch={patch} save={save} dirty={dirty} saving={saving}
+            discard={() => setDraft(structuredClone(store.settings!))} />
+        </Suspense>}
 
         {section === 'about' && (
           <>
