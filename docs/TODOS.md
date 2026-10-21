@@ -8,8 +8,8 @@
 
 | 顺序 | 编号 | 事项 | 当前状态 |
 |---|---|---|---|
-| 1 | #41 | API Key 系统安全存储 | PR #14 已以 Merge Commit 363e1b0 合并；52fde18 三平台 CI 通过 |
-| 2 | #35 | MCP 客户端接入 | PR #15 已合并为 d3cd412，随 v0.1.28 发布；Tauri GUI 待补验收，P3 见 #71 |
+| 1 | #41 | API Key 系统安全存储 | PR #14 已合并，已随 v0.1.28 发布，见 #72 |
+| 2 | #35 | MCP 客户端接入 | PR #15 已合并，Stdio 已随 v0.1.28 发布；Tauri GUI 待补验收，P3 见 #71 |
 | 3 | #42 | 子 Agent 任务委派 | 待办，首阶段聚焦只读探索 |
 | 4 | #43 | Git Worktree 并行会话 | 待办 |
 | 独立推进 | #40 | Reflex 决策与路由 | Stage A 工程完成；数据质量与训练收益待验证，后续接管阶段未实施 |
@@ -18,9 +18,13 @@
 
 ### 72. v0.1.28 发布
 
-**状态**：发布准备中（2026-10-21，用户已明确接受 Tauri GUI 验证边界并授权合并及完成发布）。PR #15 已以 Merge Commit d3cd412 合入 master，修复 HEAD beb54c3 三平台 Checks 39588951540 成功。
+**状态**：已发布（2026-10-21）。用户接受 Tauri GUI 验证边界后授权合并与发布，PR #15 合并为 d3cd412；发布准备 PR #16 合并为 f2078a7，Tag v0.1.28 指向该发布提交。Release 39592890428 的 Windows、macOS Universal、Linux 三平台全部成功，Release 为正式非草稿版本，已核对 latest 指向本版本。
 
-**范围**：通过独立 chore/v0.1.28-release 分支和发布 PR，将 tauri.conf.json 的唯一应用版本从 0.1.27 调整为 0.1.28，归档 CHANGELOG、同步 TODO（含 P3 #71），执行发布准备检查后以 Merge Commit 合入，再推送 v0.1.28 Tag 触发三平台 Release。验收构建结果、安装包及更新清单的版本/入口/签名存在性，不把它们等同于实际安装、自动更新或 Tauri GUI 回归。#71 仍待后续批次，不扩大功能和测试数量。
+**范围与检查**：唯一应用版本从 0.1.27 调整为 0.1.28，CHANGELOG 按 2026-10-21 归档，package.json 版本、生产 identifier 与发布工作流不变。发布准备仅三个文件，PR #16 Checks 39592056077 三平台成功，发布提交的 master Checks 39592696117 也成功；测试预算仍为 76 Node + 4 Rust = 80。#71 仍待后续批次，不扩大功能范围。
+
+**产物验收**：14 个资产齐全且大小非零，包括 Windows EXE/MSI、macOS Universal DMG/app.tar.gz、Linux AppImage/DEB/RPM、相关签名及 latest.json，名称与上一版本对应格式一致。latest.json 版本为 0.1.28，11 个更新入口均指向本 Tag 下现存资产，签名非空且逐项与对应 .sig 文件一致；Release 正文与 CHANGELOG 0.1.28 段落一致，远端 Tag SHA 已核对为 f2078a76357ad298c1e683453f1adbcae78bd810。
+
+**边界**：只核对产物元数据、清单与签名文件一致性，未执行签名的密码学验证、安装或实际自动更新。Tauri GUI 和 macOS/Linux 实际 MCP 桌面运行仍未补验收，用户已接受该边界；不将发布构建成功等同于这些运行验证。未读取私钥或正式用户配置。
 
 ### 71. MCP 高频目录通知的刷新预算
 
