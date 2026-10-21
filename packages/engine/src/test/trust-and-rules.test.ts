@@ -43,7 +43,7 @@ async function makeServer(host: NodeHost) {
   return server;
 }
 
-test('【P1 六轮】自动加载的项目规则不得经符号链接读取工作区外内容', async () => {
+test('【P1 六轮】项目规则和指令模板不得经符号链接读取工作区外内容', async () => {
   const { base, root, host, cleanup } = await makeWorkspace();
   try {
     const outside = path.join(base, 'outside-notes.txt');
@@ -54,6 +54,13 @@ test('【P1 六轮】自动加载的项目规则不得经符号链接读取工�
     const server = await makeServer(host);
     const rules = await server.getProjectRules(root);
     assert.equal(rules, null, '指向工作区外的规则文件必须被忽略');
+    const promptDir = path.join(root, '.easycode', 'prompts');
+    await fsp.mkdir(promptDir, { recursive: true });
+    await fsp.symlink(outside, path.join(promptDir, 'leak.md'));
+    await fsp.writeFile(path.join(promptDir, 'ok.md'), '# 正常指令\n执行构建。\n', 'utf8');
+    const prompts = await server.listCustomPrompts(root);
+    assert.deepEqual(prompts.map((p) => p.id), ['ok']);
+    assert.ok(prompts.every((p) => !p.template.includes('OUTSIDE-RULES-SECRET')));
 
     // 工作区内普通规则文件仍正常加载。
     // 用独立工作区避免命中 getProjectRules 的 3 秒 TTL 缓存（缓存 key 为工作区路径）。
@@ -85,8 +92,11 @@ test('【P1 六轮】项目信任撤销后，全量保存其它设置不得恢�
     // 信任 → 撤销
     await server.setProjectTrust(root, true);
     assert.equal(server.isProjectTrusted(root), true);
-    await server.setProjectTrust(root, false);
+    // 等价但字符串不同的路径也必须真正撤销，不留下旧授权。
+    await server.setProjectTrust(`${root.replace(/\\/g, '/')}/`, false);
     assert.equal(server.isProjectTrusted(root), false);
+    assert.equal((await server.resolvePermissionRules(root))?.some((r) => r.decision === 'allow') ?? false, false);
+    assert.equal(await server.countIgnoredProjectAllowRules(root), 1);
 
     // 模拟 UI 普通「保存设置」：patch 里**不应**携带 trustedWorkspaces
     // （UI 侧 saveSettings 已剥离该字段，此处验证引擎在缺省该字段时保持既有授权状态）

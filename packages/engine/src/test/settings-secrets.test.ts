@@ -16,6 +16,7 @@ class ControlledSecrets implements SecretStore {
   available = true;
   fault?: 'readback';
   writes = 0;
+  readonly failedDeletes = new Set<string>();
 
   async status() { return { available: this.available, backend: 'controlled-test-store' }; }
   private requireAvailable() {
@@ -33,6 +34,7 @@ class ControlledSecrets implements SecretStore {
   }
   async delete(id: string) {
     this.requireAvailable();
+    if (this.failedDeletes.has(id)) throw new Error('injected delete failure');
     this.values.delete(id);
   }
 }
@@ -59,6 +61,7 @@ function disk(host: MemoryHost): Settings {
 }
 
 function assertMasked(view: Settings) {
+  assert.equal(view.credentialCleanupRefs, undefined);
   for (const p of Object.values(view.providers)) {
     assert.equal(p.apiKey, undefined);
     assert.equal(p.apiKeyRef, undefined);
@@ -146,7 +149,7 @@ test('密钥替换提交失败：不覆盖旧引用或内存，重试成功后�
   assertNoTemporaryFiles(host);
 });
 
-test('后端不可用：列全恢复阻塞项，补填或清除后提交，旧凭据清理失败明确警告', async () => {
+test('后端恢复：列全阻塞项，旧凭据清理队列跨重启保留、部分重试并确认', async () => {
   const host = new CredentialHost();
   const server = new AgentServer(host);
   const view = await server.getSettings();
@@ -186,6 +189,38 @@ test('后端不可用：列全恢复阻塞项，补填或清除后提交，旧�
   assert.equal(disk(host).providers.alpha.apiKey, REPLACEMENT);
   assert.equal(disk(host).providers.beta.apiKeyRef, undefined);
   assert.equal(disk(host).webSearch?.tavilyApiKeyRef, undefined);
+  const refs = [...beforeValues.keys()];
+  assert.deepEqual(disk(host).credentialCleanupRefs?.sort(), refs.sort());
+  const unavailable = await new AgentServer(host).getSettings();
+  assertMasked(unavailable);
+  assert.match(unavailable.credentialStorageStatus?.warning ?? '', /旧凭据清理失败/);
+  assert.deepEqual(disk(host).credentialCleanupRefs?.sort(), refs);
+
+  // 删除成功但确认写回失败：保留原队列，不能撤销已保存的新配置。
+  host.secrets.available = true;
+  const betaRef = JSON.parse(before[FILE]).providers.beta.apiKeyRef as string;
+  host.secrets.failedDeletes.add(betaRef);
+  const rename = host.fs.rename;
+  host.fs.rename = async () => { throw new Error('injected cleanup acknowledgement failure'); };
+  const unacknowledged = await new AgentServer(host).getSettings();
+  assert.match(unacknowledged.credentialStorageStatus?.warning ?? '', /清理记录更新失败/);
+  assert.equal(disk(host).providers.alpha.apiKey, REPLACEMENT);
+  assert.deepEqual(disk(host).credentialCleanupRefs?.sort(), refs);
+  assert.deepEqual([...host.secrets.values.keys()], [betaRef]);
+  host.fs.rename = rename;
+
+  const restarted = new AgentServer(host);
+  assertMasked(await restarted.getSettings());
+  assert.deepEqual(disk(host).credentialCleanupRefs, [betaRef], '已删除引用幂等重试，失败项单独保留');
+  host.secrets.failedDeletes.clear();
+  const unrelatedRef = crypto.randomUUID();
+  host.secrets.values.set(unrelatedRef, 'test-only-unrelated');
+  const retried = await restarted.updateSettings({ maxSteps: 211, credentialCleanupRefs: [unrelatedRef] });
+  assertMasked(retried);
+  assert.equal(retried.credentialStorageStatus?.warning, undefined);
+  assert.equal(disk(host).credentialCleanupRefs, undefined);
+  assert.equal(host.secrets.values.has(betaRef), false);
+  assert.equal(host.secrets.values.has(unrelatedRef), true, '公开更新不能注入清理目标');
   assertNoTemporaryFiles(host);
 });
 

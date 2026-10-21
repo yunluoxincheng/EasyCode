@@ -19,6 +19,9 @@ test('matchCommandPattern 为前缀匹配且带词边界', () => {
   // 环境变量前缀不能绕过
   assert.equal(matchCommandPattern('rm', 'FOO=1 rm -rf /'), true);
   assert.equal(matchCommandPattern('rm', 'powershell -c "rm -rf /"'), true);
+  // P1：带空格的引号赋值曾使前缀剥离截断，必须保留 deny 裁决。
+  assert.equal(evaluatePermission([{ tool: 'run_command', pattern: 'rm', decision: 'deny' }],
+    'run_command', { command: 'A=1 FOO="hello world" rm -rf build' })?.decision, 'deny');
 });
 
 test('evaluatePermission：deny 优先于 allow，顺序无关', () => {

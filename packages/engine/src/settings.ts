@@ -103,6 +103,8 @@ export interface Settings {
   secretStorage?: 'system' | 'plaintext';
   /** 只读运行状态，不落盘。 */
   credentialStorageStatus?: { available: boolean; backend: string; warning?: string };
+  /** 引擎内部的待删除凭据 UUID；不接受外部写入，不通过公开设置返回。 */
+  credentialCleanupRefs?: string[];
   providers: Record<string, ProviderEntry>;
   projects: ProjectEntry[];
   defaultProvider: string;

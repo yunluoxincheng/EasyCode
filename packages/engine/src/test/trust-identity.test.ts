@@ -98,6 +98,16 @@ test('【P1 八轮】信任链接指向的 A 后改指 B，B 的项目 allow 不
     assert.equal(await server.getProjectTrust(wsLink), true);
     const rulesForB2 = await server.resolvePermissionRules(wsLink);
     assert.equal(rulesForB2?.some((r) => r.decision === 'allow'), true);
+    // 撤销 B 后物理路径也必须失去授权；改指不能复活 B 的旧授权。
+    await server.setProjectTrust(wsLink, false);
+    assert.equal(await server.getProjectTrust(projB), false);
+    await fsp.unlink(wsLink);
+    await fsp.symlink(projA, wsLink, 'junction');
+    assert.equal(await server.getProjectTrust(wsLink), true, '此前授予 A 的独立信任仍然有效');
+    await fsp.unlink(wsLink);
+    await fsp.symlink(projB, wsLink, 'junction');
+    assert.equal(await server.getProjectTrust(wsLink), false);
+    assert.equal((await server.resolvePermissionRules(wsLink))?.some((r) => r.decision === 'allow') ?? false, false);
   } finally {
     await cleanup();
   }
