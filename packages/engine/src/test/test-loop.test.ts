@@ -458,6 +458,8 @@ test('【P1 复审】测试循环期间不得切换工作区 / Provider / 回退
   });
 
   const pending = server.runTestLoop(session.id, { maxRounds: 1 });
+  // P1：紧接着重复启动，也只能有一个调用取得会话占位。
+  await assert.rejects(server.runTestLoop(session.id, { maxRounds: 1 }), /正在运行中/);
   // 等循环进入运行态（busy=true；此时 running 可能为 false——这正是复审指出的窗口）。
   // 必须带超时：忙等待若无上限，一旦状态没按预期变化就会把整个测试进程挂死。
   const waitDeadline = Date.now() + 5000;
@@ -477,6 +479,7 @@ test('【P1 复审】测试循环期间不得切换工作区 / Provider / 回退
 
   release?.();
   await pending;
+  assert.equal(host.runs.length, 1, '并发第二次启动不得实际执行命令');
 
   // 结束后恢复正常可用
   const meta = await server.setSessionWorkspace(session.id, '/ws2');

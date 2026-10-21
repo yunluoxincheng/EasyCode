@@ -1,9 +1,10 @@
 import crossSpawn from 'cross-spawn';
 import type { ChildProcess } from 'node:child_process';
 import type { StdioHost } from '@easycode/core';
+import { spawnWindowsJob } from './windows-job.js';
 
 interface Entry { id: string; child: ChildProcess; command: string; cwd?: string; startedAt: number }
-const BASE_ENV = new Set(['HOME', 'LOGNAME', 'PATH', 'SHELL', 'TERM', 'USER', 'APPDATA', 'HOMEDRIVE',
+const BASE_ENV = new Set(['HOME', 'LOGNAME', 'PATH', 'PATHEXT', 'COMSPEC', 'SHELL', 'TERM', 'USER', 'APPDATA', 'HOMEDRIVE',
   'HOMEPATH', 'LOCALAPPDATA', 'SYSTEMDRIVE', 'SYSTEMROOT', 'TEMP', 'TMP', 'USERDOMAIN', 'USERNAME', 'USERPROFILE']);
 
 export function createStdioHost(registry: Map<string, Entry>, kill: (id: string) => Promise<void>): StdioHost {
@@ -20,7 +21,8 @@ export function createStdioHost(registry: Map<string, Entry>, kill: (id: string)
         env[original ?? key] = value;
       }
       const id = `stdio_${crypto.randomUUID()}`;
-      const child = crossSpawn(options.command, options.args, {
+      const spawn = process.platform === 'win32' ? spawnWindowsJob : crossSpawn;
+      const child = spawn(options.command, options.args ?? [], {
         cwd: options.cwd, env, windowsHide: true, detached: process.platform !== 'win32', stdio: ['pipe', 'pipe', 'pipe'],
       });
       child.stdin!.on('error', () => {});
@@ -29,7 +31,13 @@ export function createStdioHost(registry: Map<string, Entry>, kill: (id: string)
       let closing: Promise<void> | undefined;
       const close = (): Promise<void> => {
         if (closing) return closing;
-        closing = kill(id).then(() => {
+        closing = (process.platform === 'win32' ? new Promise<void>((resolve, reject) => {
+          if (child.exitCode !== null || child.signalCode !== null) { registry.delete(id); resolve(); return; }
+          const timer = setTimeout(() => { child.removeListener('close', finished); reject(new Error('Stdio Job 退出超时')); }, 5000);
+          const finished = () => { clearTimeout(timer); registry.delete(id); resolve(); };
+          child.once('close', finished);
+          try { child.kill(); } catch { clearTimeout(timer); child.removeListener('close', finished); reject(new Error('Stdio Job 终止失败')); }
+        }) : kill(id)).then(() => {
           child.stdin!.destroy(); child.stdout!.destroy(); child.stderr!.destroy();
         }).catch(() => { closing = undefined; throw new Error('Stdio 进程清理失败，可重试'); });
         return closing;

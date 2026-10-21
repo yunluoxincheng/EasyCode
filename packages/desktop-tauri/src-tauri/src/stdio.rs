@@ -8,9 +8,15 @@ use std::process::{ChildStdin, Command, Stdio};
 use std::sync::{atomic::{AtomicBool, Ordering}, Arc, Condvar, Mutex};
 use std::time::Duration;
 use tauri::{ipc::Channel, AppHandle, Manager};
+#[cfg(windows)]
+#[path = "stdio_job.rs"]
+mod windows_job;
 
 struct Entry {
+    #[cfg(unix)]
     pid: u32,
+    #[cfg(windows)]
+    job: windows_job::Job,
     input: Mutex<Option<ChildStdin>>,
     closing: Mutex<()>,
     closed: AtomicBool,
@@ -34,7 +40,7 @@ pub struct Launch {
 #[serde(tag = "t", rename_all = "lowercase")]
 pub enum Frame { Out { data: String, seq: u64 }, Exit }
 
-const BASE_ENV: &[&str] = &["HOME", "LOGNAME", "PATH", "SHELL", "TERM", "USER", "APPDATA",
+const BASE_ENV: &[&str] = &["HOME", "LOGNAME", "PATH", "PATHEXT", "COMSPEC", "SHELL", "TERM", "USER", "APPDATA",
     "HOMEDRIVE", "HOMEPATH", "LOCALAPPDATA", "SYSTEMDRIVE", "SYSTEMROOT", "TEMP", "TMP",
     "USERDOMAIN", "USERNAME", "USERPROFILE"];
 
@@ -70,9 +76,7 @@ fn close_entry(entry: &Entry) -> Result<(), String> {
     let _guard = entry.closing.lock().map_err(|_| "Stdio 清理锁失败")?;
     if entry.closed.load(Ordering::SeqCst) { return Ok(()); }
     #[cfg(windows)]
-    if !*entry.exited.0.lock().map_err(|_| "Stdio 状态锁失败")? {
-        crate::kill_process(entry.pid).map_err(|_| "Stdio 进程树终止失败")?;
-    }
+    entry.job.terminate()?;
     #[cfg(unix)]
     {
         extern "C" { fn kill(pid: i32, signal: i32) -> i32; }
@@ -123,8 +127,14 @@ pub async fn stdio_open(app: AppHandle, id: String, options: Launch, on_event: C
         crate::hide_window(&mut command);
         #[cfg(unix)]
         { use std::os::unix::process::CommandExt; command.process_group(0); }
+        #[cfg(windows)]
+        let (mut child, job) = windows_job::Job::spawn(&mut command)?;
+        #[cfg(not(windows))]
         let mut child = command.spawn().map_err(|_| "Stdio 启动失败，请检查命令与工作目录")?;
-        let entry = Arc::new(Entry { pid: child.id(), input: Mutex::new(child.stdin.take()),
+        let entry = Arc::new(Entry {
+            #[cfg(unix)] pid: child.id(),
+            input: Mutex::new(child.stdin.take()),
+            #[cfg(windows)] job,
             closing: Mutex::new(()), closed: AtomicBool::new(false), exited: (Mutex::new(false), Condvar::new()),
             output: (Mutex::new((0, 0)), Condvar::new()) });
         registry.insert(id.clone(), entry.clone());

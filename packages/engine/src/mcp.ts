@@ -1,4 +1,38 @@
 import { McpClient, mcpText, MCP_LIMITS, type Host, type JsonSchema, type ToolRegistry, type McpPromptInfo } from '@easycode/core';
+import { Ajv, type AnySchema, type ValidateFunction } from 'ajv';
+import { Ajv2020 } from 'ajv/dist/2020.js';
+import { Ajv2019 } from 'ajv/dist/2019.js';
+
+const validators = new WeakMap<object, ValidateFunction>();
+function inputValidator(schema: { type: 'object'; [key: string]: unknown }) {
+  let validate = validators.get(schema);
+  if (!validate) {
+    const options = { strictSchema: true, strictTypes: false, strictTuples: false, strictRequired: false,
+      validateFormats: false, coerceTypes: false, removeAdditional: false, useDefaults: false,
+      addUsedSchema: false, ownProperties: true };
+    const draft = schema.$schema;
+    const ajv = draft === undefined || draft === 'https://json-schema.org/draft/2020-12/schema' ? new Ajv2020(options)
+      : draft === 'https://json-schema.org/draft/2019-09/schema' ? new Ajv2019(options)
+      : draft === 'http://json-schema.org/draft-07/schema#' || draft === 'https://json-schema.org/draft-07/schema#' ? new Ajv(options)
+      : undefined;
+    if (!ajv) throw new Error('MCP Schema 草案不受支持');
+    // MCP 官方服务的头参数来源标记是注解；Stdio 不据此转发 HTTP 头。
+    ajv.addKeyword({ keyword: 'x-mcp-header', valid: true });
+    // 不加载远程引用；未知关键字、无法解析的引用或无效规格明确拒绝。
+    validate = ajv.compile(schema as AnySchema);
+    validators.set(schema, validate);
+  }
+  const check = validate;
+  return (input: unknown) => {
+    if (typeof input === 'string') {
+      try { input = JSON.parse(input); } catch { return { ok: false as const, error: '输入不是合法 JSON' }; }
+    }
+    if (!input || typeof input !== 'object' || Array.isArray(input) || !check(input)) {
+      return { ok: false as const, error: 'MCP 参数不符合工具声明的 JSON Schema' };
+    }
+    return { ok: true as const, value: input as Record<string, unknown> };
+  };
+}
 
 export interface McpServerConfig {
   command: string;
@@ -133,15 +167,24 @@ export class McpManager {
             entry.status = { id: entry.id, state: 'error', toolCount: 0, promptCount: 0, error: '连接中断或协议错误，请手动重连' };
             this.changed();
           }
-        }, () => this.changed());
+        }, () => {
+          if (entry.client !== client || entry.revision !== revision) return;
+          try { for (const tool of client.tools) inputValidator(tool.inputSchema); }
+          catch {
+            entry.status = { id: entry.id, state: 'error', toolCount: 0, promptCount: 0, error: 'MCP 工具 Schema 不受支持或无效，请检查服务规格后重连' };
+            void client.close().catch(() => {});
+          }
+          this.changed();
+        });
         entry.client = client;
         await client.connect({ command: config.command, args: config.args ?? [], cwd: config.cwd || this.host.env.dataDir(), env: config.env });
+        for (const tool of client.tools) inputValidator(tool.inputSchema);
         if (revision === entry.revision && !this.disposed) {
           entry.status = { id: entry.id, state: 'ready', toolCount: client.tools.length, promptCount: client.prompts.length };
           this.changed();
         }
       } catch {
-        if (entry.revision === revision) entry.status = {
+        if (entry.revision === revision && entry.status.state !== 'error') entry.status = {
           id: entry.id, state: 'error', toolCount: 0, promptCount: 0,
           error: '连接或清理失败，请检查命令、参数、绝对工作目录和环境凭据后手动重连',
         };
@@ -219,12 +262,13 @@ export class McpManager {
           description: `[MCP:${entry.id}] ${tool.name}\n${(tool.description ?? '').slice(0, 4000)}`,
           parameters: tool.inputSchema as JsonSchema },
         sensitive: true, requiresWorkspace: false,
+        validateInput: inputValidator(tool.inputSchema),
         execute: async (input, ctx) => {
           if (entry.revision !== revision || entry.client !== client || entry.status.state !== 'ready' || client.catalogVersion !== catalog) {
             throw new Error('MCP 连接或配置已变化，请重新发起调用');
           }
           const result = await client.request('tools/call', { name: tool.name, arguments: input }, ctx.signal);
-          if (entry.revision !== revision || entry.client !== client || entry.status.state !== 'ready') {
+          if (entry.revision !== revision || entry.client !== client || entry.status.state !== 'ready' || client.catalogVersion !== catalog) {
             throw new Error('MCP 连接已变化，过期结果已丢弃');
           }
           return mcpText(result);

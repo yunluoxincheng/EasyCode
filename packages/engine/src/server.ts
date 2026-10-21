@@ -1328,6 +1328,7 @@ export class AgentServer {
     } catch {
       throw new Error('无法读取设置文件，请检查文件权限或恢复有效配置；原文件未修改');
     }
+    this.settings = await this.settingsSecrets.cleanup(this.settings, this.settingsFile());
     if (this.settingsSecrets.needsMigration(this.settings)) {
       try {
         this.settings = await this.settingsSecrets.save(this.settings, this.settings, this.settingsFile());

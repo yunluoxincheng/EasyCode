@@ -27,6 +27,7 @@ export class McpClient {
   private queuedWrites = 0;
   private capabilities: Record<string, unknown> = {};
   private refreshing?: Promise<void>;
+  private refreshDirty = false;
   tools: McpToolInfo[] = [];
   catalogVersion = 0;
   prompts: McpPromptInfo[] = [];
@@ -163,8 +164,11 @@ export class McpClient {
   }
 
   refresh(): Promise<void> {
+    this.refreshDirty = true;
     if (this.refreshing) return this.refreshing;
     this.refreshing = (async () => {
+      do {
+      this.refreshDirty = false;
       const tools = this.capabilities.tools ? await this.list('tools/list', 'tools', MCP_LIMITS.tools) : [];
       const prompts = this.capabilities.prompts ? await this.list('prompts/list', 'prompts', MCP_LIMITS.prompts) : [];
       const names = new Set<string>();
@@ -190,6 +194,8 @@ export class McpClient {
         names.add(prompt.name);
       }
       if (this.closed) throw new Error('MCP 连接已关闭');
+      // tools/prompts 任一列表读取期间有通知，整组重读后再发布。
+      if (this.refreshDirty) continue;
       const changed = JSON.stringify([this.tools, this.prompts]) !== JSON.stringify([tools, prompts]);
       this.tools = tools as McpToolInfo[];
       this.prompts = prompts as McpPromptInfo[];
@@ -197,7 +203,11 @@ export class McpClient {
         this.catalogVersion++;
         try { this.onCatalogChange(); } catch { /* 观察者不控制协议生命周期。 */ }
       }
-    })().finally(() => { this.refreshing = undefined; });
+      } while (this.refreshDirty);
+    })().catch((error) => { this.refreshDirty = false; throw error; }).finally(() => {
+      this.refreshing = undefined;
+      if (this.refreshDirty && !this.closed) return this.refresh();
+    });
     return this.refreshing;
   }
 

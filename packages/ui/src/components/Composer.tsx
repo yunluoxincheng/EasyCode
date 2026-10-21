@@ -30,7 +30,7 @@ export function Composer() {
   const textRef = useRef(text);
   textRef.current = text;
   const promptVersion = useRef(0);
-  const [mcpPrompt, setMcpPrompt] = useState<{ command: SlashCommand; start: number; end: number; sessionId: string | null } | null>(null);
+  const [mcpPrompt, setMcpPrompt] = useState<{ command: SlashCommand; start: number; end: number; draft: string; sessionId: string | null } | null>(null);
   const [mcpArgs, setMcpArgs] = useState<Record<string, string>>({});
   const [mcpLoading, setMcpLoading] = useState(false);
   const [dragOver, setDragOver] = useState(false);
@@ -130,7 +130,7 @@ export function Composer() {
 
   const openMcpPrompt = (command: SlashCommand, start: number, end: number) => {
     promptVersion.current++;
-    setMcpArgs({}); setMcpPrompt({ command, start, end, sessionId: store.activeId });
+    setMcpArgs({}); setMcpPrompt({ command, start, end, draft: textRef.current, sessionId: store.activeId });
     setSlash((s) => ({ ...s, open: false }));
   };
   const fillMcpPrompt = async () => {
@@ -138,7 +138,11 @@ export function Composer() {
     const source = chosen?.command.mcp;
     if (!chosen || !source || !store.client.getMcpPrompt) return;
     const version = ++promptVersion.current;
-    const original = textRef.current;
+    const original = chosen.draft;
+    if (store.activeId !== chosen.sessionId || (taRef.current?.value ?? textRef.current) !== original) {
+      setMcpPrompt(null);
+      store.showToast('输入内容已变化，请重新选择 Prompt', 'err'); return;
+    }
     setMcpLoading(true);
     try {
       const template = await store.client.getMcpPrompt(source.server, source.name, mcpArgs, source.catalogToken);

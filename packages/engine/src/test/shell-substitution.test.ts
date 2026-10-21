@@ -15,6 +15,7 @@ import {
 /* -------------------- P1：$() / 反引号命令替换 -------------------- */
 
 const SUBSTITUTION_BYPASS = [
+  'FOO="hello "world rm -rf build',
   'FOO=$(printf x) rm -rf build',
   'FOO=$(printf "a b") rm -rf build',
   'FOO=$(echo $(date)) rm -rf build',

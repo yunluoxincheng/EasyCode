@@ -57,7 +57,8 @@ try {
     nativeTests = Math.max(nativeTests, [...registered.matchAll(/: test\r?$/gm)].length);
   }
   console.log(`[ INFO ] 测试文件 ${testFiles}/${limit}；Rust ${nativeTests} 个计入总预算${args.includes('--native') ? '（已核对实际清单）' : '（声明统计；--native 执行并核对实际清单）'}。`);
-  let summary;
+  const counts = { tests: 0, passed: 0, failed: 0, skipped: 0, cancelled: 0, todo: 0 };
+  let runnerFailed = false;
   const exercised = new Set();
   // 不接受过滤参数，CI 与本地使用同一完整清单；动态注册和子测试按实际结果计数。
   for await (const event of run({ files: files.sort(), timeout: 60_000, forceExit: true })) {
@@ -65,17 +66,25 @@ try {
     if (event.type === 'test:fail') console.error(`[ ERR ] ${event.data.name}`, event.data.details.error);
     if (event.type === 'test:stdout') process.stdout.write(event.data.message);
     if (event.type === 'test:stderr') process.stderr.write(event.data.message);
-    if (event.type === 'test:summary') summary = event.data;
-    if (['test:pass', 'test:fail'].includes(event.type) && event.data.details.type === 'test' &&
-        files.includes(event.data.file) && path.resolve(root, event.data.name) !== event.data.file) {
-      exercised.add(event.data.file);
+    if (event.type === 'test:pass' || event.type === 'test:fail') {
+      const data = event.data;
+      if (event.type === 'test:fail') runnerFailed = true;
+      // Node 20 没有 test:summary，结果事件也没有 details.type。
+      // 排除文件包装节点；旧版无法识别的 suite 保守计入，不能少算预算。
+      if (data.details.type === 'suite' || (data.file && path.resolve(root, data.name) === data.file)) continue;
+      if (files.includes(data.file)) exercised.add(data.file);
+      counts.tests++;
+      if (data.skip) counts.skipped++;
+      else if (data.todo) counts.todo++;
+      else if (data.details.error?.failureType === 'cancelledByParent') counts.cancelled++;
+      else if (event.type === 'test:fail') counts.failed++;
+      else counts.passed++;
     }
   }
-  if (!summary) throw new Error('测试进程未返回完整统计');
-  const { tests, passed, failed, skipped, cancelled, todo } = summary.counts;
+  const { tests, passed, failed, skipped, cancelled, todo } = counts;
   const total = tests + nativeTests;
   console.log(`[ INFO ] Node ${tests}（通过 ${passed} / 失败 ${failed} / 跳过 ${skipped} / 取消 ${cancelled} / 待办 ${todo}）；加 Rust ${nativeTests}，项目共 ${total}/${limit}。`);
-  if (!summary.success || skipped || cancelled || todo || total > limit || exercised.size !== files.length) {
+  if (runnerFailed || !tests || skipped || cancelled || todo || total > limit || exercised.size !== files.length) {
     throw new Error('测试失败、存在未执行用例或超过 80 个上限；请精简/替换现有测试');
   }
   if (args.includes('--native')) {

@@ -28,6 +28,7 @@ export class SettingsSecrets {
 
   async publicView(settings: Settings): Promise<Settings> {
     const view = structuredClone(settings);
+    delete view.credentialCleanupRefs;
     view.secretStorage ??= this.host.secrets ? 'system' : 'plaintext';
     for (const p of Object.values(view.providers)) {
       p.hasApiKey = !!(p.apiKey || p.apiKeyRef);
@@ -84,6 +85,8 @@ export class SettingsSecrets {
   merge(current: Settings, patch: Partial<Settings>): Settings {
     const next = structuredClone({ ...current, ...patch });
     delete next.credentialStorageStatus;
+    // 清理目标只来自当前持久化状态，调用方不得指定任意凭据 UUID。
+    next.credentialCleanupRefs = current.credentialCleanupRefs?.slice();
     for (const [id, p] of Object.entries(next.providers)) {
       const previous = current.providers[id];
       const submitted = patch.providers?.[id];
@@ -126,6 +129,49 @@ export class SettingsSecrets {
     ].filter((ref): ref is string => !!ref));
   }
 
+  private pending(settings: Settings): string[] {
+    const keep = this.refs(settings);
+    return [...new Set((settings.credentialCleanupRefs ?? []).filter((ref) =>
+      typeof ref === 'string' && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(ref) && !keep.has(ref)))];
+  }
+
+  private async write(settings: Settings, file: string): Promise<void> {
+    const temp = `${file}.${crypto.randomUUID()}.tmp`;
+    try {
+      await this.host.fs.writeFile(temp, JSON.stringify(settings, null, 2));
+      await this.host.fs.rename(temp, file);
+    } catch (error) {
+      await this.host.fs.unlink?.(temp).catch(() => {});
+      throw error;
+    }
+  }
+
+  /** 在设置串行事务内调用；删除幂等，回写失败时保留原队列供重启重试。 */
+  async cleanup(settings: Settings, file: string): Promise<Settings> {
+    if (!settings.credentialCleanupRefs?.length) return settings;
+    const remaining: string[] = [];
+    for (const ref of this.pending(settings)) {
+      try {
+        if (!this.host.secrets) throw new Error('unavailable');
+        await this.host.secrets.delete(ref);
+      } catch { remaining.push(ref); }
+    }
+    const next = structuredClone(settings);
+    if (remaining.length) next.credentialCleanupRefs = remaining;
+    else delete next.credentialCleanupRefs;
+    this.warning = remaining.length
+      ? '旧凭据清理失败，待清理记录已保留，将在下次启动或保存设置时重试'
+      : undefined;
+    if (JSON.stringify(settings.credentialCleanupRefs) === JSON.stringify(next.credentialCleanupRefs)) return next;
+    try {
+      await this.write(next, file);
+      return next;
+    } catch {
+      this.warning = '凭据清理记录更新失败，原记录已保留，将在下次启动或保存设置时重试';
+      return settings;
+    }
+  }
+
   /** 凭据先写后读验证，配置同目录原子替换后才清理旧引用。 */
   async save(settings: Settings, previous: Settings, file: string): Promise<Settings> {
     const next = structuredClone(settings);
@@ -133,8 +179,6 @@ export class SettingsSecrets {
     next.secretStorage ??= this.host.secrets ? 'system' : 'plaintext';
     const created: string[] = [];
     const blocked: string[] = [];
-    const temp = `${file}.${crypto.randomUUID()}.tmp`;
-    let tempWritten = false;
     const transform = async (p: Credential, label: string): Promise<void> => {
       delete p.hasApiKey;
       if (next.secretStorage === 'plaintext') {
@@ -190,24 +234,20 @@ export class SettingsSecrets {
         delete config.clearEnv;
       }
       if (blocked.length) throw new CredentialRecoveryError(blocked);
+      const keep = this.refs(next);
+      next.credentialCleanupRefs = [...new Set([
+        ...this.pending(previous), ...[...this.refs(previous)].filter((ref) => !keep.has(ref)),
+      ])].filter((ref) => !keep.has(ref));
+      if (!next.credentialCleanupRefs.length) delete next.credentialCleanupRefs;
       await this.host.fs.mkdir(this.host.env.dataDir(), { recursive: true });
-      tempWritten = true;
-      await this.host.fs.writeFile(temp, JSON.stringify(next, null, 2));
-      await this.host.fs.rename(temp, file);
+      // 旧引用与新配置一起提交；此后即使崩溃也不会遗失清理目标。
+      await this.write(next, file);
     } catch (err) {
-      if (tempWritten) await this.host.fs.unlink?.(temp).catch(() => {});
       for (const ref of created) await this.host.secrets?.delete(ref).catch(() => {});
       if (err instanceof CredentialRecoveryError) throw err;
       throw new Error('密钥或设置保存失败，原设置已保留。请检查系统凭据存储；如需明文存储，请在常规设置中明确选择');
     }
     this.warning = undefined;
-    const keep = this.refs(next);
-    for (const ref of this.refs(previous)) {
-      if (!keep.has(ref)) {
-        try { await this.host.secrets?.delete(ref); }
-        catch { this.warning = '设置已保存，但旧凭据清理失败；旧凭据不再被当前设置引用'; }
-      }
-    }
-    return next;
+    return this.cleanup(next, file);
   }
 }
