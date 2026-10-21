@@ -81,6 +81,12 @@ export async function createTauriHost(): Promise<Host> {
   const paths = info.sep === '\\' ? makeWinPaths() : makePosixPaths();
 
   const host: Host = {
+    secrets: {
+      status: () => invoke('secret_status'),
+      get: (id) => invoke('secret_get', { id }),
+      set: (id, value) => invoke('secret_set', { id, value }),
+      delete: (id) => invoke('secret_delete', { id }),
+    },
     paths,
     fs: {
       readFile: (p) => invoke<string>('fs_read', { path: p }),

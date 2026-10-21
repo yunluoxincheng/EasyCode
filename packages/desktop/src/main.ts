@@ -13,6 +13,7 @@ import type { DecisionPolicy, DecisionRequest, DecisionResult } from '@easycode/
 import { NoopDecisionPolicy } from '@easycode/core';
 import { AgentServer } from '@easycode/engine';
 import { NodeHost } from '@easycode/host-node';
+import { createSecretStore } from './secret-store.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -104,7 +105,7 @@ function createWindow(): void {
 }
 
 const dataDir = () => app.getPath('userData');
-const host = new NodeHost({ dataDir: dataDir() });
+const host = new NodeHost({ dataDir: dataDir(), secrets: createSecretStore(dataDir()) });
 const server = new AgentServer(host);
 
 /**

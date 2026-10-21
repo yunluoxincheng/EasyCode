@@ -141,9 +141,14 @@ async function main(): Promise<number> {
 
   const apiKey = args.apiKey ?? process.env.EASYCODE_API_KEY;
   if (apiKey) {
-    const settings = await server.getSettings();
-    const entry = settings.providers[args.provider];
-    if (entry) entry.apiKey = apiKey;
+    server.setTransientProviderApiKey(args.provider, apiKey);
+  }
+
+  const settings = await server.getSettings();
+  if (settings.secretStorage === 'plaintext') {
+    console.warn('[ WAIT ] CLI 未注入系统安全存储，配置中的密钥使用明文模式；命令行或环境变量密钥仅在本进程内使用。');
+  } else if (!settings.credentialStorageStatus?.available) {
+    console.warn('[ WAIT ] CLI 无法读取系统安全存储，请使用命令行或环境变量提供本次所需的 API Key。');
   }
 
   const session = await server.createSession({

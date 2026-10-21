@@ -41,7 +41,8 @@
 ```bash
 pnpm install
 pnpm build      # 全部包构建
-pnpm test       # 现有 core + engine 测试
+pnpm test       # 全部 Node 测试，并检查包含 Rust 声明的 80 个总量预算
+pnpm test --native # 同时核对并执行 Rust 测试（需 Rust 工具链与原生依赖，CI 使用此入口）
 pnpm --filter @easycode/ui typecheck
 pnpm start      # Electron 版（开发调试用）
 
@@ -52,7 +53,9 @@ pnpm --filter @easycode/desktop-tauri run tauri:bundle    # 安装包
 
 无 API Key 时可直接体验演示模式（内存文件系统 + Mock 模型，完整走通工具调用 → 审批 → 结果回传）。
 
-Node.js 要求 >=20.14.0；CI 与 Release 使用 Node 22 / pnpm 11。PR 和 master 推送的三平台检查负责 TypeScript 构建、UI 类型与现有测试，原生安装包仍由独立 Release 工作流构建。
+Node.js 要求 >=20.14.0；测试建议使用与 CI 相同的 Node 22 / pnpm 11。PR 和 master 推送的三平台检查负责 TypeScript 构建、UI 类型、Node/Rust 测试与数量检查，原生安装包仍由独立 Release 工作流构建。
+
+项目测试总量硬上限为 **80 个**，当前为 **74 个 Node + 4 个 Rust = 78 个**。统一入口按测试源码发现文件，按实际注册数量统计 Node（包含动态和子测试）；原生模式还核对 Cargo 实际清单。超限、跳过、取消或空测试文件会失败。后续测试优先替换、精简现有检查，不默认追加“最小回归”。
 
 Reflex 影子模式默认关闭，首次使用时才加载本地运行时和模型。构建前可通过 `EASYCODE_REFLEX_MODEL_DIR` 指向包含 `model_int8.onnx`、`tokenizer.json`、`tokenizer_config.json`、`runtime_config.json` 的目录；默认查找相邻的 `../Reflex/models_export/deberta-v3-xsmall`。模型缺失时构建会警告，常规 Agent 可运行，Reflex 会退回无有效预测。构建仅打包当前使用的 ORT JSEP 后端；旧 `public/ort` 缓存无需删除，也不会全部进入安装产物。
 
@@ -104,7 +107,9 @@ pnpm cli "运行测试并修复失败" --workspace . --provider deepseek --yolo
 - Tauri 能力白名单；Electron `contextIsolation` + `sandbox`，渲染进程拿不到 Node 能力
 - IPC 白名单分发；preload 仅暴露 `invoke` / `onEvent` 两个通道
 - 工作区路径逃逸防护；命令超时与输出截断
-- API Key 与搜索密钥仅保存在本机设置文件
+- 模型与 Tavily API Key 默认使用系统安全存储：Tauri 通过系统凭据服务保存，Electron 使用 safeStorage 加密后存放在用户数据目录，Linux 的 basic_text 后端不视为安全存储。设置接口只返回是否已保存，输入框留空保持原密钥，输入新值替换，「清除密钥」需保存后生效
+- 首次读取旧明文配置时，先保存并回读凭据，再原子提交配置引用；失败保留原文件和可用密钥，在设置页提示重试。无安全后端时可在「常规」明确选择明文模式；CLI / 浏览器演示未注入安全后端时会明示明文模式，CLI 的环境变量与命令行 Key 仅在本进程使用
+- 系统保护不能防御同一用户权限下的任意恶意程序。迁移机器或降级到旧版本时可能需要重新填写密钥；Electron 密文依赖原操作系统账户与应用 profile，单独复制 settings.json 或 credentials 目录不足以保证可解密
 - **权限规则的信任边界**：项目级 `.easycode/permissions.json` 只能收紧权限（`deny` / `ask` 默认生效）；其中的 `allow` 默认被忽略，需在设置页对**该工作区**显式授予信任——信任按项目逐项记录（比对的是 `realpath` 解析出的**物理工作区身份**，只写入本机设置、绝不落在项目仓库），信任项目 A 不会连带放宽后来打开的 B、C；工作区若是指向别处的符号链接，改指到另一个仓库后原授权**不会**随之转移，需要重新授予。授权只能经引擎的信任接口变更，普通「保存设置」不会覆盖授权状态，因此撤销后不会被陈旧草稿恢复。克隆来的仓库无法自行取消用户的审批保护
 - **符号链接不构成路径规则的后门**：文件类工具在权限裁决与边界检查前会解析真实目标（`realpath` + `lstat`），**实际读写用的也是已验证的真实路径**（不是原始链接路径），审批返回后还会复核一次**绝对真实目标**——审批期间链接被换掉、或工作区根被改指到另一个项目，都会取消操作；工作区内的别名链接同样命中针对真实路径的规则；指向工作区外的链接一律拒绝；**悬空链接**（目标尚不存在）同样拒绝，不会被当成可新建的普通文件；`search_files` 递归遍历时对**每个候选文件**逐个校验；`@file` 引用、文件预览、**自动加载的项目规则（`AGENTS.md` 等）与自定义指令模板**等全部读取入口使用同一套边界；新建文件会校验其最近存在的父目录；同一物理工作区的不同写法共享同一把工作区锁。宿主缺少真实路径解析能力时保守拒绝，不假装安全
 
@@ -115,7 +120,7 @@ pnpm cli "运行测试并修复失败" --workspace . --provider deepseek --yolo
 ## Roadmap
 
 - [x] **v0.1** 多协议接入 · 工具与审批 · 项目管理 · 联网搜索 · 应用内更新
-- [ ] v0.2 剩余：API Key 入系统钥匙串
+- [ ] v0.2 收口：API Key 系统安全存储已实现，待审查与跨平台验证（TODOS #41）
 - [ ] v0.3 Git worktree 并行会话 · 子 agent · Routines 定时任务 · MCP 工具协议
 - [ ] v0.4 沙箱执行（Windows AppContainer / macOS sandbox-exec）· 插件市场
 

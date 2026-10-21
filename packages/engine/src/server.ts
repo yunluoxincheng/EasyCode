@@ -54,6 +54,7 @@ import type { ModelTestResult, ProviderEntry, ProviderModel, ProviderModelInfo }
 import { loadModelDirectory, resolveModelMeta } from './model-catalog.js';
 import { buildSystemPrompt } from './prompts.js';
 import { Mutex, WorkspaceLockManager } from './workspace-lock.js';
+import { SettingsSecrets } from './settings-secrets.js';
 import { DecisionStatsManager } from './stats.js';
 import { ShadowDecisionPolicy } from './shadow.js';
 import { runTestLoop, type TestLoopResult } from './test-loop.js';
@@ -183,6 +184,10 @@ export class AgentServer {
   private reflexPolicy: DecisionPolicy = new NoopDecisionPolicy();
   private settings: Settings = structuredClone(DEFAULT_SETTINGS);
   private settingsLoaded = false;
+  private settingsLoading?: Promise<void>;
+  private readonly settingsLock = new Mutex();
+  private readonly settingsSecrets: SettingsSecrets;
+  private readonly transientApiKeys = new Map<string, string>();
   /**
    * 词法工作区键 → 已解析的物理身份（`realpath` 归一化结果）。
    *
@@ -192,6 +197,7 @@ export class AgentServer {
   private readonly workspaceIdentities = new Map<string, string>();
 
   constructor(private readonly host: Host) {
+    this.settingsSecrets = new SettingsSecrets(host);
     this.decisionStats = new DecisionStatsManager(host);
     this.checkpoints = new CheckpointManager(host);
   }
@@ -592,8 +598,10 @@ export class AgentServer {
       // 联网搜索分流：总开关关闭=全部不搜索；有原生工具的走原生，否则走内置 web_search()
       const searchOn = caps.includes('websearch') && this.settings.webSearch?.enabled === true;
       const useNativeSearch = searchOn && supportsNativeWebSearch(model, entry.kind);
-      const provider = this.createProvider(rt.data.meta.providerId, model, useNativeSearch);
-      const webSearchCfg = this.settings.webSearch;
+      const provider = await this.createProvider(rt.data.meta.providerId, model, useNativeSearch);
+      const webSearchCfg = searchOn && !useNativeSearch
+        ? await this.settingsLock.withLock(() => this.settingsSecrets.webSearch(this.settings.webSearch))
+        : undefined;
       const builtinTools = createBuiltinTools(
         searchOn && !useNativeSearch && webSearchCfg && validWebSearchBackend(webSearchCfg)
           ? {
@@ -918,20 +926,32 @@ export class AgentServer {
 
   async getSettings(): Promise<Settings> {
     await this.ensureSettings();
-    return this.settings;
+    return this.settingsLock.withLock(() => this.settingsSecrets.publicView(this.settings));
   }
 
   async updateSettings(patch: Partial<Settings>): Promise<Settings> {
     await this.ensureSettings();
-    this.settings = {
-      ...this.settings,
-      ...patch,
-      // UI 总是提交全量 providers map，整体替换（按 key 合并会让"删除供应商"失效）
-      providers: patch.providers ? { ...patch.providers } : this.settings.providers,
-    };
-    await this.host.fs.mkdir(this.host.env.dataDir(), { recursive: true });
-    await this.host.fs.writeFile(this.settingsFile(), JSON.stringify(this.settings, null, 2));
-    return this.settings;
+    // 入队前复制，调用方后续修改草稿不影响已提交的更新。
+    const submitted = structuredClone(patch);
+    return this.settingsLock.withLock(async () => {
+      const next = this.settingsSecrets.merge(this.settings, submitted);
+      this.settings = await this.settingsSecrets.save(next, this.settings, this.settingsFile());
+      return this.settingsSecrets.publicView(this.settings);
+    });
+  }
+
+  /** CLI 的 --api-key / 环境变量仅在本进程使用，不进入设置文件。 */
+  setTransientProviderApiKey(providerId: string, apiKey: string): void {
+    this.transientApiKeys.set(providerId, apiKey);
+  }
+
+  private async providerEntry(providerId: string): Promise<ProviderEntry> {
+    return this.settingsLock.withLock(async () => {
+      const entry = this.settings.providers[providerId];
+      if (!entry) throw new Error(`未配置的模型服务: ${providerId}`);
+      const transient = this.transientApiKeys.get(providerId);
+      return transient !== undefined ? { ...entry, apiKey: transient } : this.settingsSecrets.provider(entry);
+    });
   }
 
   /* -------------------- 内部 -------------------- */
@@ -1004,8 +1024,8 @@ export class AgentServer {
     );
   }
 
-  private createProvider(providerId: string, model: string, nativeWebSearch: boolean): Provider {
-    const entry = this.settings.providers[providerId];
+  private async createProvider(providerId: string, model: string, nativeWebSearch: boolean): Promise<Provider> {
+    const entry = await this.providerEntry(providerId);
     if (!entry) throw new Error(`未配置的 Provider: ${providerId}，请在设置中检查`);
     switch (entry.kind) {
       case 'mock':
@@ -1023,7 +1043,7 @@ export class AgentServer {
   /** 从供应商 API 拉取可用模型及元数据（OpenAI 兼容 /models、Anthropic /v1/models） */
   async listProviderModels(providerId: string): Promise<ProviderModelInfo[]> {
     await this.ensureSettings();
-    const entry = this.settings.providers[providerId];
+    const entry = await this.providerEntry(providerId);
     if (!entry) throw new Error(`未配置的模型服务: ${providerId}`);
     if (entry.kind === 'mock') return [{ name: 'mock-1' }];
     if (!entry.baseURL) throw new Error('请先填写 Base URL');
@@ -1077,7 +1097,7 @@ export class AgentServer {
    */
   async testProviderModel(providerId: string, model: string): Promise<ModelTestResult> {
     await this.ensureSettings();
-    const entry = this.settings.providers[providerId];
+    const entry = await this.providerEntry(providerId);
     if (!entry) throw new Error(`未配置的模型服务: ${providerId}`);
     if (entry.kind === 'mock') return { ok: true, latencyMs: 0 };
     if (!entry.baseURL) throw new Error('请先填写 Base URL');
@@ -1157,8 +1177,17 @@ export class AgentServer {
     resultCount?: number;
     error?: string;
   }> {
-    await this.ensureSettings();
-    const ws = this.settings.webSearch;
+    let ws: Settings['webSearch'];
+    try {
+      await this.ensureSettings();
+      ws = await this.settingsLock.withLock(() => this.settingsSecrets.webSearch(this.settings.webSearch));
+    } catch (err) {
+      return {
+        ok: false,
+        latencyMs: 0,
+        error: err instanceof Error ? err.message : '无法读取联网搜索配置或密钥',
+      };
+    }
     if (!ws?.enabled) return { ok: false, latencyMs: 0, error: '联网搜索未开启' };
     if (!validWebSearchBackend(ws)) return { ok: false, latencyMs: 0, error: '搜索后端配置不完整' };
     const started = Date.now();
@@ -1243,12 +1272,29 @@ export class AgentServer {
 
   private async ensureSettings(): Promise<void> {
     if (this.settingsLoaded) return;
+    if (!this.settingsLoading) {
+      this.settingsLoading = this.loadSettings().finally(() => { this.settingsLoading = undefined; });
+    }
+    await this.settingsLoading;
+  }
+
+  private async loadSettings(): Promise<void> {
+    // 仅明确不存在时使用默认值；损坏或读取失败不得被自动迁移覆盖。
+    const stat = await this.host.fs.stat(this.settingsFile());
     try {
-      const raw = await this.host.fs.readFile(this.settingsFile());
-      const stored = JSON.parse(raw) as Settings;
-      this.settings = this.migrateSettings(stored);
+      this.settings = stat
+        ? this.migrateSettings(JSON.parse(await this.host.fs.readFile(this.settingsFile())) as Settings)
+        : structuredClone(DEFAULT_SETTINGS);
     } catch {
-      this.settings = structuredClone(DEFAULT_SETTINGS);
+      throw new Error('无法读取设置文件，请检查文件权限或恢复有效配置；原文件未修改');
+    }
+    this.settings = await this.settingsSecrets.cleanup(this.settings, this.settingsFile());
+    if (this.settingsSecrets.needsMigration(this.settings)) {
+      try {
+        this.settings = await this.settingsSecrets.save(this.settings, this.settings, this.settingsFile());
+      } catch {
+        this.settingsSecrets.warning = '旧密钥尚未迁移，原配置已保留并可继续使用。请解锁系统凭据存储后重新保存设置';
+      }
     }
     this.settingsLoaded = true;
   }
@@ -2252,7 +2298,8 @@ function extractLatestTodos(messages: ChatMessage[]): TodoItem[] | undefined {
 /** 联网搜索后端配置是否齐全 */
 export function validWebSearchBackend(ws: Settings['webSearch']): boolean {
   if (!ws?.enabled) return false;
-  if (ws.backend === 'tavily') return !!ws.tavilyApiKey?.trim();
+  if (ws.backend === 'tavily') return ws.tavilyApiKey !== undefined
+    ? !!ws.tavilyApiKey.trim() : !!(ws.tavilyApiKeyRef || ws.hasTavilyApiKey);
   if (ws.backend === 'custom') return !!ws.customUrl?.trim();
   return !!ws.searxngUrl?.trim();
 }

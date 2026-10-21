@@ -49,7 +49,17 @@ export interface SpawnedProcessInfo {
   alive: boolean;
 }
 
+/** 系统保护的凭据存储；错误信息不得包含密钥原文。 */
+export interface SecretStore {
+  status(): Promise<{ available: boolean; backend: string }>;
+  get(id: string): Promise<string | null>;
+  set(id: string, value: string): Promise<void>;
+  delete(id: string): Promise<void>;
+}
+
 export interface Host {
+  /** 未注入表示无系统安全存储能力（CLI / 浏览器演示）。 */
+  secrets?: SecretStore;
   fs: {
     readFile(path: string): Promise<string>;
     writeFile(path: string, data: string): Promise<void>;
@@ -58,7 +68,8 @@ export interface Host {
     readdir(path: string): Promise<FsDirent[]>;
     stat(path: string): Promise<null | { isDirectory: boolean; size: number; mtimeMs: number }>;
     unlink?(path: string): Promise<void>;
-    rename?(from: string, to: string): Promise<void>;
+    /** 同文件系统原子替换目标；失败必须抛错，不退回直接覆盖。设置与快照提交依赖此能力。 */
+    rename(from: string, to: string): Promise<void>;
     /**
      * 解析为真实绝对路径（消解符号链接 / 硬链接别名），用于权限裁决与工作区包含性校验。
      *

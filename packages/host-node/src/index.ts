@@ -14,6 +14,7 @@ import type {
 } from '@easycode/core';
 
 export interface NodeHostOptions {
+  secrets?: Host['secrets'];
   /** 持久化数据目录（会话、设置），如 Electron 的 userData */
   dataDir: string;
 }
@@ -32,6 +33,7 @@ interface SpawnEntry {
  * 真实文件系统 + 子进程；路径语义跟随当前平台。
  */
 export class NodeHost implements Host {
+  readonly secrets: Host['secrets'];
   readonly paths = {
     join: (...parts: string[]) => path.join(...parts),
     resolve: (...parts: string[]) => path.resolve(...parts),
@@ -127,6 +129,7 @@ export class NodeHost implements Host {
   private readonly spawnEntries = new Map<string, SpawnEntry>();
 
   constructor(options: NodeHostOptions) {
+    this.secrets = options.secrets;
     this.env = { dataDir: () => options.dataDir };
   }
 }

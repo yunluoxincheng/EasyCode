@@ -54,7 +54,12 @@ export interface ModelTestResult {
 export interface ProviderEntry {
   kind: 'openai-compatible' | 'anthropic' | 'responses' | 'mock';
   baseURL: string;
+  /** 写入的新值或旧明文配置；getSettings 不返回。空字符串表示显式清除。 */
   apiKey?: string;
+  /** 仅持久化及引擎内部使用，不接受 UI 指定引用。 */
+  apiKeyRef?: string;
+  /** 设置接口返回的存在标记，不包含原文。 */
+  hasApiKey?: boolean;
   /** 该供应商可用的模型列表 */
   models?: ProviderModel[];
   /** 模型上下文窗口大小（tokens），用于容量估算；缺省 128000 */
@@ -74,6 +79,8 @@ export interface WebSearchConfig {
   searxngUrl?: string;
   /** Tavily API Key（tvly- 开头） */
   tavilyApiKey?: string;
+  tavilyApiKeyRef?: string;
+  hasTavilyApiKey?: boolean;
   /** 自定义 API 地址模板，{query} 会被替换为 URL 编码后的搜索词 */
   customUrl?: string;
   /** 注入结果条数，默认 5（1-10） */
@@ -92,6 +99,12 @@ export interface ShellInfo {
 }
 
 export interface Settings {
+  /** 缺省使用系统存储；无安全后端的 CLI / 演示使用明文模式并明示。 */
+  secretStorage?: 'system' | 'plaintext';
+  /** 只读运行状态，不落盘。 */
+  credentialStorageStatus?: { available: boolean; backend: string; warning?: string };
+  /** 引擎内部的待删除凭据 UUID；不接受外部写入，不通过公开设置返回。 */
+  credentialCleanupRefs?: string[];
   providers: Record<string, ProviderEntry>;
   projects: ProjectEntry[];
   defaultProvider: string;

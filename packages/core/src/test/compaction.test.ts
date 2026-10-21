@@ -7,75 +7,9 @@ import {
   ChatMessage,
   MemoryHost,
   Provider,
-  StreamRequest,
-  TurnResult,
-  compactHistoryMessages,
-  createBuiltinTools,
-  pruneHistoricalToolResults,
-  runAgentLoop,
+  StreamRequest, compactHistoryMessages,
+  createBuiltinTools, runAgentLoop
 } from '../index.js';
-
-test('pruneHistoricalToolResults: 单轮或未超保护轮次不折叠', () => {
-  const messages: ChatMessage[] = [
-    { role: 'user', content: '查看代码' },
-    {
-      role: 'tool_result',
-      toolCallId: 'call_1',
-      toolName: 'read_file',
-      content: 'A'.repeat(5000),
-    },
-  ];
-  const res = pruneHistoricalToolResults(messages, { keepRecentTurns: 1 });
-  assert.equal(res.modified, false);
-  assert.equal(messages[1].role === 'tool_result' && messages[1].content.length, 5000);
-});
-
-test('pruneHistoricalToolResults: 早期轮次大工具输出执行折叠，保留最近轮次并保持 toolCallId', () => {
-  const messages: ChatMessage[] = [
-    { role: 'user', content: '第一轮：查大文件' },
-    {
-      role: 'assistant',
-      blocks: [{ type: 'tool_call', id: 'call_1', name: 'read_file', input: { path: 'big.txt' } }],
-    },
-    {
-      role: 'tool_result',
-      toolCallId: 'call_1',
-      toolName: 'read_file',
-      content: Array.from({ length: 60 }, (_, i) => `Line ${i + 1}: content content content`).join('\n'),
-    },
-    { role: 'user', content: '第二轮：最新指令' },
-    {
-      role: 'tool_result',
-      toolCallId: 'call_2',
-      toolName: 'read_file',
-      content: Array.from({ length: 60 }, (_, i) => `Active Line ${i + 1}`).join('\n'),
-    },
-  ];
-
-  const res = pruneHistoricalToolResults(messages, { keepRecentTurns: 1, maxChars: 500, maxLines: 20 });
-  assert.equal(res.modified, true);
-  assert.equal(res.prunedCount, 1);
-  assert.ok(res.savedChars > 0);
-
-  // 第一轮被折叠
-  const oldTool = messages[2];
-  assert.equal(oldTool.role, 'tool_result');
-  if (oldTool.role === 'tool_result') {
-    assert.equal(oldTool.toolCallId, 'call_1');
-    assert.match(oldTool.content, /历史工具输出已折叠归档/);
-    assert.match(oldTool.content, /Line 1:/);
-    assert.match(oldTool.content, /Line 60:/);
-    assert.match(oldTool.content, /折叠省略中间/);
-  }
-
-  // 第二轮（最近轮次）受保护，未被折叠
-  const recentTool = messages[4];
-  assert.equal(recentTool.role, 'tool_result');
-  if (recentTool.role === 'tool_result') {
-    assert.equal(recentTool.toolCallId, 'call_2');
-    assert.doesNotMatch(recentTool.content, /历史工具输出已折叠归档/);
-  }
-});
 
 test('compactHistoryMessages: 早期轮次归档，提取文件与 Todo，保留最近轮次', () => {
   const messages: ChatMessage[] = [

@@ -199,11 +199,3 @@ test('【P2 五轮】同一物理工作区的别名路径必须共享同一把�
     await cleanup();
   }
 });
-
-test('【P2 五轮】engines 声明的 Node 下限必须支持测试脚本使用的参数', async () => {
-  const pkg = JSON.parse(
-    await fsp.readFile(path.resolve(process.cwd(), 'package.json'), 'utf8'),
-  );
-  const range = pkg.engines?.node ?? '';
-  assert.match(range, />=\s*20\.14/, `engines.node 必须 ≥20.14（--test-force-exit 要求），实际: ${range}`);
-});

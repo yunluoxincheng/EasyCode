@@ -36,5 +36,16 @@ jobs:
         run: pnpm build
       - name: Check UI types
         run: pnpm --filter @easycode/ui typecheck
-      - name: Run existing tests
-        run: pnpm test
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: packages/desktop-tauri/src-tauri
+      - name: Install Linux native dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev
+      - name: Run all tests and enforce project limit
+        run: pnpm test --native
