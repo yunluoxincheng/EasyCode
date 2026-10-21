@@ -17,6 +17,8 @@ use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 mod secrets;
+mod stdio;
+use stdio::{stdio_open, stdio_write, stdio_close, stdio_reset, stdio_ack};
 use secrets::{secret_delete, secret_get, secret_set, secret_status};
 
 const MAX_PIPE: u64 = 400_000;
@@ -1307,6 +1309,7 @@ fn main() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .manage(PidMap::default())
+        .manage(stdio::StdioMap::default())
         .manage(SpawnMap::default())
         .manage(HttpAbortMap::default())
         .manage(CloseToTrayState(Mutex::new(true))) // 默认开启关闭最小化到托盘
@@ -1370,6 +1373,11 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             host_info,
+            stdio_open,
+            stdio_write,
+            stdio_close,
+            stdio_reset,
+            stdio_ack,
             secret_status,
             secret_get,
             secret_set,
@@ -1408,6 +1416,7 @@ fn main() {
                 tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
             ) {
                 kill_all_spawned(app_handle);
+                stdio::cleanup(app_handle);
             }
         });
 }

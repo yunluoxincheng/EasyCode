@@ -20,12 +20,19 @@ const BAR_COMPACT_WIDTH = 640;
 const selectComposer = (s: AppStore) => [
   s.activeId, s.activeSession, s.activeSession?.workspaceRoot,
   s.mode, s.running, s.composerInsertTick,
+  s.mcpCatalogVersion,
 ];
 
 export function Composer() {
   const store = useStoreSlice(selectComposer);
   const session = store.activeSession;
   const [text, setText] = useState('');
+  const textRef = useRef(text);
+  textRef.current = text;
+  const promptVersion = useRef(0);
+  const [mcpPrompt, setMcpPrompt] = useState<{ command: SlashCommand; start: number; end: number; draft: string; sessionId: string | null } | null>(null);
+  const [mcpArgs, setMcpArgs] = useState<Record<string, string>>({});
+  const [mcpLoading, setMcpLoading] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const [compact, setCompact] = useState(false);
   const taRef = useRef<HTMLTextAreaElement>(null);
@@ -70,6 +77,8 @@ export function Composer() {
   const historyRef = useRef<{ list: string[]; index: number; draft: string } | null>(null);
 
   useEffect(() => {
+    promptVersion.current++;
+    setMcpPrompt(null); setMcpLoading(false);
     historyRef.current = null;
     setMention({
       open: false,
@@ -88,15 +97,18 @@ export function Composer() {
     }));
   }, [store.activeId]);
 
-  // 加载工作区自定义指令（.easycode/prompts/*.md）
+  // 全局 MCP 与工作区 Prompt 独立加载，一个来源失败不清空另一个来源。
   useEffect(() => {
-    if (!session?.id || !session.workspaceRoot || !store.client.listCustomPrompts) {
+    let active = true;
+    if (!session?.id) {
       setSlash((s) => ({ ...s, customCommands: [] }));
       return;
     }
-    store.client
-      .listCustomPrompts(session.id)
-      .then((customs) => {
+    const custom = session.workspaceRoot && store.client.listCustomPrompts
+      ? store.client.listCustomPrompts(session.id).catch(() => []) : Promise.resolve([]);
+    const mcp = store.client.getMcpCommands?.().catch(() => []) ?? Promise.resolve([]);
+    void Promise.all([custom, mcp]).then(([customs, external]) => {
+        if (!active) return;
         const mapped: SlashCommand[] = (customs || []).map((c) => ({
           id: c.id,
           name: c.name,
@@ -106,12 +118,45 @@ export function Composer() {
           badge: '[自定义]',
           template: c.template,
         }));
-        setSlash((s) => ({ ...s, customCommands: mapped }));
-      })
-      .catch(() => {
-        setSlash((s) => ({ ...s, customCommands: [] }));
+        const mcpCommands: SlashCommand[] = external.map((c) => ({
+          id: c.alias, name: `/${c.alias}`, description: c.description,
+          kind: 'prompt', category: 'custom', badge: `[MCP:${c.server}]`, mcp: c,
+          template: c.kind === 'tool' ? `请使用 MCP 服务「${c.server}」的工具 ${c.alias}（${c.name}）处理以下任务：` : undefined,
+        }));
+        setSlash((s) => ({ ...s, customCommands: [...mapped, ...mcpCommands] }));
       });
-  }, [session?.id, session?.workspaceRoot]);
+    return () => { active = false; };
+  }, [session?.id, session?.workspaceRoot, store.mcpCatalogVersion, store.client]);
+
+  const openMcpPrompt = (command: SlashCommand, start: number, end: number) => {
+    promptVersion.current++;
+    setMcpArgs({}); setMcpPrompt({ command, start, end, draft: textRef.current, sessionId: store.activeId });
+    setSlash((s) => ({ ...s, open: false }));
+  };
+  const fillMcpPrompt = async () => {
+    const chosen = mcpPrompt;
+    const source = chosen?.command.mcp;
+    if (!chosen || !source || !store.client.getMcpPrompt) return;
+    const version = ++promptVersion.current;
+    const original = chosen.draft;
+    if (store.activeId !== chosen.sessionId || (taRef.current?.value ?? textRef.current) !== original) {
+      setMcpPrompt(null);
+      store.showToast('输入内容已变化，请重新选择 Prompt', 'err'); return;
+    }
+    setMcpLoading(true);
+    try {
+      const template = await store.client.getMcpPrompt(source.server, source.name, mcpArgs, source.catalogToken);
+      if (version !== promptVersion.current || store.activeId !== chosen.sessionId) return;
+      if ((taRef.current?.value ?? textRef.current) !== original) {
+        store.showToast('输入内容已变化，请重新选择 Prompt', 'err'); return;
+      }
+      setText(original.slice(0, chosen.start) + template + original.slice(chosen.end));
+      setMcpPrompt(null);
+      taRef.current?.focus();
+    } catch (error) {
+      if (version === promptVersion.current) store.showToast(error instanceof Error ? error.message : 'MCP Prompt 获取失败', 'err');
+    } finally { if (version === promptVersion.current) setMcpLoading(false); }
+  };
 
   /** 自适应撑高（TODOS #20）：按内容即时量高，CSS min/max-height 兜底 2~8 行；发送清空后自动收缩 */
   const resize = () => {
@@ -238,6 +283,7 @@ export function Composer() {
         (c) => c.name.toLowerCase() === token || c.id.toLowerCase() === token.slice(1),
       );
       if (matched) {
+        if (matched.mcp?.kind === 'prompt') { openMcpPrompt(matched, 0, token.length); return; }
         if (matched.kind === 'action') {
           setText('');
           historyRef.current = null;
@@ -401,6 +447,7 @@ export function Composer() {
     const ta = taRef.current;
     const start = slash.startIndex;
     const caret = ta?.selectionStart ?? (start + slash.query.length + 1);
+    if (cmd.mcp?.kind === 'prompt') { openMcpPrompt(cmd, start, caret); return; }
 
     setSlash((s) => ({
       ...s,
@@ -772,6 +819,16 @@ export function Composer() {
 
   return (
     <div className="composer">
+      {mcpPrompt && <div className="mcp-prompt-form" role="group" aria-label="MCP Prompt 参数">
+        <strong>[MCP:{mcpPrompt.command.mcp?.server}] {mcpPrompt.command.mcp?.name}</strong>
+        <p className="hint">仅展开到输入框，确认后再发送。</p>
+        {(mcpPrompt.command.mcp?.arguments ?? []).map((arg) => <label className="field" key={arg.name}>
+          <span>{arg.name}{arg.required ? '（必填）' : ''}</span>
+          <input value={mcpArgs[arg.name] ?? ''} placeholder={arg.description} onChange={(e) => setMcpArgs((args) => ({ ...args, [arg.name]: e.target.value }))} />
+        </label>)}
+        <div className="row"><button className="btn primary" disabled={mcpLoading} onClick={() => void fillMcpPrompt()}>{mcpLoading ? '获取中…' : '填入输入框'}</button>
+          <button className="btn" onClick={() => { promptVersion.current++; setMcpPrompt(null); setMcpLoading(false); }}>取消</button></div>
+      </div>}
       <div className="composer-bar" ref={barRef}>
         <div
           className="segmented compact mode-switch"

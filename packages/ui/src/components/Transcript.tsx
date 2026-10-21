@@ -90,6 +90,11 @@ const TOOL_LABELS: Record<string, string> = {
 };
 
 /** 工具输入摘要（单行） */
+function toolLabel(name: string): string {
+  const mcp = /^mcp__(.+?)__(.+)$/.exec(name);
+  return mcp ? `MCP:${mcp[1]} / ${mcp[2].replace(/_\d+$/, '')}` : TOOL_LABELS[name] ?? name;
+}
+
 function inputSummary(name: string, input: unknown): string {
   const i = (input ?? {}) as Record<string, unknown>;
   switch (name) {
@@ -224,7 +229,7 @@ function ToolCard({ item }: { item: ToolItem }) {
     <div className={`tool-card status-${item.status} ${open ? 'open' : ''}`}>
       <button className="tool-head" onClick={() => setOpen(!open)}>
         <span className={`tool-status ${item.status}`}>{statusIcon}</span>
-        <span className="tool-name">{TOOL_LABELS[item.name] ?? item.name}</span>
+        <span className="tool-name" title={item.name}>{toolLabel(item.name)}</span>
         <span className="tool-summary">{inputSummary(item.name, item.input)}</span>
         <ToolDuration item={item} className="tool-duration" />
         <span className="tool-chevron">{open ? '▾' : '▸'}</span>
@@ -330,10 +335,10 @@ function ApprovalCard({ item }: { item: ApprovalItem }) {
       ? `执行命令${i.background ? '（后台常驻）' : ''}：${String(i.command ?? '')}`
       : item.name === 'test_loop'
         ? `运行测试自愈循环（最多 ${String(i.maxRounds ?? 3)} 轮）：${String(i.command ?? '')}`
-        : `${TOOL_LABELS[item.name] ?? item.name}：${String(i.path ?? '')}`;
+        : `${toolLabel(item.name)}：${String(i.path ?? '')}`;
   return (
     <div className={`approval-card ${item.status}`}>
-      <div className="approval-head">需要你的批准 · {TOOL_LABELS[item.name] ?? item.name}</div>
+      <div className="approval-head">需要你的批准 · {toolLabel(item.name)}</div>
       <div className="approval-body">
         <code>{headline}</code>
         {item.reason && <div className="approval-reason">⚑ {item.reason}</div>}
@@ -606,7 +611,7 @@ function LiveTicker() {
   }, [startedAt]);
 
   if (pendingApproval) {
-    const label = TOOL_LABELS[pendingApproval.name] ?? pendingApproval.name;
+    const label = toolLabel(pendingApproval.name);
     return (
       <div className="live-ticker waiting">
         <span className="live-ticker-prefix">❯</span>
@@ -618,7 +623,7 @@ function LiveTicker() {
   }
 
   if (activeTool) {
-    const label = TOOL_LABELS[activeTool.name] ?? activeTool.name;
+    const label = toolLabel(activeTool.name);
     const summary = inputSummary(activeTool.name, activeTool.input);
     return (
       <div className="live-ticker running">
@@ -634,7 +639,7 @@ function LiveTicker() {
   if (preparingTool) {
     return <div className="live-ticker waiting">
       <span className="live-ticker-prefix">❯</span>
-      <span className="live-ticker-badge wait">[{TOOL_LABELS[preparingTool.name] ?? preparingTool.name}]</span>
+      <span className="live-ticker-badge wait">[{toolLabel(preparingTool.name)}]</span>
       <span className="live-ticker-text">正在生成工具调用参数...</span>
       <span className="live-ticker-cursor">█</span>
     </div>;

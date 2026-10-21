@@ -62,6 +62,9 @@ function disk(host: MemoryHost): Settings {
 
 function assertMasked(view: Settings) {
   assert.equal(view.credentialCleanupRefs, undefined);
+  for (const server of Object.values(view.mcpServers ?? {})) {
+    assert.equal(server.env, undefined); assert.equal(server.envRefs, undefined);
+  }
   for (const p of Object.values(view.providers)) {
     assert.equal(p.apiKey, undefined);
     assert.equal(p.apiKeyRef, undefined);
@@ -146,6 +149,24 @@ test('密钥替换提交失败：不覆盖旧引用或内存，重试成功后�
   assert.equal(await host.secrets.get(next.providers.alpha.apiKeyRef!), REPLACEMENT);
   assert.equal(await host.secrets.get(old.providers.alpha.apiKeyRef!), null);
   assert.equal(await host.secrets.get(next.providers.beta.apiKeyRef!), BETA);
+  const configured = await server.updateSettings({ mcpServers: {
+    qa: { command: 'credential-only', enabled: false, env: { TOKEN: ALPHA } },
+  } });
+  assertMasked(configured);
+  assert.deepEqual(configured.mcpServers?.qa.envConfigured, ['TOKEN']);
+  const envRef = disk(host).mcpServers!.qa.envRefs!.TOKEN;
+  const envBefore = host.snapshot(); const valuesBefore = new Map(host.secrets.values);
+  host.fs.rename = async () => { throw new Error('injected environment commit failure'); };
+  const rotated = { mcpServers: { qa: { command: 'credential-only', enabled: false, env: { TOKEN: BETA } } } };
+  await assert.rejects(server.updateSettings(rotated), /原设置已保留/);
+  assert.deepEqual(host.snapshot(), envBefore); assert.deepEqual(host.secrets.values, valuesBefore);
+  host.fs.rename = originalRename;
+  assertMasked(await server.updateSettings(rotated));
+  const rotatedRef = disk(host).mcpServers!.qa.envRefs!.TOKEN;
+  assert.equal(await host.secrets.get(rotatedRef), BETA);
+  assert.equal(await host.secrets.get(envRef), null);
+  await server.updateSettings({ mcpServers: {} });
+  assert.equal(await host.secrets.get(rotatedRef), null);
   assertNoTemporaryFiles(host);
 });
 

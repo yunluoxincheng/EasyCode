@@ -4,6 +4,7 @@ import net from 'node:net';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
+import { createStdioHost } from './stdio.js';
 import type {
   Host,
   ProcessRunOptions,
@@ -127,6 +128,8 @@ export class NodeHost implements Host {
 
   /** 后台进程注册表（TODOS #37） */
   private readonly spawnEntries = new Map<string, SpawnEntry>();
+  private readonly stdioEntries = new Map<string, SpawnEntry>();
+  readonly stdio = createStdioHost(this.stdioEntries, (id) => killSpawned(this.stdioEntries, id));
 
   constructor(options: NodeHostOptions) {
     this.secrets = options.secrets;

@@ -1,5 +1,5 @@
 import type { Host } from '../host.js';
-import { validateToolInput, type JsonSchema } from '../jsonschema.js';
+import { validateToolInput, type JsonSchema, type ValidationResult } from '../jsonschema.js';
 import type { ApprovalManager } from '../approval.js';
 import { startDecisionObservation, type DecisionPolicy, type DecisionOutcome } from '../policy.js';
 import {
@@ -88,6 +88,8 @@ export interface ToolContext {
 
 export interface Tool {
   spec: ToolSpec;
+  /** 外部注册工具可注入标准校验器；不改变内置工具的轻量参数契约。 */
+  validateInput?: (input: unknown) => ValidationResult<Record<string, unknown>>;
   /** 敏感操作在 ask 模式下需用户批准 */
   sensitive?: boolean;
   /** 是否依赖工作区（默认 true）；false 则未绑定项目的会话也可执行（如联网搜索） */
@@ -247,7 +249,7 @@ export async function executeTool(
       timing,
     };
   }
-  const validated = validateToolInput(rawInput, tool.spec.parameters);
+  const validated = tool.validateInput ? tool.validateInput(rawInput) : validateToolInput(rawInput, tool.spec.parameters);
   if (!validated.ok) {
     return {
       content: `参数校验失败: ${validated.error}`,

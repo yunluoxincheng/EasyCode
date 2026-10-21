@@ -1,5 +1,6 @@
 import type { Host } from '@easycode/core';
 import type { ProviderEntry, Settings, WebSearchConfig } from './settings.js';
+import { validateMcpServers, type McpServerConfig } from './mcp.js';
 
 type Credential = { apiKey?: string; apiKeyRef?: string; hasApiKey?: boolean };
 
@@ -39,6 +40,12 @@ export class SettingsSecrets {
       delete view.webSearch.tavilyApiKey;
       delete view.webSearch.tavilyApiKeyRef;
     }
+    for (const server of Object.values(view.mcpServers ?? {})) {
+      server.envConfigured = [...new Set([...Object.keys(server.env ?? {}), ...Object.keys(server.envRefs ?? {})])].sort();
+      delete server.env;
+      delete server.envRefs;
+      delete server.clearEnv;
+    }
     view.credentialStorageStatus = await this.status();
     return view;
   }
@@ -64,6 +71,16 @@ export class SettingsSecrets {
     return { ...ws, tavilyApiKey: await this.resolve({ apiKey: ws.tavilyApiKey, apiKeyRef: ws.tavilyApiKeyRef }) };
   }
 
+  async mcpConfig(config: McpServerConfig): Promise<McpServerConfig> {
+    const env: Record<string, string> = {};
+    for (const name of new Set([...Object.keys(config.env ?? {}), ...Object.keys(config.envRefs ?? {})])) {
+      env[name] = config.env?.[name] === '' ? '' : (await this.resolve({
+        apiKey: config.env?.[name], apiKeyRef: config.envRefs?.[name],
+      }) ?? '');
+    }
+    return { ...config, env, envRefs: undefined, envConfigured: undefined, clearEnv: undefined };
+  }
+
   /** UI 缺省密钥表示保留；空字符串是显式清除。引用只能来自引擎旧配置。 */
   merge(current: Settings, patch: Partial<Settings>): Settings {
     const next = structuredClone({ ...current, ...patch });
@@ -84,18 +101,31 @@ export class SettingsSecrets {
         ? undefined : current.webSearch?.tavilyApiKeyRef;
       delete next.webSearch.hasTavilyApiKey;
     }
+    for (const [id, config] of Object.entries(next.mcpServers ?? {})) {
+      const old = current.mcpServers?.[id];
+      const submitted = patch.mcpServers?.[id];
+      config.env = { ...old?.env, ...submitted?.env };
+      config.envRefs = { ...old?.envRefs };
+      for (const name of Object.keys(submitted?.env ?? {})) delete config.envRefs[name];
+      for (const name of submitted?.clearEnv ?? []) { delete config.env[name]; delete config.envRefs[name]; }
+      delete config.envConfigured;
+      delete config.clearEnv;
+    }
+    validateMcpServers(next.mcpServers ?? {});
     return next;
   }
 
   needsMigration(settings: Settings): boolean {
     return !!this.host.secrets && settings.secretStorage !== 'plaintext' &&
-      (Object.values(settings.providers).some((p) => !!p.apiKey) || !!settings.webSearch?.tavilyApiKey);
+      (Object.values(settings.providers).some((p) => !!p.apiKey) || !!settings.webSearch?.tavilyApiKey ||
+        Object.values(settings.mcpServers ?? {}).some((c) => Object.values(c.env ?? {}).some((value) => !!value)));
   }
 
   private refs(settings: Settings): Set<string> {
     return new Set([
       ...Object.values(settings.providers).map((p) => p.apiKeyRef),
       settings.webSearch?.tavilyApiKeyRef,
+      ...Object.values(settings.mcpServers ?? {}).flatMap((c) => Object.values(c.envRefs ?? {})),
     ].filter((ref): ref is string => !!ref));
   }
 
@@ -173,6 +203,7 @@ export class SettingsSecrets {
       }
     };
     try {
+      validateMcpServers(next.mcpServers ?? {});
       if (next.secretStorage !== 'system' && next.secretStorage !== 'plaintext') throw new Error('mode');
       if (next.secretStorage === 'system' && !(await this.status()).available) {
         throw new Error('unavailable');
@@ -186,6 +217,21 @@ export class SettingsSecrets {
         next.webSearch.tavilyApiKey = p.apiKey;
         next.webSearch.tavilyApiKeyRef = p.apiKeyRef;
         delete next.webSearch.hasTavilyApiKey;
+      }
+      for (const [id, config] of Object.entries(next.mcpServers ?? {})) {
+        const env: Record<string, string> = {};
+        const envRefs: Record<string, string> = {};
+        for (const name of new Set([...Object.keys(config.env ?? {}), ...Object.keys(config.envRefs ?? {})])) {
+          if (config.env?.[name] === '') { env[name] = ''; continue; }
+          const credential: Credential = { apiKey: config.env?.[name], apiKeyRef: config.envRefs?.[name] };
+          await transform(credential, `MCP ${id} 的环境变量 ${name}`);
+          if (credential.apiKey !== undefined) env[name] = credential.apiKey;
+          if (credential.apiKeyRef) envRefs[name] = credential.apiKeyRef;
+        }
+        config.env = env;
+        config.envRefs = envRefs;
+        delete config.envConfigured;
+        delete config.clearEnv;
       }
       if (blocked.length) throw new CredentialRecoveryError(blocked);
       const keep = this.refs(next);

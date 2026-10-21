@@ -8,13 +8,27 @@
 
 | 顺序 | 编号 | 事项 | 当前状态 |
 |---|---|---|---|
-| 1 | #41 | API Key 系统安全存储 | d86aa8a 三平台 CI 通过；本轮 #69 两项 P2 已本地修复验证，本批提交复审 |
-| 2 | #35 | MCP 客户端接入 | 待办，#41 后推进 |
+| 1 | #41 | API Key 系统安全存储 | PR #14 已以 Merge Commit 363e1b0 合并；52fde18 三平台 CI 通过 |
+| 2 | #35 | MCP 客户端接入 | PR #15 首轮四项修复已本地验证，本批提交复审，见 #70；远程传输后续 |
 | 3 | #42 | 子 Agent 任务委派 | 待办，首阶段聚焦只读探索 |
 | 4 | #43 | Git Worktree 并行会话 | 待办 |
 | 独立推进 | #40 | Reflex 决策与路由 | Stage A 工程完成；数据质量与训练收益待验证，后续接管阶段未实施 |
 
 ## 需求与实施记录
+
+### 70. PR #15 首轮审查：目录通知、Schema、Windows 进程树与草稿一致性
+
+**状态**：本地修复与验证完成，本批提交归档，待最新 CI 与复审（2026-10-21，用户已授权提交并推送）。将 #14 合并后的 master（363e1b0）以合并提交同步到 MCP 分支，冲突已解决；PR #15 目标为 master。初版 71b494a 的 CI 不代表本轮修复结果。
+
+**范围**：刷新期间的变更标记触发重读，不发布已知过期目录；外部工具标准 JSON Schema 校验禁止裁剪/转换参数，内置行为不变；Windows 使用 Job Object 管理 Stdio 后代，覆盖父进程先退出；Prompt 保存打开时草稿，变化后拒绝旧范围替换。依赖调整限 MCP 标准校验和 Windows 底层能力，真实 Windows 进程及双宿主走查优先，不突破 80 个测试预算。合并与发布需另行授权。
+
+**实现与依赖**：目录刷新合并通知并在发布前重读，收尾窗口的通知也不丢失，失败不启动无限重试；工具目录变化后旧调用及结果失效。Tool 只增加可注入校验入口，内置校验不变，Engine 使用 AJV 8.17.1 支持 Draft 7 / 2019-09 / 2020-12，禁用字段移除、默认值与类型转换；format、官方 x-mcp-header 为注解，远程引用和未知校验能力拒绝注册。Node 的 Windows Stdio 使用 PowerShell/.NET 监督 Job，原始标准句柄直传，监视引擎退出；Tauri 使用原生 Job API。子进程先挂起创建，加入 Job 后恢复，不以启动器是否仍存活作为清理依据。补齐 PATHEXT/COMSPEC；cross-spawn 固定到原锁定版本 7.0.6，保留其已有 Windows 参数解析，Rust 只直接引用已锁定 windows-sys 0.61.2 的 Job/线程功能，无现有依赖升级。系统若禁用 PowerShell Add-Type，Electron MCP 明确连接失败。
+
+**自动化证据**：新增两个聚焦协议用例，覆盖自由键、oneOf/anyOf、局部引用、patternProperties、嵌套数组、必填/类型拒绝、停用后旧审批不可执行和刷新交错；环境凭据轮换、配置 rename 失败回滚、服务删除清理复用原有用例。最终 Node 20.14.0 和 22.23.3 均为 76 pass / 0 fail / 0 skipped，Rust 实际 4 pass / 0 ignored，共 80/80、23 个测试源文件；后续增加测试需先替换现有用例。工作区 build、UI typecheck、Windows cargo check/build、frozen-lockfile 安装和 diff 检查通过。构建仍有分包/大块提示，未做性能基准。
+
+**真实运行证据**：Node 和 Tauri 原生 Job 代码分别用真实 Windows 进程验证：启动器先退出，后代仍存活，再关闭 Job 后后代退出；Node 引擎意外退出时监督进程也清理后代。官方 filesystem MCP 的 14 个工具完成标准校验后的实际读写；官方 reference 16 工具/4 Prompt 和 filesystem 在 Electron 同时就绪、同时重连后仍为 30 个唯一工具。移除配置后跟踪的 14 个进程全部退出，客户端目录最终为空。参考服务仅用作协议/模板验证，不作为真实业务数据证据。
+
+**桌面与边界**：重建后在真实 Electron 进程通过 CDP 验证：表单打开后编辑草稿，填入会保留全文并取消旧选择；草稿未变时，中文模板可替换中间指令并保留前后缀，会话消息仍为零、未调用商业模型。后台窗口的动作稳定性等待/截图曾超时，后续使用对应 mousedown/click DOM 事件触发真实组件处理并核对 DOM/会话结果，不将其称为截图或布局验收。自动审批审查拒绝重新启动 Tauri 隔离桌面验收进程，仅返回 blocked by policy，未重试/绕过；因此本轮不声称 Tauri GUI 已回归。原生 Job 实际进程证据及编译不替代该 GUI 检查，macOS/Linux 本轮亦未运行。临时源码及实际读写文件逐一清理，任务应用/服务已关闭，隔离 profile、证据与构建缓存保留；未读取正式配置。
 
 ### 69. PR #14 复审：Node 20 统计兼容与旧凭据持久化清理
 
@@ -263,9 +277,23 @@ PR #9 复审期间已发现一处测试可移植性缺陷：真实 Shell 语义�
 
 ---
 
-### 35. MCP (Model Context Protocol) 协议客户端接入（Stdio / SSE）
+### 35. MCP (Model Context Protocol) 协议客户端接入（Stdio / 远程传输）
 
-**状态**：⏳ 待办（规划中）
+**状态**：初版 71b494a 已发起 PR #15 并通过三平台 CI，首轮审查的四项修复本批提交复审，见 #70（2026-10-21）。#14 已合并为 363e1b0，PR #15 已改以 master 为目标并同步该合并结果；不将初版 CI 或 GUI 记录作为本轮修复结果。
+
+**本批边界**：按官方 2025-11-25 协议实现 initialize/initialized、分页工具与 Prompt 发现、tools/call、prompts/get、取消与列表变更；Core 只实现协议，宿主注入双向 Stdio，Node/Tauri 提供独立 stdout/stderr、参数数组、受限继承环境、进程树清理。提供全局 MCP 配置、启停、诊断与手动重连，工具默认敏感并复用现有审批和权限规则；配置变更后旧代工具不得执行。环境变量凭据复用 #41 安全存储，公开设置不返回保存的环境值或引用。设置支持兼容 mcpServers JSON 与卡片编辑，Composer 只在用户选择时获取 Prompt；工具结果仅支持现有文本/结构化呈现。资源有上限、请求超时，失败不自动重复启动。新增 cross-spawn 只用于 Node 宿主的 Windows 命令兼容，不升级现有依赖，不新增测试，项目预算维持 78/80。远程 Streamable HTTP（取代旧 SSE）、资源订阅和模型采样不在本批。
+
+**协议依据**：https://modelcontextprotocol.io/specification/2025-11-25/basic/transports 、basic/lifecycle、server/tools 与 server/prompts；已确认 UTF-8 换行分帧、握手顺序和能力协商。本地验证使用官方 MCP Server 与隔离工作区，不搭建 Mock 服务或读取正式配置。
+
+**实现**：Core 提供纯 TS MCP 协议与文本结果适配，Node/Tauri 注入独立双向管道；引擎按服务串行重配，初始化可中断，关闭失败保留重试句柄。MCP 工具与 Prompt 带目录代次校验，配置/目录变化后拒绝旧调用；全局目录失效事件仅发标记，UI 合并刷新规格并纳入容量估算。Tauri 使用流式 UTF-8 解码与最多 8 帧未确认输出的消费窗口，WebView 重载前清理旧管道；服务器 stderr 只排空不记录。最多 8 个服务，单服务工具 128 / Prompt 64，消息与目录有大小上限；回合含内置工具最多 128 个，MCP 工具规格总量最多 512 KiB。配置只支持明确字段，不把 `disabled` 等其他客户端字段静默解释为启用。
+
+**真实环境证据**：官方 @modelcontextprotocol/server-filesystem 发现 14 个工具，Node 实际 executeTool 审批拒绝无执行，允许后读/写隔离目录中的真实文件；审批等待时停用服务，再批准旧写调用未产生文件。官方参考 @modelcontextprotocol/server-everything 的 16 个工具 / 4 个 Prompt 完成发现，Prompt 真实协议展开通过，仅验证模板功能，不把参考服务器的合成工具输出作为业务证据。Electron 设置页 JSON 导入、卡片状态与 Composer 参数表单通过，中文模板只填入草稿，正式会话消息仍为零，未请求商业模型。
+
+Tauri 原生连接同样发现上述目录，中文 Prompt 与旧目录令牌拒绝通过；新增流控后连续 10 次中文 Prompt 回传完成。MCP 环境变量在 Windows 系统凭据中回读相等，设置文件与公开接口没有原文；移除服务后凭据删除。原生 WebView 重载后原有服务树 8 个进程均退出，新连接恢复为 30 个外部工具；会话容量估算收到全部 30 个规格。最终设置页截图已核对终端配色。QA 只使用独立 identifier / Electron profile 与一次性值，没有读取正式用户数据。
+
+**检查与边界**：工作区 build、UI typecheck、Windows Tauri 原生构建、现有完整原生测试入口通过（74 Node + 4 Rust = 78，无失败/跳过；未新增自动化测试）。锁文件只增加 cross-spawn 及其类型/依赖，原有锁定条目保持。远端三平台与 macOS/Linux GUI 尚未验证本批；协议列表变更、超时和资源上限机制已实现，未做恶意服务压力或性能基准。后台 Electron 的自动化 RAF/截图等待曾超时，后续 DOM/会话复核确认 Prompt 已填入且未发送，不把调试等待作为性能数据；原生重载出现旧 Channel 回调警告，同时已核实旧进程退出。临时脚本与 QA 凭据清理，隔离 profile、npm/构建缓存按删除规则保留。
+
+**后续**：远程优先按 Streamable HTTP 实现，旧 SSE 兼容、媒体/资源订阅与采样另行排期；外部进程不受内置文件路径沙箱约束，其写入不进入回合快照/撤销。#42、#43 仍为后续批次。
 
 **背景**：
 EasyCode 作为开放、可扩展的桌面 Coding Agent，目前仅提供内置的基础文件与命令操作工具（`read_file`, `write_file`, `edit_file`, `list_dir`, `search_files`, `run_command`, `todo_write`, `git_status`, `git_diff`）。
@@ -274,7 +302,7 @@ EasyCode 作为开放、可扩展的桌面 Coding Agent，目前仅提供内置�
 
 **设计方案**：
 1. **MCP Client 协议适配层（Core / Engine）**：
-   - 遵循标准 MCP 协议（JSON-RPC 2.0），优先支持 Stdio 进程管道传输（Command + Args + Env），未来可选扩展 SSE；
+   - 遵循标准 MCP 协议（JSON-RPC 2.0），优先支持 Stdio 进程管道传输（Command + Args + Env），远程 Streamable HTTP 与旧 SSE 兼容后续排期；
    - 握手协议周期：进程启动 → `initialize` 握手协商协议版本与能力 → `tools/list` 枚举外部工具清单（提取工具名、描述、JSON Schema 参数规范）→ 转换为 EasyCode 内置 `ToolDefinition`；
    - 动态注册进入 `ToolRegistry`：工具命名空间隔离（如 `mcp__postgres__query`），并在 Agent 执行工具时调用 `tools/call` 进行 RPC 派发与结果接收；
    - 遵循 EasyCode 安全审批机制：外部 MCP 工具默认继承审批策略（`ask` 模式下执行敏感 MCP 工具时触发 `ApprovalCard`，展示工具来源服务器与参数，经用户确认后执行）。
@@ -598,7 +626,7 @@ EasyCode 作为开放、可扩展的桌面 Coding Agent，目前仅提供内置�
 
 ### 41. API Key 系统钥匙串安全存储（Keychain / Credential Manager）
 
-**状态**：初版实现与 Windows 双壳验收完成，已提交 `46cee86` 并创建 PR #14，三平台 Checks `39468316990` 通过（2026-10-21）。首轮审查修复与新增回归的本地结果见 #67，待提交复审。用户确认按 #41 → #35 → #42 → #43 顺序推进。
+**状态**：PR #14 已以 Merge Commit 363e1b0 合并到 master（2026-10-21）。最终修复 52fde18 的三平台 Checks 39582172587 通过；初版及两轮修复证据见 #67、#68、#69。用户确认按 #41 → #35 → #42 → #43 顺序推进。
 
 **本批实施边界**：同时保护模型服务 Key 与 Tavily Key；Host 注入安全存储能力，Tauri 使用系统凭据存储，Electron 使用 safeStorage。设置接口只返回密钥是否存在，不回传已保存的原文；留空保持、显式清除、新输入替换。迁移先写入并回读凭据，再原子提交设置引用；失败保留旧设置和可用密钥，并在界面说明，不静默回退明文。无安全后端时允许用户明确选择明文模式；浏览器演示与未注入安全后端的 CLI 明示能力边界。更新配置串行化，失败不提前更新内存状态。#35、#42、#43 本批不实施；初版未新增测试，现按用户审查要求补充 #67 的回归。
 

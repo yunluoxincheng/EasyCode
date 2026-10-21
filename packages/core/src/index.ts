@@ -4,6 +4,7 @@ export * from './events.js';
 export * from './policy.js';
 // 宿主
 export * from './host.js';
+export * from './mcp.js';
 // 后台任务与端口探测（TODOS #37）
 export * from './tasks.js';
 // 审批

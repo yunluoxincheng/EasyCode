@@ -24,6 +24,8 @@ import type {
   TestLoopResult,
 } from './server.js';
 import type { TestCommandDetection } from '@easycode/core';
+import type { ToolSpec } from '@easycode/core';
+import type { McpServerStatus, McpCommand } from './mcp.js';
 
 /**
  * UI 与引擎之间的传输抽象：
@@ -33,6 +35,11 @@ import type { TestCommandDetection } from '@easycode/core';
  * 定义在 engine 层，使各宿主实现无需反向依赖 UI。
  */
 export interface AgentClient {
+  getMcpServers?(): Promise<McpServerStatus[]>;
+  retryMcpServer?(id: string): Promise<void>;
+  getMcpCommands?(): Promise<McpCommand[]>;
+  getMcpPrompt?(server: string, name: string, args: Record<string, string>, token: string): Promise<string>;
+  getMcpTools?(): Promise<ToolSpec[]>;
   listSessions(): Promise<SessionMeta[]>;
   createSession(options: {
     workspaceRoot: string;

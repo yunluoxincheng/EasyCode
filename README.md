@@ -55,7 +55,7 @@ pnpm --filter @easycode/desktop-tauri run tauri:bundle    # 安装包
 
 Node.js 要求 >=20.14.0；测试建议使用与 CI 相同的 Node 22 / pnpm 11。PR 和 master 推送的三平台检查负责 TypeScript 构建、UI 类型、Node/Rust 测试与数量检查，原生安装包仍由独立 Release 工作流构建。
 
-项目测试总量硬上限为 **80 个**，当前为 **74 个 Node + 4 个 Rust = 78 个**。统一入口按测试源码发现文件，按实际注册数量统计 Node（包含动态和子测试）；原生模式还核对 Cargo 实际清单。超限、跳过、取消或空测试文件会失败。后续测试优先替换、精简现有检查，不默认追加“最小回归”。
+项目测试总量硬上限为 **80 个**，当前为 **76 个 Node + 4 个 Rust = 80 个**。统一入口按测试源码发现文件，按实际注册数量统计 Node（包含动态和子测试）；原生模式还核对 Cargo 实际清单。超限、跳过、取消或空测试文件会失败。后续测试必须先替换、精简现有检查，不默认追加“最小回归”。
 
 Reflex 影子模式默认关闭，首次使用时才加载本地运行时和模型。构建前可通过 `EASYCODE_REFLEX_MODEL_DIR` 指向包含 `model_int8.onnx`、`tokenizer.json`、`tokenizer_config.json`、`runtime_config.json` 的目录；默认查找相邻的 `../Reflex/models_export/deberta-v3-xsmall`。模型缺失时构建会警告，常规 Agent 可运行，Reflex 会退回无有效预测。构建仅打包当前使用的 ORT JSEP 后端；旧 `public/ort` 缓存无需删除，也不会全部进入安装产物。
 
@@ -101,6 +101,31 @@ UI 的 `AppStore` 是可变事件仓库：全量订阅读取数值 `version`；�
 pnpm cli "列出工作区的所有 TODO" --workspace ./some-project --provider zhipu --model glm-4.6
 pnpm cli "运行测试并修复失败" --workspace . --provider deepseek --yolo
 ```
+
+## MCP 扩展（Stdio）
+
+在「设置 → MCP 扩展」添加本机服务，或导入兼容的配置，然后点击「保存并应用」：
+
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "E:/YourWorkspace"],
+      "enabled": true,
+      "timeoutMs": 30000
+    }
+  }
+}
+```
+
+仅配置可信服务，保存会以当前用户权限启动进程；参数使用字符串数组，工作目录使用绝对路径。JSON 使用本页示例中的字段，停用用 `enabled:false`；不支持的字段会拒绝导入。环境变量通过卡片设置或 JSON 的 `env` 输入，按常规设置选定的存储方式保存；已保存值不回显，未重新输入的已保存变量会保留，使用「清除」显式删除，不要把密钥写入命令参数。
+
+服务就绪后，Agent 可通过带命名空间的工具调用外部服务，并继承现有审批/权限规则；YOLO 模式的行为保持一致。MCP 授权按工具名配置，不能把远端参数路径当作客户端文件沙箱。Composer 的 `/` 菜单列出外部工具和 Prompt，Prompt 获取后只填入草稿，不自动发送。环境、工具目录或连接变化会使旧调用失效，失败连接需手动重连。
+
+MCP 工具支持 JSON Schema Draft 7、2019-09、2020-12（缺省），校验不裁剪字段、不转换类型、不填默认值；`format` 和 `x-mcp-header` 作为注解处理。远程引用、未知校验关键字或不支持的草案会拒绝注册，需由服务提供兼容规格。Windows 两个宿主使用 Job Object 管理 Stdio 后代；Electron 的监督进程依赖系统 Windows PowerShell 与 Add-Type，若系统策略禁用该能力会明确连接失败。Tauri 使用原生 Job API。
+
+最多配置 8 个服务；含内置工具每回合最多 128 个，外部工具规格总量最多 512 KiB。当前展示文本、结构化结果和文本资源；媒体、资源订阅、采样及远程 Streamable HTTP 尚未实现。外部进程不受工作区文件沙箱约束，外部工具的修改不进入内置回合快照/撤销。
 
 ## 安全设计
 

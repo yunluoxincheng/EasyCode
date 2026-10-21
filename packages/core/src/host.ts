@@ -57,9 +57,33 @@ export interface SecretStore {
   delete(id: string): Promise<void>;
 }
 
+export interface StdioLaunchOptions {
+  command: string;
+  args: string[];
+  cwd?: string;
+  /** 仅显式配置值与宿主允许的基础环境被传入子进程。 */
+  env?: Record<string, string>;
+}
+
+export interface StdioTransport {
+  write(message: string): Promise<void>;
+  /** 清理进程树，失败须保留可重试的句柄。 */
+  close(): Promise<void>;
+}
+
+export interface StdioHost {
+  open(options: StdioLaunchOptions, events: {
+    stdout(chunk: string): void;
+    stderr(chunk: string): void;
+    exit(): void;
+  }): Promise<StdioTransport>;
+}
+
 export interface Host {
   /** 未注入表示无系统安全存储能力（CLI / 浏览器演示）。 */
   secrets?: SecretStore;
+  /** 双向独立管道，供 MCP 等协议使用；浏览器演示不提供。 */
+  stdio?: StdioHost;
   fs: {
     readFile(path: string): Promise<string>;
     writeFile(path: string, data: string): Promise<void>;

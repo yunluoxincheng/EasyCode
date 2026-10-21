@@ -7,6 +7,7 @@ import type {
   TodoItem,
   BackgroundTaskInfo,
   TestRunSummary,
+  ToolSpec,
 } from '@easycode/core';
 import {
   providerLabel,
@@ -22,6 +23,7 @@ export type ViewName = 'chat' | 'settings';
 export type SettingsSection =
   | 'models'
   | 'websearch'
+  | 'mcp'
   | 'general'
   | 'permissions'
   | 'testloop'
@@ -136,6 +138,10 @@ export class AppStore {
   running = false;
   mode: ApprovalMode = 'ask';
   settings: Settings | null = null;
+  mcpTools: ToolSpec[] = [];
+  mcpCatalogVersion = 0;
+  private mcpRefresh?: Promise<void>;
+  private mcpRefreshAgain = false;
   demoMode = false;
   lastUsage: Usage | null = null;
   /** 当前会话活跃的任务清单（由 todo_write 驱动） */
@@ -212,6 +218,9 @@ export class AppStore {
     // 事件订阅放构造函数：store 是页面级单例，只订阅一次。
     // 多会话并发支持：全量事件均分流派发至对应的 SessionViewState，后台会话静默累积进度
     this.client.onEvent(({ sessionId, event }) => {
+      if (event.type === 'mcp_catalog_changed') {
+        this.mcpCatalogVersion++; this.notify(); void this.refreshMcpTools(); return;
+      }
       this.handleSessionEvent(sessionId, event);
     });
   }
@@ -1333,6 +1342,7 @@ export class AppStore {
 
   async loadSettings(): Promise<Settings> {
     this.settings = await this.client.getSettings();
+    void this.refreshMcpTools();
     this.notify();
     return this.settings;
   }
@@ -1351,6 +1361,7 @@ export class AppStore {
       };
     }
     this.settings = await this.client.updateSettings(sanitized);
+    void this.refreshMcpTools();
     this.notify();
   }
 
@@ -1360,7 +1371,26 @@ export class AppStore {
    */
   applySettings(next: Settings): void {
     this.settings = next;
+    void this.refreshMcpTools();
     this.notify();
+  }
+
+  /** 目录变化按事件合并刷新；空配置无额外 IPC，模型切换显式等待当前规格。 */
+  refreshMcpTools(): Promise<void> {
+    if (this.mcpRefresh) { this.mcpRefreshAgain = true; return this.mcpRefresh; }
+    this.mcpRefresh = (async () => {
+      do {
+        this.mcpRefreshAgain = false;
+        const enabled = Object.values(this.settings?.mcpServers ?? {}).some((c) => c.enabled !== false);
+        const tools = enabled ? await this.client.getMcpTools?.().catch(() => []) ?? [] : [];
+        if (JSON.stringify(tools) !== JSON.stringify(this.mcpTools)) {
+          this.mcpTools = tools;
+          this.mcpCatalogVersion++;
+          this.notify();
+        }
+      } while (this.mcpRefreshAgain);
+    })().finally(() => { this.mcpRefresh = undefined; });
+    return this.mcpRefresh;
   }
 
   /** 用系统文件管理器打开路径 */
