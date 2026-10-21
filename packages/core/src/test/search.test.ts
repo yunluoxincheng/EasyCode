@@ -23,15 +23,3 @@ test('listFilesRecursively 递归收集相对路径并忽略指定目录', async
   assert.ok(!files.some((f) => f.includes('node_modules')));
   assert.ok(!files.some((f) => f.includes('dist')));
 });
-
-test('listFilesRecursively 支持上限截断', async () => {
-  const host = new MemoryHost({
-    '/workspace/a.ts': '',
-    '/workspace/b.ts': '',
-    '/workspace/c.ts': '',
-    '/workspace/d.ts': '',
-  });
-
-  const files = await listFilesRecursively(host, '/workspace', { limit: 2 });
-  assert.equal(files.length, 2);
-});

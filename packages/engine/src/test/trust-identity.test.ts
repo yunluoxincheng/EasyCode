@@ -8,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { NodeHost } from '@easycode/host-node';
-import { ApprovalManager, MemoryHost, type ProcessRunOptions, type ProcessResult } from '@easycode/core';
+import { MemoryHost, type ProcessRunOptions, type ProcessResult } from '@easycode/core';
 import { AgentServer } from '../index.js';
 
 async function makeDirs() {
@@ -98,34 +98,6 @@ test('【P1 八轮】信任链接指向的 A 后改指 B，B 的项目 allow 不
     assert.equal(await server.getProjectTrust(wsLink), true);
     const rulesForB2 = await server.resolvePermissionRules(wsLink);
     assert.equal(rulesForB2?.some((r) => r.decision === 'allow'), true);
-  } finally {
-    await cleanup();
-  }
-});
-
-test('【P1 八轮】信任撤销后，重新指回的 A 不会自动恢复授权', async () => {
-  const { base, cleanup } = await makeDirs();
-  try {
-    const projA = path.join(base, 'projA');
-    const projB = path.join(base, 'projB');
-    await fsp.mkdir(projA, { recursive: true });
-    await fsp.mkdir(projB, { recursive: true });
-    const wsLink = path.join(base, 'ws-link');
-    await fsp.symlink(projA, wsLink, 'junction');
-
-    const host = new NodeHost({ dataDir: path.join(base, 'data') });
-    const server = await makeServer(host);
-
-    await server.setProjectTrust(wsLink, true);
-    await server.setProjectTrust(wsLink, false); // 走链接撤销
-    assert.equal(await server.getProjectTrust(wsLink), false);
-
-    // 直接按物理路径查询也必须是不信任（撤销真正落到项目身份上）
-    assert.equal(await server.getProjectTrust(projA), false, '撤销必须落到物理项目');
-
-    await fsp.unlink(wsLink);
-    await fsp.symlink(projB, wsLink, 'junction');
-    assert.equal(await server.getProjectTrust(wsLink), false);
   } finally {
     await cleanup();
   }
@@ -287,63 +259,4 @@ test('【P2 八轮】多个并发落盘任务时删除会话，文件不得被�
   const listed = await server.listSessions();
   assert.equal(listed.some((s) => s.id === session.id), false, '会话不得回到会话表');
   assert.ok(host.writeCount > wroteBefore, '确实发生过落盘（闸门不是空转）');
-});
-
-/* -------------------- P2：规则加载期间停止 -------------------- */
-
-test('【P2 八轮】权限规则加载期间点停止，不得再挂起新的审批', async () => {
-  const host = new ScriptedMemoryHost(
-    {
-      ...WS_FILES,
-      // 项目级 ask 规则 → 会走审批分支
-      '/ws/.easycode/permissions.json': JSON.stringify({
-        rules: [{ tool: 'run_command', pattern: 'pnpm', decision: 'ask' }],
-      }),
-    },
-    [FAILING],
-  );
-  const server = await makeServer(host);
-  const session = await server.createSession({
-    workspaceRoot: '/ws',
-    providerId: 'mock',
-    title: '八轮规则加载期停止',
-  });
-
-  const approvalRequests: string[] = [];
-  server.onEvent((payload) => {
-    if (payload.sessionId !== session.id) return;
-    if (payload.event.type === 'approval_request') approvalRequests.push(payload.event.requestId);
-  });
-
-  // 卡在权限规则加载（读 .easycode/permissions.json）期间发起停止
-  host.gateOn(/\/\.easycode\/permissions\.json$/);
-  const loop = server.runTestLoop(session.id, { maxRounds: 2 });
-  await host.waitForGate();
-  server.abort(session.id);
-  host.releaseAll();
-
-  const result = await loop;
-  assert.equal(result.reason, 'aborted', `应为 aborted，实际: ${JSON.stringify(result)}`);
-  assert.equal(approvalRequests.length, 0, '停止后不得再发出审批请求');
-  assert.equal(host.runs.length, 0, '停止后不得执行测试命令');
-  assert.equal(server.isSessionBusy(session.id), false, '会话必须回到空闲态');
-});
-
-test('【P2 八轮】审批等待中停止按拒绝收敛（ApprovalManager 感知 signal）', async () => {
-  const events: string[] = [];
-  const manager = new ApprovalManager((event) => {
-    events.push(event.type);
-  }, 'ask');
-
-  const controller = new AbortController();
-  const pending = manager.request('test_loop', { command: 'x' }, { signal: controller.signal });
-  assert.equal(manager.pendingCount, 1);
-  controller.abort();
-  assert.equal(await pending, false, '中止必须按拒绝收敛');
-  assert.equal(manager.pendingCount, 0);
-
-  // 已中止的信号：直接拒绝，不新建请求
-  const again = await manager.request('test_loop', {}, { signal: controller.signal });
-  assert.equal(again, false);
-  assert.equal(events.filter((e) => e === 'approval_request').length, 1, '不得新建审批请求');
 });

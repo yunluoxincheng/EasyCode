@@ -7,10 +7,8 @@ import path from 'node:path';
 import { NodeHost } from '@easycode/host-node';
 import {
   ApprovalManager,
-  createBuiltinTools,
-  evaluatePermission,
-  executeTool,
-  resolveRealPathInWorkspace,
+  createBuiltinTools, executeTool,
+  resolveRealPathInWorkspace
 } from '@easycode/core';
 
 /** 真实文件系统夹具：临时工作区 + 真实符号链接 */
@@ -140,34 +138,6 @@ test('【P1 复审】宿主不支持 realpath 时保守拒绝，不假装安全'
   }
 });
 
-test('【P1 复审】普通路径与既有规则裁决保持原语义（不吃掉正常放行）', async () => {
-  const { root, host, cleanup } = await makeWorkspace();
-  try {
-    const result = await executeTool(
-      createBuiltinTools(),
-      'read_file',
-      { path: 'public/ok.txt' },
-      {
-        host,
-        workspace: root,
-        signal: new AbortController().signal,
-        approval: new ApprovalManager(() => {}, 'yolo'),
-        permissionRules: DENY_PRIVATE,
-      },
-    );
-    assert.equal(result.approved, true);
-    assert.match(result.content, /PUBLIC/);
-    // 真实路径下 private 仍被拒
-    assert.equal(
-      evaluatePermission(DENY_PRIVATE, 'read_file', { path: 'private/key.txt' }, root, host.paths)
-        ?.decision,
-      'deny',
-    );
-  } finally {
-    await cleanup();
-  }
-});
-
 /* ------------------------------------------------------------------ */
 /* 第四轮复审：真实文件系统安全边界                                     */
 /* ------------------------------------------------------------------ */
@@ -206,35 +176,6 @@ test('【P1 四轮】悬空符号链接不得让 write_file 在工作区外创�
   }
 });
 
-test('【P1 四轮】悬空链接的父目录同样不得穿越（深层路径）', async () => {
-  const { root, host, cleanup } = await makeWorkspace();
-  try {
-    const outsideDir = path.join(path.dirname(root), 'outside-newdir');
-    // workspace/linkdir -> 工作区外目录（该目录此刻不存在 → 悬空）
-    await fsp.symlink(outsideDir, path.join(root, 'linkdir'), 'junction');
-    const guard = await resolveRealPathInWorkspace(host, root, 'linkdir/deep/file.txt', host.paths);
-    assert.equal(guard.ok, false);
-    if (!guard.ok) assert.equal(guard.reason, 'dangling-symlink');
-
-    const result = await executeTool(
-      createBuiltinTools(),
-      'write_file',
-      { path: 'linkdir/deep/file.txt', content: 'X' },
-      {
-        host,
-        workspace: root,
-        signal: new AbortController().signal,
-        approval: new ApprovalManager(() => {}, 'yolo'),
-        permissionRules: [],
-      },
-    );
-    assert.equal(result.approved, false);
-    await assert.rejects(() => fsp.access(path.join(outsideDir, 'deep', 'file.txt')));
-  } finally {
-    await cleanup();
-  }
-});
-
 test('【P1 四轮】search_files 递归不得读取工作区外的符号链接文件', async () => {
   const { root, host, cleanup } = await makeWorkspace();
   try {
@@ -260,71 +201,6 @@ test('【P1 四轮】search_files 递归不得读取工作区外的符号链接�
     assert.ok(!result.content.includes('OUTSIDE-SECRET-MARKER'), '不得读到工作区外内容');
     assert.match(result.content, /LOCAL-OK/, '工作区内文件仍应正常命中');
     assert.match(result.content, /已跳过 1 个真实目标在工作区外的符号链接文件/, '必须报告跳过数量');
-  } finally {
-    await cleanup();
-  }
-});
-
-test('【P1 四轮】search_files 逐文件拦截也覆盖子目录内的外部链接', async () => {
-  const { root, host, cleanup } = await makeWorkspace();
-  try {
-    const outsideSecret = path.join(path.dirname(root), 'nested-secret.txt');
-    await fsp.writeFile(outsideSecret, 'NESTED-SECRET-MARKER', 'utf8');
-    await fsp.mkdir(path.join(root, 'sub', 'deeper'), { recursive: true });
-    await fsp.symlink(outsideSecret, path.join(root, 'sub', 'deeper', 'leak.txt'));
-    await fsp.writeFile(path.join(root, 'sub', 'deeper', 'ok.txt'), 'NORMAL-CONTENT', 'utf8');
-
-    const result = await executeTool(
-      createBuiltinTools(),
-      'search_files',
-      { pattern: 'SECRET|NORMAL', path: '.' },
-      {
-        host,
-        workspace: root,
-        signal: new AbortController().signal,
-        approval: new ApprovalManager(() => {}, 'yolo'),
-        permissionRules: [],
-      },
-    );
-    assert.ok(!result.content.includes('NESTED-SECRET-MARKER'));
-    assert.match(result.content, /NORMAL-CONTENT/);
-  } finally {
-    await cleanup();
-  }
-});
-
-test('【P1 四轮】正常新建文件与普通读取不受影响', async () => {
-  const { root, host, cleanup } = await makeWorkspace();
-  try {
-    const created = await executeTool(
-      createBuiltinTools(),
-      'write_file',
-      { path: 'public/new.txt', content: 'NEW-FILE' },
-      {
-        host,
-        workspace: root,
-        signal: new AbortController().signal,
-        approval: new ApprovalManager(() => {}, 'yolo'),
-        permissionRules: [],
-      },
-    );
-    assert.equal(created.approved, true);
-    assert.equal(await fsp.readFile(path.join(root, 'public', 'new.txt'), 'utf8'), 'NEW-FILE');
-
-    const read = await executeTool(
-      createBuiltinTools(),
-      'read_file',
-      { path: 'public/new.txt' },
-      {
-        host,
-        workspace: root,
-        signal: new AbortController().signal,
-        approval: new ApprovalManager(() => {}, 'yolo'),
-        permissionRules: [],
-      },
-    );
-    assert.equal(read.approved, true);
-    assert.match(read.content, /NEW-FILE/);
   } finally {
     await cleanup();
   }

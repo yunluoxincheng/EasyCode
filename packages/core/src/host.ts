@@ -68,7 +68,8 @@ export interface Host {
     readdir(path: string): Promise<FsDirent[]>;
     stat(path: string): Promise<null | { isDirectory: boolean; size: number; mtimeMs: number }>;
     unlink?(path: string): Promise<void>;
-    rename?(from: string, to: string): Promise<void>;
+    /** 同文件系统原子替换目标；失败必须抛错，不退回直接覆盖。设置与快照提交依赖此能力。 */
+    rename(from: string, to: string): Promise<void>;
     /**
      * 解析为真实绝对路径（消解符号链接 / 硬链接别名），用于权限裁决与工作区包含性校验。
      *

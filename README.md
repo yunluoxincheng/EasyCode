@@ -41,7 +41,8 @@
 ```bash
 pnpm install
 pnpm build      # 全部包构建
-pnpm test       # 现有 core + engine 测试
+pnpm test       # 全部 Node 测试，并检查包含 Rust 声明的 80 个总量预算
+pnpm test --native # 同时核对并执行 Rust 测试（需 Rust 工具链与原生依赖，CI 使用此入口）
 pnpm --filter @easycode/ui typecheck
 pnpm start      # Electron 版（开发调试用）
 
@@ -52,7 +53,9 @@ pnpm --filter @easycode/desktop-tauri run tauri:bundle    # 安装包
 
 无 API Key 时可直接体验演示模式（内存文件系统 + Mock 模型，完整走通工具调用 → 审批 → 结果回传）。
 
-Node.js 要求 >=20.14.0；CI 与 Release 使用 Node 22 / pnpm 11。PR 和 master 推送的三平台检查负责 TypeScript 构建、UI 类型与现有测试，原生安装包仍由独立 Release 工作流构建。
+Node.js 要求 >=20.14.0；测试建议使用与 CI 相同的 Node 22 / pnpm 11。PR 和 master 推送的三平台检查负责 TypeScript 构建、UI 类型、Node/Rust 测试与数量检查，原生安装包仍由独立 Release 工作流构建。
+
+项目测试总量硬上限为 **80 个**，当前为 **74 个 Node + 4 个 Rust = 78 个**。统一入口按测试源码发现文件，按实际注册数量统计 Node（包含动态和子测试）；原生模式还核对 Cargo 实际清单。超限、跳过、取消或空测试文件会失败。后续测试优先替换、精简现有检查，不默认追加“最小回归”。
 
 Reflex 影子模式默认关闭，首次使用时才加载本地运行时和模型。构建前可通过 `EASYCODE_REFLEX_MODEL_DIR` 指向包含 `model_int8.onnx`、`tokenizer.json`、`tokenizer_config.json`、`runtime_config.json` 的目录；默认查找相邻的 `../Reflex/models_export/deberta-v3-xsmall`。模型缺失时构建会警告，常规 Agent 可运行，Reflex 会退回无有效预测。构建仅打包当前使用的 ORT JSEP 后端；旧 `public/ort` 缓存无需删除，也不会全部进入安装产物。
 

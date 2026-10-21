@@ -36,8 +36,6 @@ jobs:
         run: pnpm build
       - name: Check UI types
         run: pnpm --filter @easycode/ui typecheck
-      - name: Run existing tests
-        run: pnpm test
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
       - name: Rust cache
@@ -49,5 +47,5 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev
-      - name: Check Tauri native host
-        run: cargo check --locked --manifest-path packages/desktop-tauri/src-tauri/Cargo.toml
+      - name: Run all tests and enforce project limit
+        run: pnpm test --native

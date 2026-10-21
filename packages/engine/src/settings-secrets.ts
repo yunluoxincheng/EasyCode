@@ -3,6 +3,13 @@ import type { ProviderEntry, Settings, WebSearchConfig } from './settings.js';
 
 type Credential = { apiKey?: string; apiKeyRef?: string; hasApiKey?: boolean };
 
+class CredentialRecoveryError extends Error {
+  constructor(blocked: string[]) {
+    super(`无法切换为明文存储，以下密钥无法读取：${blocked.join('、')}。请重新填写或显式清除这些密钥后再保存；原设置已保留。`);
+    this.name = 'CredentialRecoveryError';
+  }
+}
+
 /** 只在引擎处理密钥。设置提交使用新引用，避免失败时覆盖旧凭据。 */
 export class SettingsSecrets {
   warning: string | undefined;
@@ -95,12 +102,18 @@ export class SettingsSecrets {
     delete next.credentialStorageStatus;
     next.secretStorage ??= this.host.secrets ? 'system' : 'plaintext';
     const created: string[] = [];
+    const blocked: string[] = [];
     const temp = `${file}.${crypto.randomUUID()}.tmp`;
     let tempWritten = false;
-    const transform = async (p: Credential): Promise<void> => {
+    const transform = async (p: Credential, label: string): Promise<void> => {
       delete p.hasApiKey;
       if (next.secretStorage === 'plaintext') {
-        p.apiKey = await this.resolve(p);
+        try {
+          p.apiKey = await this.resolve(p);
+        } catch {
+          blocked.push(label);
+          return;
+        }
         delete p.apiKeyRef;
       } else if (p.apiKey !== undefined) {
         if (p.apiKey) {
@@ -120,22 +133,25 @@ export class SettingsSecrets {
       if (next.secretStorage === 'system' && !(await this.status()).available) {
         throw new Error('unavailable');
       }
-      for (const p of Object.values(next.providers)) await transform(p);
+      for (const [id, p] of Object.entries(next.providers)) {
+        await transform(p, `模型服务 ${JSON.stringify(id)}`);
+      }
       if (next.webSearch) {
         const p: Credential = { apiKey: next.webSearch.tavilyApiKey, apiKeyRef: next.webSearch.tavilyApiKeyRef };
-        await transform(p);
+        await transform(p, 'Tavily 搜索');
         next.webSearch.tavilyApiKey = p.apiKey;
         next.webSearch.tavilyApiKeyRef = p.apiKeyRef;
         delete next.webSearch.hasTavilyApiKey;
       }
-      if (!this.host.fs.rename) throw new Error('atomic rename unavailable');
+      if (blocked.length) throw new CredentialRecoveryError(blocked);
       await this.host.fs.mkdir(this.host.env.dataDir(), { recursive: true });
       tempWritten = true;
       await this.host.fs.writeFile(temp, JSON.stringify(next, null, 2));
       await this.host.fs.rename(temp, file);
-    } catch {
+    } catch (err) {
       if (tempWritten) await this.host.fs.unlink?.(temp).catch(() => {});
       for (const ref of created) await this.host.secrets?.delete(ref).catch(() => {});
+      if (err instanceof CredentialRecoveryError) throw err;
       throw new Error('密钥或设置保存失败，原设置已保留。请检查系统凭据存储；如需明文存储，请在常规设置中明确选择');
     }
     this.warning = undefined;

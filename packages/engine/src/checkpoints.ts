@@ -266,12 +266,7 @@ export class CheckpointManager {
     }
     const list = this.parseCheckpointJson(tmpRaw, `${sessionId}.tmp`);
     try {
-      if (this.host.fs.rename) {
-        await this.host.fs.rename(tmpFile, targetFile);
-      } else {
-        await this.host.fs.writeFile(targetFile, tmpRaw);
-        await this.host.fs.unlink?.(tmpFile);
-      }
+      await this.host.fs.rename(tmpFile, targetFile);
     } catch {
       // 恢复晋升写回失败不阻断内存恢复结果
     }
@@ -355,16 +350,7 @@ export class CheckpointManager {
         // 若写入或 rename 失败，立即清理本次未提交的 .tmp（若 unlink 也失败则覆写中止标记），杜绝重启后错误恢复已回滚的事务
         try {
           await this.host.fs.writeFile(tmpFile, payload);
-          if (this.host.fs.rename) {
-            await this.host.fs.rename(tmpFile, targetFile);
-          } else {
-            await this.host.fs.writeFile(targetFile, payload);
-            try {
-              await this.host.fs.unlink?.(tmpFile);
-            } catch {
-              // 忽略临时文件清理异常
-            }
-          }
+          await this.host.fs.rename(tmpFile, targetFile);
         } catch (err) {
           try {
             await this.host.fs.unlink?.(tmpFile);

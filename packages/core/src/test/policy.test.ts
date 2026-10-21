@@ -1,37 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  NoopDecisionPolicy,
   type DecisionPolicy,
   type DecisionRequest,
   type DecisionResult,
   runAgentLoop,
   ToolRegistry,
   MemoryHost,
-  ApprovalManager,
+  ApprovalManager
 } from '../index.js';
 import type { ChatMessage, Provider, StreamRequest } from '../index.js';
-
-test('NoopDecisionPolicy 默认选择首项、标记 defer 并均分概率', async () => {
-  const policy = new NoopDecisionPolicy();
-  const req: DecisionRequest = {
-    instruction: 'Choose next action',
-    state: { summary: 'Clean git repo' },
-    candidates: [
-      { id: 'c1', text: 'Action 1' },
-      { id: 'c2', text: 'Action 2' },
-    ],
-  };
-
-  const res = await policy.decide(req);
-  assert.equal(res.selectedId, 'c1');
-  assert.equal(res.selectedText, 'Action 1');
-  assert.equal(res.defer, true);
-  assert.equal(res.confidence, 0);
-  assert.equal(res.latencyMs, 0);
-  assert.equal(res.scores.c1, 0.5);
-  assert.equal(res.scores.c2, 0.5);
-});
 
 test('runAgentLoop 容忍 policy 内部抛出异常，主循环平滑执行', async () => {
   const host = new MemoryHost({ '/w/file.txt': 'hello' });

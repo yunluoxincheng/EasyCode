@@ -1177,8 +1177,17 @@ export class AgentServer {
     resultCount?: number;
     error?: string;
   }> {
-    await this.ensureSettings();
-    const ws = await this.settingsLock.withLock(() => this.settingsSecrets.webSearch(this.settings.webSearch));
+    let ws: Settings['webSearch'];
+    try {
+      await this.ensureSettings();
+      ws = await this.settingsLock.withLock(() => this.settingsSecrets.webSearch(this.settings.webSearch));
+    } catch (err) {
+      return {
+        ok: false,
+        latencyMs: 0,
+        error: err instanceof Error ? err.message : '无法读取联网搜索配置或密钥',
+      };
+    }
     if (!ws?.enabled) return { ok: false, latencyMs: 0, error: '联网搜索未开启' };
     if (!validWebSearchBackend(ws)) return { ok: false, latencyMs: 0, error: '搜索后端配置不完整' };
     const started = Date.now();

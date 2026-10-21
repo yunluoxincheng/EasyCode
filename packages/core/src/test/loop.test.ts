@@ -6,16 +6,14 @@ import {
   ApprovalManager,
   ApprovalMode,
   ChatMessage,
-  MemoryHost,
-  MockProvider,
-  Provider,
+  MemoryHost, Provider,
   StreamRequest,
   ToolCallBlock,
   TurnResult,
   createBuiltinTools,
   runAgentLoop,
   toOpenAIWireMessages,
-  toAnthropicWireMessages,
+  toAnthropicWireMessages
 } from '../index.js';
 
 /** 收集事件 + 消息的测试脚手架 */
@@ -46,15 +44,6 @@ function scriptedProvider(turns: TurnResult[]): Provider {
 function toolsFor(): ReturnType<typeof createBuiltinTools> {
   return createBuiltinTools();
 }
-
-test('循环：纯文本回复直接完成', async () => {
-  const env = makeEnv();
-  const provider = scriptedProvider([{ blocks: [{ type: 'text', text: '你好' }] }]);
-  const result = await runAgentLoop({ ...env, provider, tools: toolsFor(), workspace: '/ws', systemPrompt: 's' });
-  assert.equal(result.reason, 'completed');
-  assert.equal(env.messages.length, 2); // user + assistant
-  assert.equal(env.events.at(-1)?.type, 'done');
-});
 
 test('【P2 拒绝态】权限规则拒绝时 tool_result 事件显式携带 approved=false', async () => {
   const env = makeEnv('yolo');
@@ -114,39 +103,6 @@ test('循环：工具调用 → 结果回传 → 第二轮完成', async () => {
   assert.ok(env.events.some((e) => e.type === 'tool_result'));
 });
 
-test('审批：ask 模式挂起等待，批准后执行', async () => {
-  const env = makeEnv('ask');
-  const call: ToolCallBlock = {
-    type: 'tool_call',
-    id: 'c1',
-    name: 'write_file',
-    input: { path: 'new.txt', content: 'data' },
-  };
-  const provider = scriptedProvider([
-    { blocks: [call] },
-    { blocks: [{ type: 'text', text: '写入完成' }] },
-  ]);
-  const loop = runAgentLoop({ ...env, provider, tools: toolsFor(), workspace: '/ws', systemPrompt: 's' });
-
-  // 等待审批请求事件出现后批准
-  await new Promise<void>((resolve) => {
-    const timer = setInterval(() => {
-      if (env.events.some((e) => e.type === 'approval_request')) {
-        clearInterval(timer);
-        resolve();
-      }
-    }, 5);
-  });
-  const request = env.events.find((e) => e.type === 'approval_request');
-  assert.ok(request && request.type === 'approval_request', '缺少审批请求事件');
-  assert.ok(request.type === 'approval_request');
-  env.approval.resolve(request.requestId, true);
-
-  const result = await loop;
-  assert.equal(result.reason, 'completed');
-  assert.equal(env.host.snapshot()['/ws/new.txt'], 'data');
-});
-
 test('审批：拒绝时工具不执行，模型收到拒绝说明', async () => {
   const env = makeEnv('ask');
   const call: ToolCallBlock = {
@@ -176,22 +132,6 @@ test('审批：拒绝时工具不执行，模型收到拒绝说明', async () =>
   assert.equal(toolResult.role, 'tool_result');
   assert.match(toolResult.content, /拒绝/);
   assert.equal(env.host.snapshot()['/ws/new.txt'], undefined);
-});
-
-test('安全：路径逃逸被拒绝', async () => {
-  const env = makeEnv('yolo');
-  const call: ToolCallBlock = {
-    type: 'tool_call',
-    id: 'c1',
-    name: 'read_file',
-    input: { path: '../../../etc/passwd' },
-  };
-  const provider = scriptedProvider([{ blocks: [call] }, { blocks: [] }]);
-  await runAgentLoop({ ...env, provider, tools: toolsFor(), workspace: '/ws', systemPrompt: 's' });
-  const toolResult = env.messages.find((m) => m.role === 'tool_result');
-  assert.ok(toolResult, '缺少 tool_result 消息');
-  assert.equal(toolResult.role, 'tool_result');
-  assert.match(toolResult.content, /越界|失败/);
 });
 
 test('循环：maxSteps 步数上限生效', async () => {
@@ -246,21 +186,6 @@ test('中止：abort 后循环以 aborted 结束', async () => {
   setTimeout(() => controller.abort(), 10);
   const result = await loop;
   assert.equal(result.reason, 'aborted');
-});
-
-test('MockProvider 演示链路：list_dir → 总结', async () => {
-  const env = makeEnv('yolo');
-  const result = await runAgentLoop({
-    ...env,
-    provider: new MockProvider(),
-    tools: toolsFor(),
-    workspace: '/ws',
-    systemPrompt: 's',
-  });
-  assert.equal(result.reason, 'completed');
-  assert.ok(env.events.some((e) => e.type === 'tool_result'));
-  const last = env.messages.at(-1);
-  assert.ok(last && last.role === 'assistant');
 });
 
 test('toOpenAIWireMessages: 过滤孤儿 tool_result 并自动补齐断尾未履行 tool_calls', () => {

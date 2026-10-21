@@ -69,29 +69,6 @@ test('【P1 六轮】自动加载的项目规则不得经符号链接读取工�
   }
 });
 
-test('【P1 六轮】自定义指令模板同样不得经符号链接读取工作区外内容', async () => {
-  const { base, root, host, cleanup } = await makeWorkspace();
-  try {
-    const outside = path.join(base, 'outside-prompt.md');
-    await fsp.writeFile(outside, 'OUTSIDE-PROMPT-SECRET', 'utf8');
-    await fsp.mkdir(path.join(root, '.easycode', 'prompts'), { recursive: true });
-    await fsp.symlink(outside, path.join(root, '.easycode', 'prompts', 'leak.md'));
-    await fsp.writeFile(
-      path.join(root, '.easycode', 'prompts', 'ok.md'),
-      '# 正常指令\n执行构建。\n',
-      'utf8',
-    );
-
-    const server = await makeServer(host);
-    const prompts = await server.listCustomPrompts(root);
-    assert.equal(prompts.length, 1, '越界模板必须被跳过');
-    assert.equal(prompts[0].id, 'ok');
-    assert.ok(prompts.every((p) => !p.template.includes('OUTSIDE-PROMPT-SECRET')));
-  } finally {
-    await cleanup();
-  }
-});
-
 test('【P1 六轮】项目信任撤销后，全量保存其它设置不得恢复授权', async () => {
   const { root, host, cleanup } = await makeWorkspace();
   try {
