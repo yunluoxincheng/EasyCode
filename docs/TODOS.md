@@ -23,7 +23,7 @@
 
 **范围与流程**：唯一应用版本从 0.1.28 调整为 0.1.29，CHANGELOG 按 2026-10-22 归档；package.json、Cargo.toml 版本、生产 identifier 与发布工作流保持不变。独立发布准备分支经 PR 与 Merge Commit 合入 master 后，才创建并推送 v0.1.29。发布准备、本地检查、三平台 Checks 与发布资产结果分别记录，不提前视为已发布。
 
-**发布准备本地检查**：工作区 build、UI typecheck、版本/identifier/CHANGELOG 一致性与 diff 检查通过；`pnpm test` 为 76 Node 全通过，无失败/跳过/取消，另计 4 Rust 声明，共 80/80、23 个测试源文件。`pnpm test --native` 因当前 Rust 环境无可用 toolchain 未执行，Rust 实际清单与原生执行需由发布准备 PR 的三平台 CI 核对；不新增或修改测试。
+**发布准备本地检查**：工作区 build、UI typecheck、版本/identifier/CHANGELOG 一致性与 diff 检查通过；初次原生检查因默认 rustup 未指向缓存 toolchain 未执行，随后仅通过进程级 RUSTUP_HOME/CARGO_HOME/RUSTUP_TOOLCHAIN 指向现有缓存，`pnpm test --native` 完整通过：76 Node + 4 Rust，共 80/80、23 个测试源文件，无失败/跳过/取消/ignored，Rust 已核对实际清单。未安装/升级 toolchain、修改全局配置或增改测试。
 
 **验证边界**：PR #18 复审通过，返工提交 aa67eee 的 Checks 39745229081 与合并提交 a210493 的 Checks 39747146324 三平台均成功。Electron 布局实测见 #78；Tauri、macOS/Linux GUI 尚未实测。安装包、更新清单与签名文件的一致性将在发布工作流完成后核对，不将构建成功等同于安装、自动更新或 GUI 验收。
 
