@@ -2048,6 +2048,11 @@ select:focus-visible,
 .nav-item.active { color: var(--green); border-left-color: var(--green); background: var(--panel2); }
 
 .settings-content { flex: 1; overflow-y: auto; padding: 26px 34px; min-width: 0; }
+.settings-help { border-top: 1px dashed var(--border); padding-top: 6px; margin-top: 8px; min-width: 0; }
+.settings-help > summary { color: var(--cyan); font-size: 12px; cursor: pointer; padding: 4px 0; }
+.settings-help > summary:focus-visible { outline: 1px solid var(--green); outline-offset: 2px; }
+.settings-help-body { padding: 2px 0 4px; overflow-wrap: anywhere; }
+.settings-help-body > .hint { margin: 6px 0; }
 .page-title { margin: 0 0 8px; font-size: 22px; font-weight: 700; color: var(--text-bright); letter-spacing: 1px; }
 .page-title::before { content: '// '; color: var(--green); }
 .page-head { display: flex; align-items: flex-end; gap: 14px; margin-bottom: 16px; flex-wrap: wrap; }

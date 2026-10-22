@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { validateMcpServers, type McpServerConfig, type McpServerStatus, type Settings } from '@easycode/engine';
 import { useStore } from '../useStore.js';
+import { SettingsHelp } from './SettingsHelp.js';
 
 interface Props {
   draft: Settings;
@@ -87,9 +88,12 @@ export function McpSettingsPanel({ draft, patch, save, discard, dirty, saving }:
         </button>
       </div>
     </div>
-    <p className="hint">保存会启动已启用的本机进程。只使用你信任的服务；外部进程拥有本机用户权限，工具审批不提供文件沙箱，外部改动不进入回合快照。仅支持 Stdio，工具继承当前审批模式。</p>
-    <p className="hint">环境值按「常规」中的密钥存储方式保存，已保存值不回显；请勿把密钥写入命令参数。参数必须是 JSON 字符串数组，工作目录填写绝对路径。</p>
-    <p className="hint">每回合含内置工具最多 128 个，外部工具规格总量最多 512 KiB；超出时请停用不需要的服务。</p>
+    <p className="hint">保存会启动本机进程，仅运行可信服务。进程拥有当前用户权限，工具审批不提供文件沙箱，外部改动不进入回合快照。</p>
+    <p className="hint">环境值按「常规」中的密钥存储方式保存，已保存值不回显；勿将密钥写入命令参数。</p>
+    <SettingsHelp title="MCP 配置与容量说明">
+      <p className="hint">仅支持 Stdio，工具继承当前审批模式。参数使用 JSON 字符串数组，工作目录填写绝对路径。</p>
+      <p className="hint">每回合含内置工具最多 128 个，外部工具规格总量最多 512 KiB；超出时请停用不需要的服务。</p>
+    </SettingsHelp>
     {json !== null && <div className="mcp-config-box">
       <label className="field"><span>mcpServers JSON（应用到草稿后仍需保存）</span>
         <textarea rows={12} value={json} spellCheck={false} onChange={(e) => setJson(e.target.value)} />

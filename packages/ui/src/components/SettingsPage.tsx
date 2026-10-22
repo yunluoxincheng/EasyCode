@@ -6,6 +6,7 @@ import { ModelConfigDialog } from './ModelConfigDialog.js';
 import { ReflexDashboard } from './ReflexDashboard.js';
 import { PermissionRulesPanel } from './PermissionRulesPanel.js';
 import { TestLoopPanel } from './TestLoopPanel.js';
+import { SettingsHelp } from './SettingsHelp.js';
 const McpSettingsPanel = lazy(() => import('./McpSettingsPanel.js').then((m) => ({ default: m.McpSettingsPanel })));
 import { PROVIDER_PRESETS, providerLabel, validWebSearchBackend } from '@easycode/engine';
 import type {
@@ -666,8 +667,7 @@ export function SettingsPage() {
             <h1 className="page-title">联网搜索</h1>
             <div className="page-head">
               <p className="page-desc">
-                给不支持原生搜索的模型提供 web_search 工具；开启后自动获取的模型默认启用联网搜索，
-                有原生搜索的模型（GPT/Claude）仍走原生。
+                为模型提供联网搜索；支持时优先使用原生搜索。
               </p>
               <div className="page-actions">
                 {dirty && <span className="dirty-dot" title="有未保存的更改">●</span>}
@@ -777,13 +777,16 @@ export function SettingsPage() {
                 </>
               )}
 
-              <p className="hint">
+              <SettingsHelp title="搜索后端配置说明">
+                <p className="hint">开启后，自动获取的模型默认启用联网搜索；支持原生搜索的模型优先走原生。</p>
+                <p className="hint">
                 {draft.webSearch?.backend === 'tavily'
-                  ? 'Tavily API Key 在 tavily.com 免费注册获取（每月 1000 次免费额度）。'
+                  ? 'Tavily API Key 可在 tavily.com 获取。'
                   : draft.webSearch?.backend === 'custom'
                     ? '自定义 API 为 GET 请求，{query} 会替换为 URL 编码后的搜索词；响应需为 JSON，兼容 SearXNG 的 results 格式（title/url/content）。'
                     : 'SearXNG 需在 settings.yml 的 search.formats 中启用 json 格式；localhost 地址不走应用代理。'}
-              </p>
+                </p>
+              </SettingsHelp>
             </div>
           </>
         )}
@@ -1037,20 +1040,22 @@ export function SettingsPage() {
                 />
               </label>
               <p className="hint">
-                全局开发偏好将自动注入系统提示词，与项目专属规范（.easycoderules 等）叠加生效，对所有会话生效且天生抗上下文压缩。
+                全局开发偏好作用于所有会话，与项目规范叠加。
               </p>
-              <p className="hint">
-                上下文超限自动压缩：当会话单次循环的输入 Token 达到模型窗口的指定比例（默认 85%）时，自动折叠前序工具长输出并归档早期历史，保障长任务平滑推进。
-              </p>
-              <p className="hint">
-                单次任务最大步数：模型与工具交互的最大轮数上限（防死循环与异常空转保险），缺省为 200 步（可调范围 10~500 步）。
-              </p>
-              <p className="hint">
-                Windows 平台优先推荐 Git Bash 或 PowerShell 7，模型可直接执行 Linux/Unix 惯用命令（ls、cat、rm 等）且原生 UTF-8 解码杜绝乱码。
-              </p>
-              <p className="hint">
-                API Key 保存在本机设置文件中，不会上传。接入 Ollama / LM Studio 等本地服务可完全离线使用。
-              </p>
+              <SettingsHelp title="运行与上下文说明">
+                <p className="hint">
+                  自动压缩按上方阈值触发，折叠工具长输出并归档早期历史，保留近期回合。执行结果以会话中的实际压缩状态为准。
+                </p>
+                <p className="hint">
+                  最大步数限制单次任务的模型与工具交互轮数；全局开发偏好会持续注入系统提示词。
+                </p>
+                <p className="hint">
+                  执行命令使用上方选择的 Shell；自动模式按本机可用环境选择，命令语法取决于所选 Shell。
+                </p>
+                <p className="hint">
+                  模型请求发送到所选服务，密钥按上方方式存储。使用 Ollama / LM Studio 等本地服务时，模型请求可在本机处理；联网搜索另行配置。
+                </p>
+              </SettingsHelp>
             </div>
           </>
         )}
