@@ -958,6 +958,20 @@ html.crt-off body::after {
   border-radius: var(--radius) var(--radius) 0 0;
 }
 .term-head:hover { background: var(--panel); }
+.term-command-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 0;
+  min-width: min(100%, 180px);
+}
+.term-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  margin-left: auto;
+}
 .term-status-badge {
   font-size: 10.5px;
   font-weight: 700;
@@ -981,7 +995,7 @@ html.crt-off body::after {
   font-family: var(--font);
   font-size: 12px;
   /* 长命令最多占三行，其余在内容区滚动，不挤压状态与操作控件（TODOS #78）。 */
-  flex: 1 1 160px;
+  flex: 1;
   min-width: 0;
   line-height: 1.5;
   max-height: 4.5em;
@@ -1034,6 +1048,10 @@ html.crt-off body::after {
   color: var(--text);
   background: #050806;
 }
+.term-screen:focus-visible {
+  outline: 1px solid var(--green-dim);
+  outline-offset: -1px;
+}
 .term-pre {
   margin: 0;
   padding: 0;
@@ -1046,27 +1064,18 @@ html.crt-off body::after {
   word-break: break-all;
   color: inherit;
 }
-.term-running-line {
-  display: flex;
-  align-items: center;
-  gap: 6px;
+.term-command-line {
   color: var(--text-bright);
-}
-.term-running-command {
-  flex: 1;
-  min-width: 0;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 .term-prompt {
   color: var(--green);
   font-weight: bold;
-  flex: none;
   white-space: nowrap;
 }
 .term-cursor {
   color: var(--green);
-  flex: none;
   animation: terminalBlink 1s infinite steps(1);
 }
 .term-empty {
