@@ -285,41 +285,51 @@ function TerminalCard({ item }: { item: ToolItem }) {
 
   return (
     <div className={`term-card status-${statusClass} ${open ? 'open' : 'closed'}`}>
-      <button className="term-head" onClick={() => setOpen(!open)} type="button">
-        <span className={`term-status-badge ${statusClass}`}>
-          {isRunning ? (item.executionStartedAt === undefined ? 'WAIT' : 'RUN') : parsed ? (parsed.isSuccess ? 'OK' : 'ERR') : statusClass.toUpperCase()}
-        </span>
-        {isBackground && <span className="term-bg-badge">BG</span>}
-        <span className="term-cmd-preview">$ {command}</span>
-        {parsed?.exitCode !== null && parsed?.exitCode !== undefined && (
-          <span className={`term-exit-badge ${parsed.isSuccess ? 'ok' : 'err'}`}>
-            exit: {parsed.exitCode}
+      <button className="term-head" onClick={() => setOpen(!open)} type="button" aria-expanded={open}>
+        <span className="term-command-summary">
+          <span className={`term-status-badge ${statusClass}`}>
+            {isRunning ? (item.executionStartedAt === undefined ? 'WAIT' : 'RUN') : parsed ? (parsed.isSuccess ? 'OK' : 'ERR') : statusClass.toUpperCase()}
           </span>
-        )}
-        <ToolDuration item={item} className="term-duration" />
-        <span className="spacer" />
-        <span className="term-chevron">{open ? '▾' : '▸'}</span>
+          {isBackground && <span className="term-bg-badge">BG</span>}
+          <span className="term-cmd-preview" title={command}>$ {command}</span>
+        </span>
+        <span className="term-meta">
+          {parsed?.exitCode !== null && parsed?.exitCode !== undefined && (
+            <span className={`term-exit-badge ${parsed.isSuccess ? 'ok' : 'err'}`}>
+              exit: {parsed.exitCode}
+            </span>
+          )}
+          <ToolDuration item={item} className="term-duration" />
+          <span className="term-chevron">{open ? '▾' : '▸'}</span>
+        </span>
       </button>
       {open && (
         <div className="term-body">
-          <div className="term-bar">
-            <span className="term-bar-title">// 控制台输出</span>
-            {parsed?.text && <CopyButton text={parsed.text} />}
+          <div className="term-toolbar">
+            <span className="term-toolbar-title">// 完整命令</span>
+            <CopyButton text={command} label="复制命令" />
           </div>
-          <div className="term-screen">
-            {isRunning && !parsed && (
-              <div className="term-running-line">
-                <span className="term-prompt">{item.executionStartedAt === undefined ? '待执行 $' : '$'}</span> {command} <span className="term-cursor">█</span>
+          <div className="term-screen" tabIndex={0} role="region" aria-label="完整命令">
+            <div className="term-command-line">
+              <span className="term-prompt">{isRunning && item.executionStartedAt === undefined ? '待执行 $' : '$'}</span>
+              {' '}{command}{isRunning && !parsed && <span className="term-cursor">█</span>}
+            </div>
+          </div>
+          {parsed && (
+            <>
+              <div className="term-toolbar">
+                <span className="term-toolbar-title">// 控制台输出</span>
+                {parsed.text && <CopyButton text={parsed.text} label="复制输出" />}
               </div>
-            )}
-            {parsed && (
-              parsed.text.trim().length > 0 ? (
-                <pre className="term-pre">{renderAnsi(parsed.text)}</pre>
-              ) : (
-                <div className="term-empty">(命令已执行完成，控制台无输出)</div>
-              )
-            )}
-          </div>
+              <div className="term-screen" tabIndex={0} role="region" aria-label="控制台输出">
+                {parsed.text.trim().length > 0 ? (
+                  <pre className="term-pre">{renderAnsi(parsed.text)}</pre>
+                ) : (
+                  <div className="term-empty">(命令已执行完成，控制台无输出)</div>
+                )}
+              </div>
+            </>
+          )}
         </div>
       )}
     </div>
@@ -483,12 +493,13 @@ function finalTextOf(turn: TurnItem): string {
 }
 
 /** 复制按钮：悬停显现，点击后短暂反馈 */
-function CopyButton({ text }: { text: string }) {
+function CopyButton({ text, label = '复制' }: { text: string; label?: string }) {
   const [copied, setCopied] = useState(false);
   return (
     <button
       className="msg-icon"
-      title={copied ? '已复制' : '复制'}
+      title={copied ? '已复制' : label}
+      aria-label={copied ? '已复制' : label}
       onClick={() => {
         void navigator.clipboard.writeText(text).then(() => {
           setCopied(true);

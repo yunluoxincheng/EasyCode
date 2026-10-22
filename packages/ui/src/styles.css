@@ -933,6 +933,7 @@ html.crt-off body::after {
 .term-card.status-error { border-color: rgba(248, 81, 73, .45); }
 .term-head {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   width: 100%;
@@ -957,24 +958,51 @@ html.crt-off body::after {
   border-radius: var(--radius) var(--radius) 0 0;
 }
 .term-head:hover { background: var(--panel); }
+.term-command-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 0;
+  min-width: min(100%, 180px);
+}
+.term-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  margin-left: auto;
+}
 .term-status-badge {
   font-size: 10.5px;
   font-weight: 700;
   letter-spacing: .5px;
+}
+.term-status-badge,
+.term-bg-badge,
+.term-exit-badge,
+.term-duration,
+.term-chevron {
+  flex: none;
+  white-space: nowrap;
 }
 .term-status-badge::before { content: '[ '; color: var(--faint); }
 .term-status-badge::after { content: ' ]'; color: var(--faint); }
 .term-status-badge.ok { color: var(--green); }
 .term-status-badge.error { color: var(--red); }
 .term-status-badge.running { color: var(--amber); animation: pulse 1.2s infinite; }
-.term-prompt-preview {
+.term-cmd-preview {
   color: var(--text-bright);
   font-family: var(--font);
   font-size: 12px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  /* 长命令最多占三行，其余在内容区滚动，不挤压状态与操作控件（TODOS #78）。 */
   flex: 1;
+  min-width: 0;
+  line-height: 1.5;
+  max-height: 4.5em;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  overflow: auto;
+  scrollbar-width: thin;
 }
 .term-exit-badge {
   font-size: 10.5px;
@@ -1020,6 +1048,10 @@ html.crt-off body::after {
   color: var(--text);
   background: #050806;
 }
+.term-screen:focus-visible {
+  outline: 1px solid var(--green-dim);
+  outline-offset: -1px;
+}
 .term-pre {
   margin: 0;
   padding: 0;
@@ -1032,15 +1064,15 @@ html.crt-off body::after {
   word-break: break-all;
   color: inherit;
 }
-.term-running-line {
-  display: flex;
-  align-items: center;
-  gap: 6px;
+.term-command-line {
   color: var(--text-bright);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 .term-prompt {
   color: var(--green);
   font-weight: bold;
+  white-space: nowrap;
 }
 .term-cursor {
   color: var(--green);
