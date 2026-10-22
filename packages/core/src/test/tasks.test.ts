@@ -62,7 +62,7 @@ class FakeHost implements Host {
   };
 }
 
-test('输出缓冲与 URL 捕获：writeOutput 行拆分、去重、主地址探测', async () => {
+test('输出缓冲与 URL 捕获：去重、探测与无换行输出有界', async () => {
   const host = new FakeHost();
   host.probeResults.set('http://localhost:5173', true);
   const manager = new BackgroundTaskManager(host, { scope: 's1' });
@@ -80,10 +80,15 @@ test('输出缓冲与 URL 捕获：writeOutput 行拆分、去重、主地址探
   assert.equal(alive, true);
   assert.equal(manager.get(id)!.alive, true);
   assert.deepEqual(host.probeCalls, ['http://localhost:5173']);
-  manager.list(); // 不抛错
+  const before = manager.get(id)!.outputBytes;
+  const chunk = 'x'.repeat(8192);
+  for (let i = 0; i < 64; i++) host.spawned.get(id)!.opts.onOutput?.(chunk);
+  assert.ok(manager.logs(id)!.length < 100_000, '无换行日志仍有界');
+  assert.ok(manager.logs(id)!.endsWith('x'), '截断后保留尾部');
+  assert.equal(manager.get(id)!.outputBytes, before + 64 * 8192);
 });
 
-test('adopt：仅接管本会话 scope 前缀的存活任务', async () => {
+test('adopt：仅恢复本会话存活任务，并保留原参数重启与清理', async () => {
   const host = new FakeHost();
   const recovered: string[] = [];
   const manager = new BackgroundTaskManager(host, {
@@ -93,74 +98,97 @@ test('adopt：仅接管本会话 scope 前缀的存活任务', async () => {
     },
   });
   manager.adopt([
-    { id: 's1:tabc', pid: 1, command: 'pnpm dev', startedAt: 1, alive: true },
+    { id: 's1:tabc', pid: 1, command: 'pnpm dev', cwd: '/ws', shell: 'pwsh', startedAt: 1, alive: true },
     { id: 's2:tdef', pid: 2, command: 'pnpm dev', startedAt: 1, alive: true },
     { id: 's1:tdead', pid: 3, command: 'old', startedAt: 1, alive: false },
   ]);
   assert.deepEqual(recovered, ['s1:tabc']);
   assert.equal(manager.get('s1:tabc')!.status, 'running');
   assert.ok(manager.logs('s1:tabc')!.includes('恢复接管'));
-  // 恢复任务仍可停止（宿主按同一 id 索引）
-  await manager.stop('s1:tabc');
-  assert.equal(manager.get('s1:tabc')!.status, 'killed');
-});
-
-/* ---------------- 审查修复回归（PR #3） ---------------- */
-
-test('无换行超长输出：内存受控且日志可见（pending 硬上限）', async () => {
-  const host = new FakeHost();
-  const manager = new BackgroundTaskManager(host, { scope: 's1' });
-  const info = await manager.start('stream');
-  const entry = host.spawned.get(info.id)!;
-  const chunk = 'x'.repeat(8192);
-  for (let i = 0; i < 64; i++) entry.opts.onOutput?.(chunk); // 512KB 无任何换行
-  const logs = manager.logs(info.id)!;
-  // 日志保留尾部（截断头部的超长单行），总量有硬上限而非随输出无限增长
-  assert.ok(logs.length < 100_000, `logs 应有界，实际 ${logs.length}`);
-  assert.ok(logs.endsWith('x'), '尾部内容应可见');
-  // 单调计数不受截断影响
-  assert.equal(manager.get(info.id)!.outputBytes, 64 * 8192);
-});
-
-test('restart：复用原命令、原工作目录与原 shell', async () => {
-  const host = new FakeHost();
-  const manager = new BackgroundTaskManager(host, { scope: 's1' });
-  const info = await manager.start('$env:NODE_ENV="dev"; pnpm dev', {
-    cwd: '/ws',
-    shell: 'pwsh',
-  });
-  const restarted = await manager.restart(info.id);
-  assert.notEqual(restarted.id, info.id, '重启产生新任务');
-  assert.equal(restarted.command, info.command);
+  const restarted = await manager.restart('s1:tabc');
+  assert.notEqual(restarted.id, 's1:tabc');
+  assert.equal(restarted.command, 'pnpm dev');
   assert.equal(restarted.cwd, '/ws');
   assert.equal(restarted.shell, 'pwsh');
-  assert.equal(manager.get(info.id)!.status, 'killed', '旧任务被停止');
-  const spawned = [...host.spawned.values()];
-  assert.equal(spawned.length, 2);
-  assert.equal(spawned[1].opts.cwd, '/ws');
-  assert.equal(spawned[1].opts.shell, 'pwsh');
+  assert.equal(host.spawned.get(restarted.id)!.opts.cwd, '/ws');
+  assert.equal(host.spawned.get(restarted.id)!.opts.shell, 'pwsh');
+  assert.equal(manager.get('s1:tabc')!.status, 'killed');
+  assert.deepEqual(manager.clearFinished(), ['s1:tabc']);
+  assert.equal(manager.logs('s1:tabc'), undefined);
+  assert.equal(manager.get(restarted.id)!.status, 'running', '清理不影响运行中的新任务');
 });
 
-test('kill 失败：保持 running 态且可重试停止', async () => {
+test('remove：等待启动、复用并发停止，退出回调不提前释放清理记录', async () => {
   const host = new FakeHost();
+  let releaseStart!: () => void;
+  let releaseKill!: () => void;
+  let startedKilling!: () => void;
+  const starting = new Promise<void>((r) => { releaseStart = r; });
+  const killing = new Promise<void>((r) => { releaseKill = r; });
+  const killStarted = new Promise<void>((r) => { startedKilling = r; });
+  const spawn = host.process.spawn;
+  let killCalls = 0;
+  host.process.spawn = async (command, opts) => {
+    await starting;
+    return spawn(command, opts);
+  };
+  host.process.kill = async (id) => {
+    killCalls++;
+    host.spawned.get(id)!.opts.onExit?.(null);
+    startedKilling();
+    await killing;
+    host.spawned.get(id)!.killed = true;
+  };
+  const removed: string[] = [];
+  const manager = new BackgroundTaskManager(host, { onEvent: (e) => {
+    if (e.type === 'background_task' && e.action === 'removed') removed.push(e.task.id);
+  }});
+  const start = manager.start('server');
+  const id = manager.list()[0].id;
+  let settled = false;
+  const first = manager.remove(id).then((ok) => { settled = true; return ok; });
+  const second = manager.remove(id);
+  await Promise.resolve();
+  assert.equal(killCalls, 0, '启动未完成前不执行 kill');
+  assert.equal(settled, false);
+  assert.equal(manager.has(id), true);
+  releaseStart();
+  await start;
+  await killStarted;
+  assert.equal(manager.get(id)!.status, 'killed', '退出回调已到达');
+  assert.deepEqual(manager.clearFinished(), [], '整组停止未收敛时不能批量清理');
+  assert.equal(manager.has(id), true);
+  assert.equal(settled, false);
+  releaseKill();
+  assert.deepEqual(await Promise.all([first, second]), [true, true]);
+  assert.equal(killCalls, 1, '并发移除复用同一次实际停止');
+  assert.deepEqual(removed, [id]);
+  assert.equal(manager.has(id), false);
+  assert.equal(manager.logs(id), undefined);
+  assert.equal(await manager.remove(id), false, '重复移除已不存在任务是幂等的');
+});
+
+test('remove 停止失败：任务和错误保留，重试成功后删除', async () => {
+  const host = new FakeHost();
+  const kill = host.process.kill;
   let failKill = true;
-  const failingKill: BackgroundTaskManager = new BackgroundTaskManager(
-    {
-      ...host,
-      process: {
-        ...host.process,
-        kill: async () => {
-          if (failKill) throw new Error('taskkill failed');
-          return host.process.kill('any');
-        },
-      },
-    } as unknown as Host,
-    { scope: 's1' },
-  );
-  const info = await failingKill.start('node server.js');
-  await assert.rejects(() => failingKill.stop(info.id), /taskkill failed/);
-  assert.equal(failingKill.get(info.id)!.status, 'running', 'kill 失败不得误标 killed');
+  host.process.kill = async (id) => {
+    if (failKill) throw new Error('taskkill failed');
+    await kill(id);
+  };
+  const manager = new BackgroundTaskManager(host, { scope: 's1' });
+  const info = await manager.start('node server.js');
+  await assert.rejects(manager.remove(info.id), /taskkill failed/);
+  assert.equal(manager.get(info.id)!.status, 'running');
+  assert.equal(manager.get(info.id)!.stopError, 'taskkill failed');
+  assert.equal(host.spawned.get(info.id)!.killed, false);
+  assert.deepEqual(manager.clearFinished(), [], '失败记录不参与批量清理');
+  host.spawned.get(info.id)!.opts.onExit?.(0);
+  assert.equal(manager.get(info.id)!.status, 'exited');
+  assert.deepEqual(manager.clearFinished(), [], '入口进程退出后仍保留失败清理的重试句柄');
   failKill = false;
-  const after = await failingKill.stop(info.id);
-  assert.equal(after?.status, 'killed');
+  assert.equal(await manager.remove(info.id), true);
+  assert.equal(host.spawned.get(info.id)!.killed, true);
+  assert.equal(manager.has(info.id), false);
+  assert.equal(manager.logs(info.id), undefined);
 });
