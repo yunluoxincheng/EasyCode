@@ -932,6 +932,7 @@ export class AppStore {
     await this.client.deleteSession(id);
     this.sessionStates.delete(id);
     this.bgRevisions.delete(id);
+    this.bgRefreshNeeded.delete(id);
     this.sessions = this.sessions.filter((s) => s.id !== id);
     if (this.activeId === id) {
       this.activeId = null;
@@ -1181,6 +1182,7 @@ export class AppStore {
 
   private maybeStopBgPolling(): void {
     if (this.bgPollTimer === null) return;
+    if (this.activeId && this.bgRefreshNeeded.has(this.activeId)) return;
     const hasRunning = this.bgTasks.some((t) => t.status === 'running');
     if (!hasRunning && !this.taskDrawerOpen && !this.previewOpen) {
       clearInterval(this.bgPollTimer);
@@ -1190,6 +1192,7 @@ export class AppStore {
 
   private polling = new Set<string>();
   private bgRevisions = new Map<string, number>();
+  private bgRefreshNeeded = new Set<string>();
   private bgActions = new Set<string>();
   private bgClearing = new Set<string>();
 
@@ -1203,7 +1206,12 @@ export class AppStore {
     try {
       const list = await this.client.listBackgroundTasks(id);
       // 旧请求不能覆盖期间收到的停止/移除事件，也不能把任务重新带回界面。
-      if (revision !== (this.bgRevisions.get(id) ?? 0)) return;
+      if (revision !== (this.bgRevisions.get(id) ?? 0)) {
+        this.bgRefreshNeeded.add(id);
+        if (id === this.activeId) this.ensureBgPolling();
+        return;
+      }
+      this.bgRefreshNeeded.delete(id);
       const state = this.sessionStates.get(id);
       if (state) state.bgTasks = list;
       if (id === this.activeId) {
@@ -1213,6 +1221,7 @@ export class AppStore {
       this.notify(false);
     } catch {
       // 轮询失败静默（会话可能刚删除）
+      this.bgRefreshNeeded.delete(id);
     } finally {
       this.polling.delete(id);
       this.maybeStopBgPolling();
