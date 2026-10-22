@@ -3642,6 +3642,9 @@ select:focus-visible,
 }
 .bg-chip-btn:hover { background: var(--border); color: var(--text-bright); }
 .bg-chip-btn.danger:hover { color: var(--red); }
+.bg-chip-btn:disabled { opacity: .45; cursor: default; }
+.bg-chip.stop-failed { border-color: var(--red); }
+.bg-stop-error { color: var(--red); white-space: nowrap; font-size: 10.5px; }
 
 /* ---------------- 后台任务实时日志抽屉 (TODOS #37) ---------------- */
 .task-drawer {

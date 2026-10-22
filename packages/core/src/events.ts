@@ -86,7 +86,7 @@ export type AgentEvent =
   | {
       /** 后台任务状态变化（TODOS #37）：不进入回合时间线，仅驱动底部任务条与预览面板 */
       type: 'background_task';
-      action: 'started' | 'exited' | 'stopped' | 'recovered';
+      action: 'started' | 'exited' | 'stopped' | 'recovered' | 'stop_failed' | 'removed';
       task: BackgroundTaskInfo;
     }
   | { type: 'error'; message: string }

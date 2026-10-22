@@ -98,6 +98,7 @@ export function TaskLogsDrawer() {
             className="task-drawer-btn danger"
             type="button"
             title="停止任务"
+            disabled={store.isTaskBusy(task.id)}
             onClick={() => void store.stopTask(task.id)}
           >
             ■ 停止
@@ -107,6 +108,7 @@ export function TaskLogsDrawer() {
             className="task-drawer-btn"
             type="button"
             title="以原命令重新启动"
+            disabled={store.isTaskBusy(task.id)}
             onClick={() => void store.restartTask(task.id)}
           >
             ▶ 重新启动

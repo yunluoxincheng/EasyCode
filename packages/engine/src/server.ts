@@ -1046,6 +1046,18 @@ export class AgentServer {
     return manager.stop(taskId);
   }
 
+  async removeBackgroundTask(sessionId: string, taskId: string): Promise<boolean> {
+    this.requireSession(sessionId);
+    const manager = await this.bgManagerFor(sessionId);
+    return manager.remove(taskId);
+  }
+
+  async clearFinishedBackgroundTasks(sessionId: string): Promise<string[]> {
+    this.requireSession(sessionId);
+    const manager = await this.bgManagerFor(sessionId);
+    return manager.clearFinished();
+  }
+
   /** 重启后台任务：以原命令、原工作目录与原 shell 重新拉起（停止旧进程后启动新任务） */
   async restartBackgroundTask(sessionId: string, taskId: string): Promise<BackgroundTaskInfo> {
     const manager = await this.bgManagerFor(sessionId);

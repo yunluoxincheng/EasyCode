@@ -241,6 +241,8 @@ const handlers: Record<string, Handler> = {
   'get-task-logs': (args) =>
     server.getTaskLogs(args.id as string, args.taskId as string, args.tailLines as number | undefined),
   'stop-background-task': (args) => server.stopBackgroundTask(args.id as string, args.taskId as string),
+  'remove-background-task': (args) => server.removeBackgroundTask(args.id as string, args.taskId as string),
+  'clear-finished-background-tasks': (args) => server.clearFinishedBackgroundTasks(args.id as string),
   'restart-background-task': (args) => server.restartBackgroundTask(args.id as string, args.taskId as string),
   'open-url': async (args) => {
     await shell.openExternal(String(args.url));

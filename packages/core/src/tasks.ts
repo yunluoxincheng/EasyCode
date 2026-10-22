@@ -20,6 +20,8 @@ export interface BackgroundTaskInfo {
   command: string;
   startedAt: number;
   status: BackgroundTaskStatus;
+  /** 整组停止失败时保留错误与重试句柄，不能按已结束任务直接清理。 */
+  stopError?: string;
   exitCode?: number | null;
   durationMs?: number;
   /** 从输出中捕获到的本地服务地址（按首次出现顺序） */
@@ -53,6 +55,10 @@ interface BgTask {
   command: string;
   startedAt: number;
   status: BackgroundTaskStatus;
+  stopError?: string;
+  starting?: Promise<void>;
+  stopping?: Promise<BackgroundTaskInfo | null>;
+  removing?: Promise<boolean>;
   exitCode?: number | null;
   durationMs?: number;
   urls: string[];
@@ -145,7 +151,7 @@ export class BackgroundTaskManager {
     return this.opts.scope ? `${this.opts.scope}:t${Date.now().toString(36)}${rand}` : `t${Date.now().toString(36)}${rand}`;
   }
 
-  private emit(action: 'started' | 'exited' | 'stopped' | 'recovered', task: BgTask): void {
+  private emit(action: 'started' | 'exited' | 'stopped' | 'recovered' | 'stop_failed' | 'removed', task: BgTask): void {
     this.opts.onEvent?.({ type: 'background_task', action, task: this.toInfo(task) });
   }
 
@@ -156,6 +162,7 @@ export class BackgroundTaskManager {
       command: t.command,
       startedAt: t.startedAt,
       status: t.status,
+      stopError: t.stopError,
       exitCode: t.exitCode,
       durationMs: t.durationMs,
       urls: [...t.urls],
@@ -197,6 +204,8 @@ export class BackgroundTaskManager {
       cwd: runOpts?.cwd,
       shell: runOpts?.shell,
     };
+    let finishStarting!: () => void;
+    task.starting = new Promise<void>((resolve) => { finishStarting = resolve; });
     this.tasks.set(id, task);
     try {
       const handle = await spawn(command, {
@@ -221,6 +230,9 @@ export class BackgroundTaskManager {
     } catch (err) {
       this.tasks.delete(id);
       throw err;
+    } finally {
+      finishStarting();
+      task.starting = undefined;
     }
   }
 
@@ -332,32 +344,76 @@ export class BackgroundTaskManager {
   async stop(id: string): Promise<BackgroundTaskInfo | null> {
     const task = this.tasks.get(id);
     if (!task) return null;
-    if (task.status !== 'running') return this.toInfo(task);
-    const kill = this.host.process.kill;
-    if (!kill) throw new Error('当前环境不支持终止后台任务（宿主未实现 process.kill）');
-    // 先记录停止意图：kill 触发的宿主 onExit 可能先于本函数返回到达
-    task.stopRequested = true;
+    if (task.stopping) return task.stopping;
+    // 先登记同一个停止 Promise，防止重复停止或移除绕过尚未完成的整组清理。
+    const stopping = Promise.resolve().then(async () => {
+      await task.starting;
+      if (this.tasks.get(task.id) !== task) return null;
+      if (task.status !== 'running' && !task.stopError) return this.toInfo(task);
+      task.stopRequested = true;
+      try {
+        const kill = this.host.process.kill;
+        if (!kill) throw new Error('当前环境不支持终止后台任务（宿主未实现 process.kill）');
+        await kill(task.id);
+      } catch (err) {
+        task.stopRequested = undefined;
+        task.stopError = (err instanceof Error ? err.message : String(err)).trim() || '停止后台任务失败，请重试';
+        this.emit('stop_failed', task);
+        throw err;
+      }
+      task.stopError = undefined;
+      if (task.status === 'running') this.markExited(task.id, task.exitCode ?? null, true);
+      return this.toInfo(task);
+    });
+    task.stopping = stopping;
     try {
-      await kill(id);
-    } catch (err) {
-      // kill 失败时回滚停止意图，保持 UI 状态与真实进程一致
-      task.stopRequested = undefined;
-      throw err;
+      return await stopping;
+    } finally {
+      task.stopping = undefined;
     }
-    // 宿主 onExit 已把状态置为 killed 时这里是 no-op；否则兜底标记
-    if (task.status === 'running' && task.stopRequested) {
-      this.markExited(id, task.exitCode ?? null, true);
+  }
+
+  /** 运行中先等待整组停止成功；失败保留任务，允许重试。 */
+  async remove(id: string): Promise<boolean> {
+    const task = this.tasks.get(id);
+    if (!task) return false;
+    if (task.removing) return task.removing;
+    const removing = Promise.resolve().then(async () => {
+      await this.stop(id);
+      if (this.tasks.get(task.id) !== task) return false;
+      this.tasks.delete(task.id);
+      this.emit('removed', task);
+      return true;
+    });
+    task.removing = removing;
+    try {
+      return await removing;
+    } finally {
+      task.removing = undefined;
     }
-    return this.toInfo(task);
+  }
+
+  /** 仅清理已结束且没有在途/失败清理的任务，不触碰运行中的服务。 */
+  clearFinished(): string[] {
+    const removed: string[] = [];
+    for (const task of this.tasks.values()) {
+      if (task.status === 'running' || task.starting || task.stopping || task.removing || task.stopError) continue;
+      this.tasks.delete(task.id);
+      removed.push(task.id);
+      this.emit('removed', task);
+    }
+    return removed;
   }
 
   /** 以原命令、原工作目录与原 shell 重新拉起任务（旧任务仍在运行则先停止） */
   async restart(id: string): Promise<BackgroundTaskInfo> {
     const task = this.tasks.get(id);
     if (!task) throw new Error(`后台任务不存在: ${id}`);
-    if (task.status === 'running') {
+    if (task.removing) throw new Error('该后台任务正在移除，请稍后重试');
+    if (task.status === 'running' || task.starting || task.stopping || task.stopError) {
       await this.stop(id);
     }
+    if (task.removing || this.tasks.get(task.id) !== task) throw new Error('该后台任务已移除');
     return this.start(task.command, { cwd: task.cwd, shell: task.shell });
   }
 
@@ -426,7 +482,7 @@ export class BackgroundTaskManager {
 
   /** 终止所有仍在运行的任务（会话删除 / 应用退出时调用）。并行执行，总耗时以单个任务为准 */
   async disposeAll(): Promise<void> {
-    const running = [...this.tasks.values()].filter((t) => t.status === 'running');
+    const running = [...this.tasks.values()].filter((t) => t.status === 'running' || t.stopping || t.stopError);
     await Promise.all(
       running.map((task) =>
         this.stop(task.id).catch(() => {

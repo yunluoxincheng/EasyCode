@@ -24,12 +24,13 @@ function useElapsed(startedAt: number, active: boolean): string {
 function TaskChip({ task }: { task: BackgroundTaskInfo }) {
   const store = useStore();
   const running = task.status === 'running';
+  const busy = store.isTaskBusy(task.id);
   const elapsed = useElapsed(task.startedAt, running);
   const command = task.command.length > 36 ? `${task.command.slice(0, 36)}…` : task.command;
   const url = task.primaryUrl;
 
   return (
-    <div className={`bg-chip ${running ? 'running' : 'stopped'}`}>
+    <div className={`bg-chip ${running ? 'running' : 'stopped'} ${task.stopError ? 'stop-failed' : ''}`}>
       <button
         className="bg-chip-main"
         type="button"
@@ -40,8 +41,9 @@ function TaskChip({ task }: { task: BackgroundTaskInfo }) {
         <span className="bg-cmd">{command}</span>
         {url && <span className="bg-url">{url.replace(/^https?:\/\//, '')}</span>}
         <span className="bg-elapsed">
-          {running ? `运行中 ${elapsed}` : task.status === 'killed' ? '已停止' : `已退出 (${task.exitCode ?? '-'})`}
+          {busy ? '[ WAIT ] 处理中' : running ? `运行中 ${elapsed}` : task.status === 'killed' ? '已停止' : `已退出 (${task.exitCode ?? '-'})`}
         </span>
+        {task.stopError && <span className="bg-stop-error" title={task.stopError}>[ ERR ] 停止失败</span>}
       </button>
       {url && running && (
         <button
@@ -68,11 +70,21 @@ function TaskChip({ task }: { task: BackgroundTaskInfo }) {
           className="bg-chip-btn danger"
           type="button"
           title="停止任务（终止整棵进程树）"
+          disabled={busy}
           onClick={() => void store.stopTask(task.id)}
         >
           ■
         </button>
       )}
+      <button
+        className="bg-chip-btn danger"
+        type="button"
+        disabled={busy || !store.client.removeBackgroundTask}
+        title={task.stopError ? `停止失败：${task.stopError}；点击重试停止并移除` : running ? '先终止整棵进程树，成功后移除任务及日志记录' : '移除已结束任务及日志记录'}
+        onClick={() => void store.removeTask(task.id)}
+      >
+        {task.stopError ? '[ 重试停止并移除 ]' : running ? '[ 停止并移除 ]' : '[ 移除 ]'}
+      </button>
     </div>
   );
 }
@@ -88,7 +100,12 @@ export function BackgroundTasksBar() {
 
   return (
     <div className="bg-bar" role="status">
-      <span className="bg-bar-label">⚙ 后台任务 {tasks.filter((t) => t.status === 'running').length}/{tasks.length}</span>
+      <span className="bg-bar-label">后台任务 {tasks.filter((t) => t.status === 'running').length}/{tasks.length}</span>
+      <button className="bg-chip-btn" type="button"
+        disabled={store.clearingFinishedTasks || !store.client.clearFinishedBackgroundTasks || !tasks.some((t) => t.status !== 'running' && !t.stopError && !store.isTaskBusy(t.id))}
+        onClick={() => void store.clearFinishedTasks()}>
+        {store.clearingFinishedTasks ? '[ 清理中… ]' : '[ 清理已结束 ]'}
+      </button>
       {tasks.map((t) => (
         <TaskChip key={t.id} task={t} />
       ))}

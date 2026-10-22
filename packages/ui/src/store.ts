@@ -931,6 +931,7 @@ export class AppStore {
     if (state?.running) return;
     await this.client.deleteSession(id);
     this.sessionStates.delete(id);
+    this.bgRevisions.delete(id);
     this.sessions = this.sessions.filter((s) => s.id !== id);
     if (this.activeId === id) {
       this.activeId = null;
@@ -1187,36 +1188,42 @@ export class AppStore {
     }
   }
 
-  private polling = false;
+  private polling = new Set<string>();
+  private bgRevisions = new Map<string, number>();
+  private bgActions = new Set<string>();
+  private bgClearing = new Set<string>();
 
-  private async pollBackgroundTasks(): Promise<void> {
-    const id = this.activeId;
-    if (!id || this.polling || !this.client.listBackgroundTasks) {
+  private async pollBackgroundTasks(id = this.activeId): Promise<void> {
+    if (!id || this.polling.has(id) || !this.client.listBackgroundTasks) {
       this.maybeStopBgPolling();
       return;
     }
-    this.polling = true;
+    this.polling.add(id);
+    const revision = this.bgRevisions.get(id) ?? 0;
     try {
       const list = await this.client.listBackgroundTasks(id);
+      // 旧请求不能覆盖期间收到的停止/移除事件，也不能把任务重新带回界面。
+      if (revision !== (this.bgRevisions.get(id) ?? 0)) return;
       const state = this.sessionStates.get(id);
       if (state) state.bgTasks = list;
       if (id === this.activeId) {
         this.bgTasks = list;
+        if (list.some((t) => t.status === 'running')) this.ensureBgPolling();
       }
       this.notify(false);
     } catch {
       // 轮询失败静默（会话可能刚删除）
     } finally {
-      this.polling = false;
+      this.polling.delete(id);
       this.maybeStopBgPolling();
     }
   }
 
   /** 事件驱动兜底：会话切换 / 应用启动后主动刷一次任务列表（并接管恢复任务） */
-  async refreshBackgroundTasks(): Promise<void> {
-    if (!this.activeId || !this.client.listBackgroundTasks) return;
-    this.ensureBgPolling();
-    await this.pollBackgroundTasks();
+  async refreshBackgroundTasks(id = this.activeId): Promise<void> {
+    if (!id || !this.client.listBackgroundTasks) return;
+    if (id === this.activeId) this.ensureBgPolling();
+    await this.pollBackgroundTasks(id);
   }
 
   toggleTaskDrawer(taskId?: string | null): void {
@@ -1230,30 +1237,91 @@ export class AppStore {
     this.notify(true);
   }
 
-  async stopTask(taskId: string): Promise<void> {
-    if (!this.activeId || !this.client.stopBackgroundTask) return;
+  isTaskBusy(taskId: string): boolean {
+    return !!this.activeId && (this.bgActions.has(`${this.activeId}\0${taskId}`) || this.bgClearing.has(this.activeId));
+  }
+
+  get clearingFinishedTasks(): boolean {
+    return !!this.activeId && this.bgClearing.has(this.activeId);
+  }
+
+  private forgetBackgroundTasks(sessionId: string, taskIds: string[]): void {
+    this.bgRevisions.set(sessionId, (this.bgRevisions.get(sessionId) ?? 0) + 1);
+    const removed = new Set(taskIds);
+    const state = this.sessionStates.get(sessionId);
+    if (state) state.bgTasks = state.bgTasks.filter((t) => !removed.has(t.id));
+    if (sessionId !== this.activeId) return;
+    this.bgTasks = this.bgTasks.filter((t) => !removed.has(t.id));
+    if (this.taskDrawerTaskId && removed.has(this.taskDrawerTaskId)) {
+      this.taskDrawerOpen = false;
+      this.taskDrawerTaskId = null;
+    }
+    if (this.previewTaskId && removed.has(this.previewTaskId)) {
+      this.previewOpen = false;
+      this.previewTaskId = null;
+    }
+    this.maybeStopBgPolling();
+  }
+
+  private async taskAction<T>(taskId: string, action: (sessionId: string) => Promise<T>): Promise<T | undefined> {
+    const id = this.activeId;
+    if (!id || this.isTaskBusy(taskId)) return;
+    const key = `${id}\0${taskId}`;
+    this.bgActions.add(key);
+    this.notify(false);
     try {
-      await this.client.stopBackgroundTask(this.activeId, taskId);
+      return await action(id);
     } catch (err) {
       this.showToast(err instanceof Error ? err.message : String(err), 'err');
+    } finally {
+      this.bgActions.delete(key);
+      if (this.sessionStates.has(id)) await this.refreshBackgroundTasks(id);
+      this.notify(false);
     }
-    await this.refreshBackgroundTasks();
+  }
+
+  async stopTask(taskId: string): Promise<void> {
+    if (!this.client.stopBackgroundTask) return;
+    await this.taskAction(taskId, (id) => this.client.stopBackgroundTask!(id, taskId));
+  }
+
+  async removeTask(taskId: string): Promise<void> {
+    if (!this.client.removeBackgroundTask) return;
+    await this.taskAction(taskId, async (id) => {
+      await this.client.removeBackgroundTask!(id, taskId);
+      this.forgetBackgroundTasks(id, [taskId]);
+    });
+  }
+
+  async clearFinishedTasks(): Promise<void> {
+    const id = this.activeId;
+    if (!id || !this.client.clearFinishedBackgroundTasks || this.bgClearing.has(id)) return;
+    this.bgClearing.add(id);
+    this.notify(false);
+    try {
+      const removed = await this.client.clearFinishedBackgroundTasks(id);
+      this.forgetBackgroundTasks(id, removed);
+    } catch (err) {
+      this.showToast(err instanceof Error ? err.message : String(err), 'err');
+    } finally {
+      this.bgClearing.delete(id);
+      if (this.sessionStates.has(id)) await this.refreshBackgroundTasks(id);
+      this.notify(false);
+    }
   }
 
   async restartTask(taskId: string): Promise<BackgroundTaskInfo | null> {
     if (!this.activeId || !this.client.restartBackgroundTask) return null;
-    try {
-      const task = await this.client.restartBackgroundTask(this.activeId, taskId);
+    return (await this.taskAction(taskId, async (id) => {
+      const task = await this.client.restartBackgroundTask!(id, taskId);
       // 日志抽屉 / 预览面板锚点跟进新任务，避免停留在已停止的旧任务上
-      if (this.taskDrawerTaskId === taskId) this.taskDrawerTaskId = task.id;
-      if (this.previewTaskId === taskId) this.previewTaskId = task.id;
-      await this.refreshBackgroundTasks();
+      if (id === this.activeId) {
+        if (this.taskDrawerTaskId === taskId) this.taskDrawerTaskId = task.id;
+        if (this.previewTaskId === taskId) this.previewTaskId = task.id;
+      }
       this.showToast('✓ 后台任务已重新启动');
       return task;
-    } catch (err) {
-      this.showToast(err instanceof Error ? err.message : String(err), 'err');
-      return null;
-    }
+    })) ?? null;
   }
 
   /** 在侧边预览面板打开后台任务的服务地址（TODOS #44） */
@@ -1650,6 +1718,12 @@ export class AppStore {
         break;
 
       case 'background_task': {
+        if (event.action === 'removed') {
+          this.forgetBackgroundTasks(sessionId, [event.task.id]);
+          this.notify(false);
+          break;
+        }
+        this.bgRevisions.set(sessionId, (this.bgRevisions.get(sessionId) ?? 0) + 1);
         // TODOS #37：后台任务状态变化——不进回合时间线，只更新任务条/抽屉/预览的数据源
         const tasks = state.bgTasks;
         const idx = tasks.findIndex((t) => t.id === event.task.id);
