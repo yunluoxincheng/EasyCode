@@ -933,6 +933,7 @@ html.crt-off body::after {
 .term-card.status-error { border-color: rgba(248, 81, 73, .45); }
 .term-head {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   width: 100%;
@@ -962,19 +963,32 @@ html.crt-off body::after {
   font-weight: 700;
   letter-spacing: .5px;
 }
+.term-status-badge,
+.term-bg-badge,
+.term-exit-badge,
+.term-duration,
+.term-chevron {
+  flex: none;
+  white-space: nowrap;
+}
 .term-status-badge::before { content: '[ '; color: var(--faint); }
 .term-status-badge::after { content: ' ]'; color: var(--faint); }
 .term-status-badge.ok { color: var(--green); }
 .term-status-badge.error { color: var(--red); }
 .term-status-badge.running { color: var(--amber); animation: pulse 1.2s infinite; }
-.term-prompt-preview {
+.term-cmd-preview {
   color: var(--text-bright);
   font-family: var(--font);
   font-size: 12px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  flex: 1;
+  /* 长命令最多占三行，其余在内容区滚动，不挤压状态与操作控件（TODOS #78）。 */
+  flex: 1 1 160px;
+  min-width: 0;
+  line-height: 1.5;
+  max-height: 4.5em;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  overflow: auto;
+  scrollbar-width: thin;
 }
 .term-exit-badge {
   font-size: 10.5px;
@@ -1038,12 +1052,21 @@ html.crt-off body::after {
   gap: 6px;
   color: var(--text-bright);
 }
+.term-running-command {
+  flex: 1;
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .term-prompt {
   color: var(--green);
   font-weight: bold;
+  flex: none;
+  white-space: nowrap;
 }
 .term-cursor {
   color: var(--green);
+  flex: none;
   animation: terminalBlink 1s infinite steps(1);
 }
 .term-empty {

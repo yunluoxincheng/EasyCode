@@ -285,19 +285,18 @@ function TerminalCard({ item }: { item: ToolItem }) {
 
   return (
     <div className={`term-card status-${statusClass} ${open ? 'open' : 'closed'}`}>
-      <button className="term-head" onClick={() => setOpen(!open)} type="button">
+      <button className="term-head" onClick={() => setOpen(!open)} type="button" aria-expanded={open}>
         <span className={`term-status-badge ${statusClass}`}>
           {isRunning ? (item.executionStartedAt === undefined ? 'WAIT' : 'RUN') : parsed ? (parsed.isSuccess ? 'OK' : 'ERR') : statusClass.toUpperCase()}
         </span>
         {isBackground && <span className="term-bg-badge">BG</span>}
-        <span className="term-cmd-preview">$ {command}</span>
+        <span className="term-cmd-preview" title={command}>$ {command}</span>
         {parsed?.exitCode !== null && parsed?.exitCode !== undefined && (
           <span className={`term-exit-badge ${parsed.isSuccess ? 'ok' : 'err'}`}>
             exit: {parsed.exitCode}
           </span>
         )}
         <ToolDuration item={item} className="term-duration" />
-        <span className="spacer" />
         <span className="term-chevron">{open ? '▾' : '▸'}</span>
       </button>
       {open && (
@@ -309,7 +308,9 @@ function TerminalCard({ item }: { item: ToolItem }) {
           <div className="term-screen">
             {isRunning && !parsed && (
               <div className="term-running-line">
-                <span className="term-prompt">{item.executionStartedAt === undefined ? '待执行 $' : '$'}</span> {command} <span className="term-cursor">█</span>
+                <span className="term-prompt">{item.executionStartedAt === undefined ? '待执行 $' : '$'}</span>
+                <span className="term-running-command">{command}</span>
+                <span className="term-cursor">█</span>
               </div>
             )}
             {parsed && (
