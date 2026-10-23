@@ -194,6 +194,12 @@ export class IpcAgentClient implements AgentClient {
   stopBackgroundTask(id: string, taskId: string) {
     return this.invoke<BackgroundTaskInfo | null>('stop-background-task', { id, taskId });
   }
+  removeBackgroundTask(id: string, taskId: string) {
+    return this.invoke<boolean>('remove-background-task', { id, taskId });
+  }
+  clearFinishedBackgroundTasks(id: string) {
+    return this.invoke<string[]>('clear-finished-background-tasks', { id });
+  }
   restartBackgroundTask(id: string, taskId: string) {
     return this.invoke<BackgroundTaskInfo>('restart-background-task', { id, taskId });
   }
@@ -353,6 +359,8 @@ export function createDemoClient(): AgentClient {
     listBackgroundTasks: (id) => wrap(() => server.listBackgroundTasks(id)),
     getTaskLogs: (id, taskId, tailLines) => wrap(() => server.getTaskLogs(id, taskId, tailLines)),
     stopBackgroundTask: (id, taskId) => wrap(() => server.stopBackgroundTask(id, taskId)),
+    removeBackgroundTask: (id, taskId) => wrap(() => server.removeBackgroundTask(id, taskId)),
+    clearFinishedBackgroundTasks: (id) => wrap(() => server.clearFinishedBackgroundTasks(id)),
     restartBackgroundTask: (id, taskId) => wrap(() => server.restartBackgroundTask(id, taskId)),
     openUrl: async (url) => {
       window.open(url, '_blank', 'noopener');

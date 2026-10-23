@@ -45,6 +45,46 @@ struct SpawnedInfo {
 #[derive(Default)]
 struct SpawnMap(Mutex<HashMap<String, SpawnedInfo>>);
 
+// 两份注册表始终按 PidMap -> SpawnMap 的顺序一起更新。
+fn register_spawned(pids: &PidMap, spawns: &SpawnMap, info: SpawnedInfo) {
+    let mut pid_map = pids.0.lock().unwrap();
+    let mut spawn_map = spawns.0.lock().unwrap();
+    pid_map.insert(info.id.clone(), info.pid);
+    spawn_map.insert(info.id.clone(), info);
+}
+
+/// 只回收本次进程的登记；迟到的旧退出线程不能删除同 ID 的新进程。
+fn forget_spawned(pids: &PidMap, spawns: &SpawnMap, id: &str, pid: u32) {
+    let mut pid_map = pids.0.lock().unwrap();
+    let mut spawn_map = spawns.0.lock().unwrap();
+    if pid_map.get(id) == Some(&pid) {
+        pid_map.remove(id);
+    }
+    if spawn_map.get(id).map(|entry| entry.pid) == Some(pid) {
+        spawn_map.remove(id);
+    }
+}
+
+fn stop_registered_process(
+    pids: &PidMap,
+    spawns: &SpawnMap,
+    id: &str,
+    kill: impl FnOnce(u32) -> Result<(), String>,
+) -> Result<(), String> {
+    let pid = pids.0.lock().unwrap().get(id).copied();
+    if let Some(pid) = pid {
+        kill(pid)?;
+        forget_spawned(pids, spawns, id, pid);
+    } else {
+        let pid_map = pids.0.lock().unwrap();
+        let mut spawn_map = spawns.0.lock().unwrap();
+        if !pid_map.contains_key(id) {
+            spawn_map.remove(id);
+        }
+    }
+    Ok(())
+}
+
 /// 流式增量解码器（TODOS #37）：默认按 UTF-8 增量解出完整片段（跨块的不完整序列留待下一块）；
 /// 一旦出现确定非法的 UTF-8 字节（如 GBK 输出），整个流确定性切换为 ANSI 代码页解码——
 /// 与 proc_run 的整缓冲判定语义一致，避免按 UTF-8 非法长度逐字节碎解 GBK 双字节字符。
@@ -165,21 +205,15 @@ mod stream_decoder_tests {
     fn utf8_multibyte_across_chunks() {
         let mut d = StreamDecoder::new();
         let mut out = Vec::new();
+        d.feed(b"ready in 233 ms\n", &mut out);
+        assert_eq!(out.join(""), "ready in 233 ms\n");
+        out.clear();
         // "你" = E4 BD A0，"好" = E5 A5 BD；在"你"的第二字节后切块
         d.feed(&[0xE4, 0xBD], &mut out);
         assert!(out.is_empty(), "不完整序列应等待下一块");
         d.feed(&[0xA0, 0xE5, 0xA5, 0xBD, 0x0A], &mut out);
         d.flush(&mut out);
         assert_eq!(out.join(""), "你好\n");
-    }
-
-    #[test]
-    fn utf8_ascii_passthrough() {
-        let mut d = StreamDecoder::new();
-        let mut out = Vec::new();
-        d.feed(b"ready in 233 ms\n", &mut out);
-        d.flush(&mut out);
-        assert_eq!(out.join(""), "ready in 233 ms\n");
     }
 
     #[test]
@@ -872,14 +906,75 @@ async fn proc_run(
 }
 
 #[tauri::command]
-fn proc_kill(state: tauri::State<'_, PidMap>, id: String) -> Result<(), String> {
-    // 先查后杀：确认终止成功才移除登记——kill 失败保留句柄，重试语义才成立
-    let pid = state.0.lock().unwrap().get(&id).copied();
-    if let Some(pid) = pid {
-        kill_process(pid)?;
-        state.0.lock().unwrap().remove(&id);
+fn proc_kill(
+    pids: tauri::State<'_, PidMap>,
+    spawns: tauri::State<'_, SpawnMap>,
+    id: String,
+) -> Result<(), String> {
+    // 返回前同步移除恢复元数据；停止失败则两份记录均保留。
+    stop_registered_process(&pids, &spawns, &id, kill_process)
+}
+
+#[cfg(test)]
+mod process_lifecycle_tests {
+    use super::*;
+
+    struct ChildGuard(std::process::Child);
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            if matches!(self.0.try_wait(), Ok(None)) {
+                let _ = kill_process(self.0.id());
+            }
+            let _ = self.0.wait();
+        }
     }
-    Ok(())
+
+    #[test]
+    fn stop_and_exit_remove_both_registries_without_late_watcher_deletion() {
+        let pids = PidMap::default();
+        let spawns = SpawnMap::default();
+        #[cfg(windows)]
+        let command = "ping -n 60 127.0.0.1 >nul";
+        #[cfg(not(windows))]
+        let command = "sleep 60";
+        let mut cmd = make_shell_command(command, None, Some("cmd"));
+        hide_window(&mut cmd);
+        cmd.stdout(Stdio::null()).stderr(Stdio::null());
+        let mut child = ChildGuard(cmd.spawn().expect("spawn real background process"));
+        let pid = child.0.id();
+        let info = SpawnedInfo {
+            id: "native-task".into(), pid, command: command.into(), cwd: None,
+            shell: None, started_ms: 0, alive: true,
+        };
+        register_spawned(&pids, &spawns, info.clone());
+        assert!(stop_registered_process(&pids, &spawns, &info.id, |_| Err("denied".into())).is_err());
+        assert_eq!(pids.0.lock().unwrap().get(&info.id), Some(&pid));
+        assert!(spawns.0.lock().unwrap().get(&info.id).unwrap().alive);
+        assert!(process_exists(pid));
+
+        stop_registered_process(&pids, &spawns, &info.id, kill_process).unwrap();
+        // 尚无退出监测回调时，两份登记也必须已同步清空。
+        assert!(!pids.0.lock().unwrap().contains_key(&info.id));
+        assert!(!spawns.0.lock().unwrap().contains_key(&info.id));
+        child.0.wait().unwrap();
+        assert!(!process_exists(pid));
+
+        let mut quick = make_shell_command("exit 0", None, Some("cmd"));
+        hide_window(&mut quick);
+        let mut quick = ChildGuard(quick.spawn().unwrap());
+        let next_pid = quick.0.id();
+        register_spawned(&pids, &spawns, SpawnedInfo { pid: next_pid, ..info.clone() });
+        forget_spawned(&pids, &spawns, &info.id, pid);
+        assert_eq!(pids.0.lock().unwrap().get(&info.id), Some(&next_pid));
+        assert_eq!(spawns.0.lock().unwrap().get(&info.id).unwrap().pid, next_pid);
+        assert!(quick.0.wait().unwrap().success());
+        forget_spawned(&pids, &spawns, &info.id, next_pid);
+        assert!(pids.0.lock().unwrap().is_empty());
+        assert!(spawns.0.lock().unwrap().is_empty());
+        spawns.0.lock().unwrap().insert(info.id.clone(), info.clone());
+        stop_registered_process(&pids, &spawns, &info.id, |_| panic!("no handle must not kill")).unwrap();
+        assert!(spawns.0.lock().unwrap().is_empty(), "orphaned recovery metadata is discarded");
+    }
 }
 
 /// 启动长期运行的后台进程（TODOS #37）：立即返回 id/pid；
@@ -908,8 +1003,9 @@ async fn proc_spawn(
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
 
-    spawns.0.lock().unwrap().insert(
-        id.clone(),
+    register_spawned(
+        &pids,
+        &spawns,
         SpawnedInfo {
             id: id.clone(),
             pid,
@@ -920,7 +1016,6 @@ async fn proc_spawn(
             alive: true,
         },
     );
-    pids.0.lock().unwrap().insert(id.clone(), pid);
 
     let send_frame = |ch: &Channel<serde_json::Value>, frame: serde_json::Value| {
         // WebView 已重载/关闭时发送失败属预期，静默即可
@@ -980,7 +1075,7 @@ async fn proc_spawn(
         }
     });
 
-    // 等待进程退出：标记注册表失活并通知 WebView
+    // 等待进程退出：回收两份注册表并通知 WebView。
     let app_handle = app.clone();
     let task_id = id.clone();
     let ch_exit = on_event;
@@ -991,16 +1086,12 @@ async fn proc_spawn(
             Ok(status) => status.code(),
             Err(_) => None,
         };
-        if let Some(e) = app_handle
-            .state::<SpawnMap>()
-            .0
-            .lock()
-            .unwrap()
-            .get_mut(&task_id)
-        {
-            e.alive = false;
-        }
-        app_handle.state::<PidMap>().0.lock().unwrap().remove(&task_id);
+        forget_spawned(
+            &app_handle.state::<PidMap>(),
+            &app_handle.state::<SpawnMap>(),
+            &task_id,
+            pid,
+        );
         send_frame(
             &ch_exit,
             serde_json::json!({ "t": "exit", "code": code }),
@@ -1067,9 +1158,8 @@ fn kill_all_spawned(app: &AppHandle) {
     };
     for (id, pid) in targets {
         // 应用退出属尽力而为清场：单任务失败不阻断其余
-        let _ = kill_process(pid);
-        if let Some(e) = app.state::<SpawnMap>().0.lock().unwrap().get_mut(&id) {
-            e.alive = false;
+        if kill_process(pid).is_ok() {
+            forget_spawned(&app.state::<PidMap>(), &app.state::<SpawnMap>(), &id, pid);
         }
     }
 }

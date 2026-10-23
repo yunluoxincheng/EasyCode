@@ -122,6 +122,10 @@ export interface AgentClient {
   getTaskLogs?(id: string, taskId: string, tailLines?: number): Promise<string>;
   /** 停止后台任务（TODOS #37） */
   stopBackgroundTask?(id: string, taskId: string): Promise<BackgroundTaskInfo | null>;
+  /** 停止并移除任务；停止失败保留记录（TODOS #73）。 */
+  removeBackgroundTask?(id: string, taskId: string): Promise<boolean>;
+  /** 清理已结束的后台任务，返回实际移除的 id。 */
+  clearFinishedBackgroundTasks?(id: string): Promise<string[]>;
   /** 以原命令重启后台任务（TODOS #44 预览面板「重新启动」） */
   restartBackgroundTask?(id: string, taskId: string): Promise<BackgroundTaskInfo>;
   /** 用系统默认浏览器打开 URL（TODOS #44 外部浏览器兜底） */

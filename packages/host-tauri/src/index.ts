@@ -413,6 +413,8 @@ export async function createTauriClient(options?: { reflexPolicy?: DecisionPolic
     listBackgroundTasks: (id) => server.listBackgroundTasks(id),
     getTaskLogs: (id, taskId, tailLines) => server.getTaskLogs(id, taskId, tailLines),
     stopBackgroundTask: (id, taskId) => server.stopBackgroundTask(id, taskId),
+    removeBackgroundTask: (id, taskId) => server.removeBackgroundTask(id, taskId),
+    clearFinishedBackgroundTasks: (id) => server.clearFinishedBackgroundTasks(id),
     restartBackgroundTask: (id, taskId) => server.restartBackgroundTask(id, taskId),
     openUrl: (url: string) => invoke<void>('open_url', { url }),
     pickWorkspace: () => invoke<string | null>('pick_folder'),
