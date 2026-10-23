@@ -5,6 +5,7 @@ import crossSpawn from 'cross-spawn';
 // 子进程以 suspended 创建，加入禁止 breakaway 的 Job 后才运行，消除启动器抢先退出的窗口。
 const SUPERVISOR = String.raw`
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 try {
 Add-Type -TypeDefinition @'
 using System;
@@ -28,7 +29,8 @@ public static class EasyCodeStdioJob {
  [DllImport("kernel32.dll")] static extern bool TerminateProcess(IntPtr process,uint code);
  [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr OpenProcess(uint access,bool inherit,uint pid);
  [DllImport("kernel32.dll", SetLastError=true)] static extern uint WaitForSingleObject(IntPtr handle,uint timeout);
- public static void Run(string command,uint ownerPid) {
+ [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetExitCodeProcess(IntPtr process,out uint code);
+ public static uint Run(string command,uint ownerPid) {
   IntPtr job=CreateJobObject(IntPtr.Zero,null); ProcessInfo pi=new ProcessInfo();
   if(job==IntPtr.Zero) throw new Exception();
   IntPtr owner=IntPtr.Zero;
@@ -49,6 +51,9 @@ public static class EasyCodeStdioJob {
     if(info.Active==0) break;
     System.Threading.Thread.Sleep(25);
    }
+   uint code;
+   if(!GetExitCodeProcess(pi.Process,out code)) throw new Exception();
+   return code==259 ? 1 : code;
   } finally {
    if(owner!=IntPtr.Zero) CloseHandle(owner);
    if(pi.Thread!=IntPtr.Zero) CloseHandle(pi.Thread);
@@ -59,8 +64,8 @@ public static class EasyCodeStdioJob {
 }
 '@
 $command = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__EASYCODE_COMMAND__'))
-[EasyCodeStdioJob]::Run($command,__EASYCODE_OWNER__)
-exit 0
+$exitCode = [EasyCodeStdioJob]::Run($command,__EASYCODE_OWNER__)
+exit $exitCode
 } catch { exit 1 }
 `;
 
@@ -73,11 +78,17 @@ export function spawnWindowsJob(command: string, args: string[], options: SpawnO
   const parse = (crossSpawn as typeof crossSpawn & { _parse: (command: string, args: string[], options: SpawnOptionsWithoutStdio) =>
     { command: string; args: string[]; options: SpawnOptionsWithoutStdio } })._parse;
   const parsed = parse(command, args, options);
-  const line = [quote(parsed.command), ...parsed.args.map((arg) => parsed.options.windowsVerbatimArguments ? arg : quote(arg))].join(' ');
+  // cmd 的 /c 尾部使用 Shell 引号规则，不能套 C argv 的反斜杠转义。
+  const cmdShell = /(?:^|[\\/])cmd(?:\.exe)?$/i.test(parsed.command) && !parsed.options.windowsVerbatimArguments;
+  const line = cmdShell && parsed.args[2]?.toLowerCase() === '/c'
+    ? `${quote(parsed.command)} /d /s /c "${parsed.args.slice(3).join(' ')}"`
+    : [quote(parsed.command), ...parsed.args.map((arg) => parsed.options.windowsVerbatimArguments ? arg : quote(arg))].join(' ');
   const script = SUPERVISOR.replace('__EASYCODE_COMMAND__', Buffer.from(line, 'utf8').toString('base64'))
     .replace('__EASYCODE_OWNER__', String(process.pid));
   return spawn('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], {
     ...options, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
+    // shell 已由 cross-spawn 解析进被监督的命令；监督器自身必须直接启动。
+    shell: false, windowsVerbatimArguments: false,
     env: options.env,
   });
 }

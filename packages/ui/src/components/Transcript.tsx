@@ -512,7 +512,7 @@ function CopyButton({ text, label = '复制' }: { text: string; label?: string }
   );
 }
 
-/** 用户消息：气泡框 + 时间/复制/编辑（编辑仅最近一条且非运行中） */
+/** 每条历史用户消息均可编辑；停止并收尾后才能重生成。 */
 const UserView = memo(function UserView({ id, text, ts, canEdit, running }: Pick<UserItem, 'id' | 'text' | 'ts'> & {
   canEdit: boolean;
   running: boolean;
@@ -526,6 +526,7 @@ const UserView = memo(function UserView({ id, text, ts, canEdit, running }: Pick
     : '';
 
   const save = (): void => {
+    if (running) return;
     setEditing(false);
     if (draft.trim() && draft.trim() !== text) {
       void store.editAndResend(id, draft);
@@ -535,6 +536,7 @@ const UserView = memo(function UserView({ id, text, ts, canEdit, running }: Pick
   if (editing) {
     return (
       <div className="msg user editing" data-anchor={id}>
+        <p className="msg-time">保存后将替换此消息并重新生成后续对话。已写入的文件和独立后台服务会保留；如需撤销文件，请先使用回合撤销。</p>
         <textarea
           className="msg-edit-area"
           value={draft}
@@ -554,8 +556,8 @@ const UserView = memo(function UserView({ id, text, ts, canEdit, running }: Pick
           <button className="msg-copy" onClick={() => setEditing(false)}>
             取消
           </button>
-          <button className="msg-copy" onClick={save}>
-            保存
+          <button className="msg-copy" onClick={save} disabled={running || !draft.trim()}>
+            [ 保存并重新生成 ]
           </button>
         </div>
       </div>
@@ -580,7 +582,7 @@ const UserView = memo(function UserView({ id, text, ts, canEdit, running }: Pick
           {copied ? '✓' : '⧉'}
         </button>
         {canEdit && (
-          <button className="msg-icon" title="编辑并重新生成" onClick={() => setEditing(true)}>
+          <button className="msg-icon" title="编辑并重新生成" onClick={() => { setDraft(text); setEditing(true); }}>
             ✎
           </button>
         )}
@@ -1237,10 +1239,7 @@ export function Transcript() {
         )}
         {store.items.map((item) => {
           if (item.kind === 'user') {
-            const isLastUser =
-              !store.running &&
-              store.items.lastIndexOf(item) === store.items.length - 1 - (store.items.length > 1 && store.items[store.items.length - 1].kind === 'turn' ? 1 : 0);
-            return <UserView key={item.id} id={item.id} text={item.text} ts={item.ts} canEdit={isLastUser} running={store.running} />;
+            return <UserView key={item.id} id={item.id} text={item.text} ts={item.ts} canEdit={!store.running && !!item.msgId} running={store.running} />;
           }
           if (item.kind === 'turn') {
             const live = store.running && item.durationMs === undefined;

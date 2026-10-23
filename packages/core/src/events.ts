@@ -1,9 +1,11 @@
-import type { ToolCallBlock, Usage } from './types.js';
+import type { ChatMessage, TodoItem, ToolCallBlock, Usage } from './types.js';
 import type { BackgroundTaskInfo } from './tasks.js';
 import type { TestRunSummary } from './test-runner.js';
 
 /** 引擎 → UI 的单向事件流（传输层无关：IPC / 进程内 / CLI 终端皆可承载） */
 export type AgentEvent =
+  | { type: 'user_message_committed'; messageId: string }
+  | { type: 'history_replaced'; messages: ChatMessage[]; contextMessages: ChatMessage[]; todos: TodoItem[] }
   /** 全局 MCP 目录失效通知，不携带配置或凭据，sessionId 为空。 */
   | { type: 'mcp_catalog_changed' }
   /** 每轮模型回复开始（UI 据此开启新的助手消息气泡） */
@@ -46,6 +48,7 @@ export type AgentEvent =
     }
   | {
       type: 'context_compacted';
+      messages?: ChatMessage[];
       beforeTokens?: number;
       afterTokens?: number;
       summary: string;

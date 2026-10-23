@@ -42,53 +42,35 @@ test('parseTestOutput：pytest 汇总与 FAILED 行', () => {
   assert.deepEqual(summary.failures.length > 0, true);
 });
 
-test('parseTestOutput：Node 内置 runner（spec reporter ℹ 多行汇总）', () => {
-  // 真实 `node --test` 输出（含 ✖ 用例行、✖ failing tests: 分节标题与耗时后缀）
-  const output = [
-    '✖ add(2, 3) 应等于 5 (2.0765ms)',
-    'ℹ tests 1',
-    'ℹ suites 0',
-    'ℹ pass 0',
-    'ℹ fail 1',
-    'ℹ cancelled 0',
-    'ℹ skipped 0',
-    'ℹ todo 0',
-    'ℹ duration_ms 163.0328',
-    '',
-    '✖ failing tests:',
-    '',
-    '✖ add(2, 3) 应等于 5 (2.0765ms)',
-    '  AssertionError [ERR_ASSERTION]: -1 !== 5',
-  ].join('\n');
-  const summary = parseTestOutput(output);
-  assert.equal(summary.total, 1);
-  assert.equal(summary.passed, 0);
-  assert.equal(summary.failed, 1);
-  // 分节标题不得被当作失败用例，耗时后缀必须剥离，且不得重复计数
-  assert.deepEqual(summary.failures, ['add(2, 3) 应等于 5']);
-});
-
-test('parseTestOutput：Node TAP reporter（# 汇总 + not ok）', () => {
-  const output = [
-    'TAP version 13',
-    'ok 1 - 通过用例',
-    'not ok 2 - 失败用例',
-    '  ---',
-    '  error: expected 3 to be 4',
-    '  ...',
-    'not ok 3 - 跳过的用例 # SKIP',
-    'not ok 4 - 待办用例 # TODO',
-    '1..4',
-    '# tests 4',
-    '# pass 1',
-    '# fail 3',
-  ].join('\n');
-  const summary = parseTestOutput(output);
-  assert.equal(summary.total, 4);
-  assert.equal(summary.passed, 1);
-  assert.equal(summary.failed, 3);
-  // # TODO / # SKIP 不是真实失败
-  assert.deepEqual(summary.failures, ['失败用例']);
+test('parseTestOutput：Node spec/TAP 汇总均剔除非失败标题、跳过和待办', () => {
+  const cases = [
+    {
+      output: [
+        '✖ add(2, 3) 应等于 5 (2.0765ms)',
+        'ℹ tests 1', 'ℹ suites 0', 'ℹ pass 0', 'ℹ fail 1',
+        'ℹ cancelled 0', 'ℹ skipped 0', 'ℹ todo 0', 'ℹ duration_ms 163.0328',
+        '', '✖ failing tests:', '', '✖ add(2, 3) 应等于 5 (2.0765ms)',
+        '  AssertionError [ERR_ASSERTION]: -1 !== 5',
+      ],
+      total: 1, passed: 0, failed: 1, failures: ['add(2, 3) 应等于 5'],
+    },
+    {
+      output: [
+        'TAP version 13', 'ok 1 - 通过用例', 'not ok 2 - 失败用例',
+        '  ---', '  error: expected 3 to be 4', '  ...',
+        'not ok 3 - 跳过的用例 # SKIP', 'not ok 4 - 待办用例 # TODO',
+        '1..4', '# tests 4', '# pass 1', '# fail 3',
+      ],
+      total: 4, passed: 1, failed: 3, failures: ['失败用例'],
+    },
+  ];
+  for (const item of cases) {
+    const summary = parseTestOutput(item.output.join('\n'));
+    assert.equal(summary.total, item.total);
+    assert.equal(summary.passed, item.passed);
+    assert.equal(summary.failed, item.failed);
+    assert.deepEqual(summary.failures, item.failures);
+  }
 });
 
 test('【P2 复审】长日志必须同时保留失败点上下文与末尾汇总', () => {

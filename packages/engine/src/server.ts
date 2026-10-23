@@ -17,7 +17,6 @@ import {
   runWebSearch,
   listFilesRecursively,
   compactHistoryMessages,
-  pruneHistoricalToolResults,
   getGitStatus,
   getGitDiff,
   stageGitFiles,
@@ -127,6 +126,8 @@ interface SessionRuntime {
   data: SessionData;
   approval: ApprovalManager;
   controller?: AbortController;
+  /** 当前顶层操作（含落盘）的收尾确认；停止不能只等 abort 信号发出。 */
+  settled?: Promise<void>;
   running: boolean;
   /** 测试自愈循环执行中（TODOS #39）：与 running 一同阻止并发发送 */
   busy?: boolean;
@@ -291,6 +292,8 @@ export class AgentServer {
     rt: SessionRuntime,
     options?: { upToMessageId?: string; beforeUserIndex?: number },
   ): Promise<SessionMeta> {
+    // UI 锚点来自完整时间线，不能用已压缩上下文的用户序号定位。
+    const source = rt.data.history ?? rt.data.messages;
     let slicedMessages: ChatMessage[] = [];
     if (options?.beforeUserIndex !== undefined) {
       const targetUserIndex = options.beforeUserIndex;
@@ -298,9 +301,9 @@ export class AgentServer {
         slicedMessages = [];
       } else {
         let userCount = 0;
-        let cutIdx = rt.data.messages.length;
-        for (let i = 0; i < rt.data.messages.length; i++) {
-          if (rt.data.messages[i].role === 'user') {
+        let cutIdx = source.length;
+        for (let i = 0; i < source.length; i++) {
+          if (source[i].role === 'user') {
             if (userCount === targetUserIndex) {
               cutIdx = i;
               break;
@@ -308,25 +311,32 @@ export class AgentServer {
             userCount++;
           }
         }
-        slicedMessages = rt.data.messages.slice(0, cutIdx);
+        slicedMessages = source.slice(0, cutIdx);
       }
     } else if (options?.upToMessageId) {
       const targetId = options.upToMessageId;
-      const idx = rt.data.messages.findIndex((m) => m.id === targetId);
+      const idx = source.findIndex((m) => m.id === targetId);
       if (idx === -1) {
-        slicedMessages = rt.data.messages.slice();
+        slicedMessages = source.slice();
       } else {
         let endIdx = idx + 1;
-        while (endIdx < rt.data.messages.length && rt.data.messages[endIdx].role === 'tool_result') {
+        while (endIdx < source.length && source[endIdx].role === 'tool_result') {
           endIdx++;
         }
-        slicedMessages = rt.data.messages.slice(0, endIdx);
+        slicedMessages = source.slice(0, endIdx);
       }
     } else {
-      slicedMessages = rt.data.messages.slice();
+      slicedMessages = source.slice();
     }
 
     const clonedMessages = structuredClone(slicedMessages);
+    // 完整时间线只用于锚点定位/展示；分叉仍保留父会话的压缩边界。
+    // 指定历史锚点时从截取前缀重建，不能继承包含锚点之后事实的旧摘要。
+    const forkContext = rt.data.history
+      ? options?.beforeUserIndex !== undefined || options?.upToMessageId
+        ? compactHistoryMessages(structuredClone(clonedMessages), { keepRecentTurns: 2 }).messages
+        : structuredClone(rt.data.messages)
+      : clonedMessages;
     const now = new Date().toISOString();
     const meta: SessionMeta = {
       id: `s_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
@@ -343,7 +353,8 @@ export class AgentServer {
     const newRuntime: SessionRuntime = {
       data: {
         meta,
-        messages: clonedMessages,
+        messages: forkContext,
+        history: rt.data.history ? clonedMessages : undefined,
         todos: latestTodos ? structuredClone(latestTodos) : undefined,
       },
       approval: new ApprovalManager(this.emitterFor(meta.id), this.settings.defaultApprovalMode),
@@ -367,12 +378,19 @@ export class AgentServer {
     return this.withSessionOpLock(id, '会话正在运行中，请先等待完成或点击停止', async () => {
       if (rt.data.messages.length === 0) return rt.data;
 
-      const compRes = compactHistoryMessages(rt.data.messages, {
+      this.ensureMessageIds(rt);
+      const history = structuredClone(rt.data.history ?? rt.data.messages);
+
+      // compactHistoryMessages 即使 compacted=false，也可能原地裁剪工具输出。
+      // 在副本上计算，并按消息的实际变化统一提交归档，避免丢原文或漏落盘。
+      const candidate = structuredClone(rt.data.messages);
+      const compRes = compactHistoryMessages(candidate, {
         keepRecentTurns,
         pruneTools: true,
       });
 
-      if (compRes.compacted) {
+      if (JSON.stringify(compRes.messages) !== JSON.stringify(rt.data.messages)) {
+        rt.data.history = history;
         rt.data.messages = compRes.messages;
         const latestTodos = extractLatestTodos(rt.data.messages);
         if (latestTodos) {
@@ -380,13 +398,6 @@ export class AgentServer {
         }
         rt.data.meta.updatedAt = new Date().toISOString();
         await this.persistSession(rt);
-      } else {
-        // 即使轮数未超过 keepRecentTurns，也对历史旧工具的长输出执行折叠压缩
-        const pruneRes = pruneHistoricalToolResults(rt.data.messages, { keepRecentTurns: 1 });
-        if (pruneRes.modified) {
-          rt.data.meta.updatedAt = new Date().toISOString();
-          await this.persistSession(rt);
-        }
       }
       return rt.data;
     });
@@ -432,7 +443,16 @@ export class AgentServer {
 
   async getSession(id: string): Promise<SessionData> {
     const rt = this.requireSession(id);
+    this.ensureMessageIds(rt);
     return rt.data;
+  }
+
+  private ensureMessageIds(rt: SessionRuntime): void {
+    for (const messages of [rt.data.messages, rt.data.history ?? []]) {
+      for (const message of messages) {
+        message.id ??= `m_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+      }
+    }
   }
 
   async deleteSession(id: string): Promise<void> {
@@ -489,67 +509,126 @@ export class AgentServer {
 
   async sendMessage(id: string, text: string): Promise<void> {
     const rt = this.requireSession(id);
-    if (rt.running || rt.busy) throw new Error('会话正在运行中，请先等待完成或点击停止');
     const content = text.trim();
     if (!content) throw new Error('消息为空');
-    if (rt.data.messages.length === 0) {
-      rt.data.meta.title = content.slice(0, 30) + (content.length > 30 ? '…' : '');
-    }
-    rt.data.messages.push({
-      role: 'user',
-      content,
-      id: `m_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
-      createdAt: new Date().toISOString(),
+    await this.runUserOperation(rt, () => {
+      if (rt.data.messages.length === 0) {
+        rt.data.meta.title = content.slice(0, 30) + (content.length > 30 ? '…' : '');
+      }
+      const message: ChatMessage = {
+        role: 'user',
+        content,
+        id: `m_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+        createdAt: new Date().toISOString(),
+      };
+      rt.data.messages.push(message);
+      rt.data.history?.push(structuredClone(message));
+      rt.data.meta.updatedAt = new Date().toISOString();
+      this.emitterFor(id)({ type: 'user_message_committed', messageId: message.id! });
     });
-    rt.data.meta.updatedAt = new Date().toISOString();
-    await this.runTurn(rt);
   }
 
   /** 编辑最近一条用户消息：替换文本、丢弃其后的内容并重新生成 */
   async editLastUserMessage(id: string, text: string): Promise<void> {
     const rt = this.requireSession(id);
-    if (rt.running || rt.busy) throw new Error('会话正在运行中，请先等待完成或点击停止');
+    this.ensureMessageIds(rt);
+    const message = [...(rt.data.history ?? rt.data.messages)].reverse().find((m) => m.role === 'user');
+    if (!message?.id) throw new Error('会话中没有用户消息');
+    await this.editUserMessage(id, message.id, text);
+  }
+
+  /** 按持久消息 ID 编辑，原会话截断后续历史；不隐式撤销磁盘文件或停止独立服务。 */
+  async editUserMessage(id: string, messageId: string, text: string): Promise<void> {
+    const rt = this.requireSession(id);
     const content = text.trim();
     if (!content) throw new Error('消息为空');
-    let idx = -1;
-    for (let i = rt.data.messages.length - 1; i >= 0; i--) {
-      if (rt.data.messages[i].role === 'user') {
-        idx = i;
-        break;
-      }
-    }
-    if (idx === -1) throw new Error('会话中没有用户消息');
-    const old = rt.data.messages[idx] as {
-      role: 'user';
-      content: string;
-      id?: string;
-      createdAt?: string;
-    };
-    const newUserMsgId = `m_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-    const discardedSlice = rt.data.messages.slice(idx);
-    const removedUserIds: string[] = [];
-    const removedToolCallIds: string[] = [];
-    for (const m of discardedSlice) {
-      if (m.role === 'user' && m.id) {
-        removedUserIds.push(m.id);
-      } else if (m.role === 'assistant') {
-        for (const b of m.blocks) {
-          if (b.type === 'tool_call' && b.id) {
-            removedToolCallIds.push(b.id);
+    await this.runUserOperation(rt, async (signal) => {
+      const source = rt.data.history ?? rt.data.messages;
+      const idx = source.findIndex((m) => m.role === 'user' && m.id === messageId);
+      if (idx < 0) throw new Error('原消息已失效，请重新加载会话后再编辑');
+      const newUserMsgId = `m_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+      const discardedSlice = source.slice(idx);
+      const removedUserIds: string[] = [];
+      const removedToolCallIds: string[] = [];
+      for (const m of discardedSlice) {
+        if (m.role === 'user' && m.id) {
+          removedUserIds.push(m.id);
+        } else if (m.role === 'assistant') {
+          for (const b of m.blocks) {
+            if (b.type === 'tool_call' && b.id) {
+              removedToolCallIds.push(b.id);
+            }
           }
         }
       }
+      const messages = structuredClone(source.slice(0, idx));
+      messages.push({
+        role: 'user',
+        content,
+        id: newUserMsgId,
+        createdAt: new Date().toISOString(),
+      });
+      const previous = rt.data;
+      const next: SessionData = {
+        ...previous,
+        meta: { ...previous.meta, updatedAt: new Date().toISOString() },
+        history: previous.history ? structuredClone(messages) : undefined,
+        messages: previous.history
+          ? compactHistoryMessages(structuredClone(messages), { keepRecentTurns: 2 }).messages
+          : messages,
+        todos: extractLatestTodos(messages) ?? [],
+      };
+      // 裁剪与历史写入期间保持互斥；写入失败同时恢复原历史和快照，禁止半提交后继续生成。
+      await this.checkpoints.pruneCheckpointsByIds(id, removedUserIds, removedToolCallIds, async () => {
+        rt.data = next;
+        try {
+          await this.persistSession(rt, true);
+        } catch (error) {
+          rt.data = previous;
+          throw error;
+        }
+      });
+      rt.approval.denyAll();
+      this.emitterFor(id)({ type: 'history_replaced', messages, contextMessages: rt.data.messages, todos: rt.data.todos ?? [] });
+      signal.throwIfAborted();
+    });
+  }
+
+  private async runUserOperation(
+    rt: SessionRuntime,
+    prepare: (signal: AbortSignal) => void | Promise<void>,
+  ): Promise<void> {
+    if (rt.running || rt.busy) throw new Error('会话正在运行中，请先等待完成或点击停止');
+    rt.running = true;
+    const controller = new AbortController();
+    rt.controller = controller;
+    let resolve!: () => void;
+    const settled = new Promise<void>((done) => { resolve = done; });
+    rt.settled = settled;
+    let reason: LoopResult['reason'] = 'error';
+    try {
+      await this.sessionOpLock(rt.data.meta.id).withLock(async () => {
+        controller.signal.throwIfAborted();
+        await prepare(controller.signal);
+      });
+      controller.signal.throwIfAborted();
+      reason = (await this.runTurn(rt, controller)).reason;
+    } catch (error) {
+      if (controller.signal.aborted && error instanceof DOMException && error.name === 'AbortError') {
+        reason = 'aborted';
+        await this.persistSession(rt);
+      } else {
+        throw error;
+      }
+    } finally {
+      if (controller.signal.aborted && reason !== 'error') reason = 'aborted';
+      rt.running = false;
+      if (rt.controller === controller) rt.controller = undefined;
+      if (rt.settled === settled) rt.settled = undefined;
+      // 终止事件在所有历史/快照落盘之后，前端才能安全接受下一条消息。
+      if (!rt.deleted) this.emitterFor(rt.data.meta.id)({ type: 'done', reason });
+      resolve();
     }
-    await this.checkpoints.pruneCheckpointsByIds(id, removedUserIds, removedToolCallIds);
-    rt.data.messages[idx] = {
-      role: 'user',
-      content,
-      id: newUserMsgId,
-      createdAt: new Date().toISOString(),
-    };
-    rt.data.messages = rt.data.messages.slice(0, idx + 1);
-    rt.data.meta.updatedAt = new Date().toISOString();
-    await this.runTurn(rt);
   }
 
   /**
@@ -557,14 +636,16 @@ export class AgentServer {
    * 返回循环的终止原因：调用方（如测试自愈循环）需要据此区分成功、失败与中止，
    * 不能只看事件流——事件只表达过程，不表达「这一回合是否真的完成任务」。
    */
-  private async runTurn(rt: SessionRuntime): Promise<LoopResult> {
+  private async runTurn(rt: SessionRuntime, controller?: AbortController): Promise<LoopResult> {
     const id = rt.data.meta.id;
+    this.ensureMessageIds(rt);
+    this.syncHistory(rt);
     const lastUserMessage = [...rt.data.messages].reverse().find((m) => m.role === 'user');
     rt.running = true;
     // 测试自愈循环（TODOS #39）在修复回合中复用循环持有的 controller：
     // 否则用户点停止只会打断修复回合，循环的 signal 依然存活，下一轮测试会继续跑起来。
     // 复用时本方法**不拥有**该 controller，收尾阶段不得解除注册（见 finally）。
-    const inheritedController = rt.busy && rt.controller ? rt.controller : undefined;
+    const inheritedController = controller ?? (rt.busy && rt.controller ? rt.controller : undefined);
     const turnController = inheritedController ?? new AbortController();
     rt.controller = turnController;
     let loopResult: LoopResult | undefined;
@@ -677,6 +758,14 @@ export class AgentServer {
           ? baseMessages
           : mergeSystemIntoUser(baseMessages, systemPrompt);
 
+      const cleanMessage = (message: ChatMessage): ChatMessage => {
+        const copy = structuredClone(message);
+        if (copy.role === 'user' && copy.id && cleanUserMap.has(copy.id)) {
+          Object.assign(copy, cleanUserMap.get(copy.id));
+        }
+        return copy;
+      };
+
       // 工作区物理身份（消解符号链接别名）——锁键与别名登记都以此为准，
       // 保证同一物理目录的不同写法共享同一把锁（PR #9 第五轮复审 P2）
       const workspaceIdentity = await this.resolveWorkspaceIdentity(
@@ -705,10 +794,16 @@ export class AgentServer {
         workspace: rt.data.meta.workspaceRoot,
         systemPrompt: caps.includes('system') ? systemPrompt : '',
         messages: wireMessages,
-        signal: rt.controller.signal,
+        signal: turnController.signal,
         approval: rt.approval,
         policy,
         permissionRules,
+        onBeforeCompaction: () => {
+          rt.data.history ??= wireMessages!.map(cleanMessage);
+        },
+        onMessage: (message) => {
+          rt.data.history?.push(cleanMessage(message));
+        },
         backgroundTasks: await this.bgManagerFor(id),
         onFileChange: async (change) => {
           if (rt.data.meta.workspaceRoot) {
@@ -717,6 +812,10 @@ export class AgentServer {
           await turnTracker.recordFileChange(change);
         },
         emit: (event) => {
+          if (event.type === 'context_compacted') {
+            this.emitterFor(id)({ ...event, messages: wireMessages!.map(cleanMessage) });
+            return;
+          }
           if (event.type === 'step_end') {
             // 累计会话用量并随事件下发（持久化在会话文件中）
             const u = rt.data.usage ?? { input: 0, output: 0, steps: 0 };
@@ -739,7 +838,7 @@ export class AgentServer {
           // 内部修复回合不向外发 done：外层 test_loop_done 才是真正的结束语义。
           // 否则前端会提前关闭回合、误报「任务完成」，且自愈中途误发桌面通知
           // （PR #9 第三轮复审 P2）
-          if (event.type === 'done' && rt.suppressDone) return;
+          if (event.type === 'done') return;
           this.emitterFor(id)(event);
         },
         reasoningEffort: rt.data.meta.reasoningEffort ?? '',
@@ -769,13 +868,13 @@ export class AgentServer {
           }
         }
       }
-      rt.running = false;
       rt.data.meta.updatedAt = new Date().toISOString();
       const latestTodos = extractLatestTodos(rt.data.messages);
       if (latestTodos) {
         rt.data.todos = latestTodos;
       }
       await this.persistSession(rt);
+      if (!controller) rt.running = false;
       // controller 的释放在持久化**之后**，且只释放本方法自己创建的那个：      // 若在 persistSession 之前就注销（或误释放外层循环的 controller），
       // 用户恰好在落盘等待期间点停止时 abort() 会找不到 controller，
       // 循环 signal 不受影响，恢复后又继续跑下一轮测试（PR #9 第七轮复审 P2）。
@@ -792,11 +891,12 @@ export class AgentServer {
     this.requireSession(id).approval.resolve(requestId, approved);
   }
 
-  abort(id: string): void {
+  async abort(id: string): Promise<void> {
     const rt = this.sessions.get(id);
     if (!rt) return;
     rt.approval.denyAll();
     rt.controller?.abort();
+    await rt.settled;
   }
 
   isRunning(id: string): boolean {
@@ -1291,9 +1391,10 @@ export class AgentServer {
     return this.host.paths.join(this.host.env.dataDir(), 'settings.json');
   }
 
-  private async persistSession(rt: SessionRuntime): Promise<void> {
+  private async persistSession(rt: SessionRuntime, atomic = false): Promise<void> {
     // 已删除的会话不得被仍在收尾的异步流程写回磁盘（会话「复活」防护）
     if (rt.deleted) return;
+    this.syncHistory(rt);
     // 串行化同一会话的落盘：
     // ① 并发写入会让旧快照晚于新快照落盘（后写入的其实是更早的状态）；
     // ② 若用单个字段记录「在途任务」，第二个任务会覆盖第一个的引用，
@@ -1308,7 +1409,20 @@ export class AgentServer {
         // 轮到本次执行时可能已被删除：再次确认，避免排队期间会话被删还写回
         if (rt.deleted) return;
         await this.host.fs.mkdir(this.sessionsDir(), { recursive: true });
-        await this.host.fs.writeFile(this.sessionFile(rt.data.meta.id), JSON.stringify(rt.data));
+        const file = this.sessionFile(rt.data.meta.id);
+        const content = JSON.stringify(rt.data);
+        if (atomic) {
+          const temporary = `${file}.edit.tmp`;
+          try {
+            await this.host.fs.writeFile(temporary, content);
+            await this.host.fs.rename(temporary, file);
+          } finally {
+            // 只清理本次编辑的单个暂存文件，失败不能覆盖原始错误。
+            try { await this.host.fs.unlink?.(temporary); } catch { /* 已提交或无法清理 */ }
+          }
+        } else {
+          await this.host.fs.writeFile(file, content);
+        }
       });
     rt.persistQueue = task;
     const pending = rt.persisting ?? (rt.persisting = new Set());
@@ -1318,6 +1432,17 @@ export class AgentServer {
     } finally {
       pending.delete(task);
       if (rt.persistQueue === task) rt.persistQueue = undefined;
+    }
+  }
+
+  private syncHistory(rt: SessionRuntime): void {
+    if (!rt.data.history) return;
+    const retained = new Set(rt.data.history.map((message) => message.id));
+    for (const message of rt.data.messages) {
+      if (message.id && !message.id.endsWith('_compact') && !retained.has(message.id)) {
+        rt.data.history.push(structuredClone(message));
+        retained.add(message.id);
+      }
     }
   }
 
@@ -1929,12 +2054,16 @@ export class AgentServer {
   async runTestLoop(sessionId: string, options?: RunTestLoopRequest): Promise<TestLoopResult> {
     await this.ensureSettings();
     const rt = this.requireSession(sessionId);
+    const controller = new AbortController();
+    let resolve!: () => void;
+    const settled = new Promise<void>((done) => { resolve = done; });
     // 占位必须与检查处于同一临界区：否则「检查通过 → 异步探测命令期间」
     // 另一个上下文操作（如工作区切换）可能插入（PR #9 第三轮复审 TOCTOU）
     await this.withSessionOpLock(sessionId, '会话正在运行中，请先等待完成或点击停止', () => {
       rt.busy = true;
+      rt.controller = controller;
+      rt.settled = settled;
     });
-    const controller = new AbortController();
     // 占位后立刻挂上 controller：从这一刻起到循环结束，用户点停止与
     // deleteSession 都必须能中止本循环。若等到审批通过后才挂，
     // 「探测命令 / 等待审批」这段窗口里的停止就是空操作
@@ -1944,9 +2073,14 @@ export class AgentServer {
     // 就必须在退出时补发终止事件，否则 UI 会永久停在 running（复审 P1）。
     let uiEngaged = false;
     let doneEmitted = false;
+    let terminalEvent: AgentEvent | undefined;
     let pendingErrorMessage = '测试自愈循环异常中断';
     const emit = (event: AgentEvent): void => {
-      if (event.type === 'test_loop_done') doneEmitted = true;
+      if (event.type === 'test_loop_done') {
+        doneEmitted = true;
+        terminalEvent = event;
+        return;
+      }
       this.emitterFor(sessionId)(event);
     };
     try {
@@ -2111,8 +2245,6 @@ export class AgentServer {
         },
       });
     } finally {
-      rt.busy = false;
-      if (rt.controller === controller) rt.controller = undefined;
       // 兜底收敛：任何已让前端进入运行态的路径（含初始化失败、异常）都必须有终止事件，
       // 否则 UI 会永久停留在 running 并阻断后续发送
       if (uiEngaged && !doneEmitted) {
@@ -2125,7 +2257,15 @@ export class AgentServer {
         });
       }
       rt.data.meta.updatedAt = new Date().toISOString();
-      await this.persistSession(rt);
+      try {
+        await this.persistSession(rt);
+      } finally {
+        rt.busy = false;
+        if (rt.controller === controller) rt.controller = undefined;
+        if (rt.settled === settled) rt.settled = undefined;
+        if (terminalEvent && !rt.deleted) this.emitterFor(sessionId)(terminalEvent);
+        resolve();
+      }
     }
   }
 
@@ -2183,6 +2323,10 @@ export class AgentServer {
           type: 'text',
           text: `\n\n${noticeText}`,
         });
+        const archived = rt.data.history?.find((message) => message.id === lastMsg.id);
+        if (archived?.role === 'assistant') {
+          archived.blocks.push({ type: 'text', text: `\n\n${noticeText}` });
+        }
       } else {
         rt.data.messages.push({
           role: 'assistant',

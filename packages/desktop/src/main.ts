@@ -178,6 +178,10 @@ const handlers: Record<string, Handler> = {
     await server.editLastUserMessage(args.id, args.text);
     return null;
   },
+  'edit-user-message': async (args) => {
+    await server.editUserMessage(args.id, args.messageId, args.text);
+    return null;
+  },
   'send-message': async (args) => {
     await server.sendMessage(args.id, args.text);
     return null;
@@ -186,8 +190,8 @@ const handlers: Record<string, Handler> = {
     server.respondApproval(args.id, args.requestId, args.approved);
     return null;
   },
-  abort: (args) => {
-    server.abort(args.id);
+  abort: async (args) => {
+    await server.abort(args.id);
     return null;
   },
   'set-approval-mode': (args) => {

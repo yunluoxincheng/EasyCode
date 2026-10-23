@@ -24,36 +24,23 @@ test('matchCommandPattern 为前缀匹配且带词边界', () => {
     'run_command', { command: 'A=1 FOO="hello world" rm -rf build' })?.decision, 'deny');
 });
 
-test('evaluatePermission：deny 优先于 allow，顺序无关', () => {
-  const rules: PermissionRule[] = [
-    { tool: 'run_command', pattern: 'git *', decision: 'allow' },
-    { tool: 'run_command', pattern: 'git push', decision: 'deny' },
-  ];
-  const first = evaluatePermission(rules, 'run_command', { command: 'git push --force' });
-  assert.equal(first?.decision, 'deny');
-  assert.equal(first?.rule.pattern, 'git push');
-
-  const reversed = evaluatePermission([...rules].reverse(), 'run_command', {
-    command: 'git push --force',
-  });
-  assert.equal(reversed?.decision, 'deny');
-  // 未被 deny 命中的同类命令仍走 allow
-  assert.equal(
-    evaluatePermission(rules, 'run_command', { command: 'git status' })?.decision,
-    'allow',
-  );
-});
-
-test('evaluatePermission：ask 优先于 allow，且工具级规则可命中任意参数', () => {
-  const rules: PermissionRule[] = [
-    { tool: 'run_command', decision: 'allow' },
-    { tool: 'run_command', pattern: 'rm', decision: 'ask' },
-  ];
-  assert.equal(
-    evaluatePermission(rules, 'run_command', { command: 'rm -rf node_modules' })?.decision,
-    'ask',
-  );
-  assert.equal(evaluatePermission(rules, 'run_command', { command: 'ls' })?.decision, 'allow');
+test('evaluatePermission：deny/ask 优先于 allow，顺序无关且保留工具级匹配', () => {
+  const cases = [
+    { decision: 'deny', pattern: 'git push', command: 'git push --force', allowed: 'git status', allowPattern: 'git *' },
+    { decision: 'ask', pattern: 'rm', command: 'rm -rf node_modules', allowed: 'ls', allowPattern: undefined },
+  ] as const;
+  for (const item of cases) {
+    const rules: PermissionRule[] = [
+      { tool: 'run_command', pattern: item.allowPattern, decision: 'allow' },
+      { tool: 'run_command', pattern: item.pattern, decision: item.decision },
+    ];
+    for (const ordered of [rules, [...rules].reverse()]) {
+      const result = evaluatePermission(ordered, 'run_command', { command: item.command });
+      assert.equal(result?.decision, item.decision);
+      assert.equal(result?.rule.pattern, item.pattern);
+      assert.equal(evaluatePermission(ordered, 'run_command', { command: item.allowed })?.decision, 'allow');
+    }
+  }
 });
 
 test('【P1 路径绕过】省略 path 时按各工具真实默认作用域求值', () => {

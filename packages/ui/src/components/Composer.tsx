@@ -19,7 +19,7 @@ const BAR_COMPACT_WIDTH = 640;
 
 const selectComposer = (s: AppStore) => [
   s.activeId, s.activeSession, s.activeSession?.workspaceRoot,
-  s.mode, s.running, s.composerInsertTick,
+    s.mode, s.running, s.stopping, s.composerInsertTick,
   s.mcpCatalogVersion,
 ];
 
@@ -1015,8 +1015,8 @@ export function Composer() {
         />
         {dragOver && <div className="drop-hint">⊘ 松开插入文件路径</div>}
         {store.running ? (
-          <button className="btn danger send" onClick={() => store.stop()}>
-            ■ 停止
+          <button className="btn danger send" disabled={store.stopping} onClick={() => void store.stop()}>
+            {store.stopping ? '[ 正在停止 ]' : '■ 停止'}
           </button>
         ) : (
           <button
