@@ -46,6 +46,11 @@ interface PreloadBridge {
 }
 
 export class IpcAgentClient implements AgentClient {
+  openTerminal(id: string) { return this.invoke<import('@easycode/engine').TerminalSnapshot>('terminal-open', { id }); }
+  readTerminal(id: string, cursor?: number) { return this.invoke<import('@easycode/engine').TerminalSnapshot | null>('terminal-read', { id, cursor }); }
+  writeTerminal(id: string, terminalId: string, data: string) { return this.invoke<void>('terminal-write', { id, terminalId, data }); }
+  resizeTerminal(id: string, terminalId: string, cols: number, rows: number) { return this.invoke<void>('terminal-resize', { id, terminalId, cols, rows }); }
+  closeTerminal(id: string, terminalId: string) { return this.invoke<void>('terminal-close', { id, terminalId }); }
   constructor(private readonly bridge: PreloadBridge) {}
 
   private invoke<T>(method: string, args?: unknown): Promise<T> {

@@ -79,11 +79,28 @@ export interface StdioHost {
   }): Promise<StdioTransport>;
 }
 
+/** 用户直接操作的交互终端；不注册为模型工具，也不写入模型历史。 */
+export interface TerminalHandle {
+  shell: string;
+  write(data: string): Promise<void>;
+  resize(cols: number, rows: number): Promise<void>;
+  /** 结束整个终端进程组/控制台；失败保留可重试句柄。 */
+  close(): Promise<void>;
+}
+
+export interface TerminalHost {
+  open(options: { cwd: string; cols: number; rows: number }, events: {
+    output(data: string): void;
+    exit(code: number | null): void;
+  }): Promise<TerminalHandle>;
+}
+
 export interface Host {
   /** 未注入表示无系统安全存储能力（CLI / 浏览器演示）。 */
   secrets?: SecretStore;
   /** 双向独立管道，供 MCP 等协议使用；浏览器演示不提供。 */
   stdio?: StdioHost;
+  terminal?: TerminalHost;
   fs: {
     readFile(path: string): Promise<string>;
     writeFile(path: string, data: string): Promise<void>;

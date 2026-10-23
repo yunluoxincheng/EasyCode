@@ -930,7 +930,7 @@ const TurnView = memo(function TurnView({ turn, live, revision, jumpTick, checkp
                 {turnTodos.allDone ? '✓' : '◍'} 任务进度 {turnTodos.completed}/{turnTodos.total}
               </span>
               <span className="turn-todo-current">
-                {turnTodos.current ? `进行中: ${turnTodos.current}` : '全部任务已完成'}
+                {turnTodos.current ? `进行中: ${turnTodos.current}` : turnTodos.allDone ? '全部任务已完成' : '待办任务尚未完成'}
               </span>
             </div>
           )}

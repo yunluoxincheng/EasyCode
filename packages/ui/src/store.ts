@@ -117,6 +117,7 @@ export type SessionRunStatus = 'idle' | 'running' | 'waiting' | 'question' | 'er
 export interface SessionViewState {
   /** 模型上下文视图与可编辑原始时间线分开，避免归档历史计入容量。 */
   contextItems?: TranscriptItem[];
+  compacting?: boolean;
   stopping?: boolean;
   operation?: number;
   checkpointRevision?: number;
@@ -155,6 +156,14 @@ export interface ModelSwitchPending {
  * AgentEvent 流是唯一的事实来源：事件驱动地增量更新时间线。
  */
 export class AppStore {
+  private terminalViews = new Set<string>();
+  get terminalOpen(): boolean { return !!this.activeId && this.terminalViews.has(this.activeId); }
+  toggleTerminal(): void {
+    if (!this.activeId) return;
+    if (this.terminalViews.has(this.activeId)) this.terminalViews.delete(this.activeId);
+    else this.terminalViews.add(this.activeId);
+    this.notify(false);
+  }
   sessions: SessionMeta[] = [];
   activeId: string | null = null;
   items: TranscriptItem[] = [];
@@ -603,16 +612,33 @@ export class AppStore {
   /** 主动压缩当前会话上下文（TODOS #31）：修剪旧工具长输出并归档早期历史 */
   async compressContext(keepRecentTurns = 2): Promise<void> {
     if (!this.activeId || this.running) return;
+    const id = this.activeId;
+    const state = this.getOrCreateSessionState(id);
+    if (state.compacting) return;
+    const operation = state.operation ?? 0;
+    state.compacting = true;
+    this.notify(false);
     try {
-      const id = this.activeId;
+      const before = JSON.stringify((await this.client.getSession(id)).messages);
       const data = await this.client.trimSessionHistory(id, keepRecentTurns);
-      const state = this.sessionStates.get(id);
-      if (state) state.contextItems = this.itemsFromSession({ ...data, history: undefined });
-      await this.selectSession(id);
-      this.showToast('✓ 上下文已智能压缩，已腾出 Token 空间');
+      if (this.sessionStates.get(id) !== state || (state.operation ?? 0) !== operation || state.running) return;
+      state.contextItems = this.itemsFromSession({ ...data, history: undefined });
+      if (this.activeId === id) {
+        this.notify(true);
+        this.showToast(before === JSON.stringify(data.messages)
+          ? '当前上下文无需进一步压缩，已保留最近回合'
+          : '上下文已压缩，原始历史仍可回看和编辑');
+      }
     } catch (err) {
       this.showToast(`压缩失败: ${err instanceof Error ? err.message : String(err)}`, 'err');
+    } finally {
+      state.compacting = false;
+      this.notify(false);
     }
+  }
+
+  get compacting(): boolean {
+    return !!(this.activeId && this.sessionStates.get(this.activeId)?.compacting);
   }
 
   /**
@@ -1091,7 +1117,7 @@ export class AppStore {
 
   async send(text: string): Promise<void> {
     const id = this.activeId;
-    if (!id || this.running || !text.trim()) return;
+    if (!id || this.running || this.compacting || !text.trim()) return;
     const state = this.getOrCreateSessionState(id);
     state.running = true;
     state.status = 'running';
@@ -1892,7 +1918,7 @@ export class AppStore {
         if (isActive) {
           this.flushPendingNotify();
           this.showToast(`[系统] ${event.summary}`);
-          void this.selectSession(sessionId);
+          this.notify(true);
         }
         break;
 

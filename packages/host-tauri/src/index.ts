@@ -83,12 +83,45 @@ export async function createTauriHost(): Promise<Host> {
   let cleaning: Promise<void> | undefined;
   const ensureClean = (): Promise<void> => {
     if (clean) return Promise.resolve();
-    cleaning ??= invoke<void>('stdio_reset').then(() => { clean = true; }).finally(() => { cleaning = undefined; });
+    cleaning ??= invoke<void>('stdio_reset').then(() => invoke<void>('terminal_reset')).then(() => { clean = true; }).finally(() => { cleaning = undefined; });
     return cleaning;
   };
   void ensureClean().catch(() => {});
 
   const host: Host = {
+    terminal: {
+      open: async (options, events) => {
+        await ensureClean();
+        const result = await invoke<{ id: string; shell: string }>('terminal_open', { options });
+        let cursor = 0;
+        let closed = false;
+        let polling = false;
+        const poll = async () => {
+          if (polling || closed) return;
+          polling = true;
+          try {
+            const frame = await invoke<{ output: string; end: number; exited: boolean; exitCode: number | null }>('terminal_read', { id: result.id, cursor });
+            if (closed) return;
+            cursor = frame.end;
+            if (frame.output) events.output(frame.output);
+            if (frame.exited) { closed = true; clearInterval(timer); events.exit(frame.exitCode); }
+          } catch {
+            // 保留原生句柄；读取失败由下一次轮询重试，结束操作仍可清理。
+          } finally { polling = false; }
+        };
+        const timer = setInterval(() => void poll(), 100);
+        return {
+          shell: result.shell,
+          write: (data) => invoke<void>('terminal_write', { id: result.id, data }),
+          resize: (cols, rows) => invoke<void>('terminal_resize', { id: result.id, cols, rows }),
+          close: async () => {
+            await invoke<void>('terminal_close', { id: result.id });
+            closed = true;
+            clearInterval(timer);
+          },
+        };
+      },
+    },
     stdio: {
       open: async (options, events) => {
         await ensureClean();
@@ -387,6 +420,11 @@ export async function createTauriClient(options?: { reflexPolicy?: DecisionPolic
   }
   return {
     listSessions: () => server.listSessions(),
+    openTerminal: (id) => server.openTerminal(id),
+    readTerminal: async (id, cursor) => server.readTerminal(id, cursor),
+    writeTerminal: (id, terminalId, data) => server.writeTerminal(id, terminalId, data),
+    resizeTerminal: (id, terminalId, cols, rows) => server.resizeTerminal(id, terminalId, cols, rows),
+    closeTerminal: (id, terminalId) => server.closeTerminal(id, terminalId),
     createSession: (options) => server.createSession(options),
     forkSession: (id, options) => server.forkSession(id, options),
     trimSessionHistory: (id, keepRecentTurns) => server.trimSessionHistory(id, keepRecentTurns),

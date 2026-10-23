@@ -32,6 +32,9 @@ export interface LoopOptions {
   contextWindow?: number;
   /** 上下文自动压缩触发阈值（默认 0.85 即 85%） */
   autoCompactThreshold?: number;
+  /** 宿主注入的请求容量估算；不要求 Provider 返回 usage，core 不依赖分词库。 */
+  countContextTokens?: (request: StreamRequest) => Promise<number>;
+  keepRecentTurns?: number;
   /** 工作区并发互斥锁（TODOS #29） */
   workspaceLock?: { withLock<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> };
   /** 决策小模型策略接口（TODOS #40）：用于影子观测或自适应路由 */
@@ -150,6 +153,8 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
     shell,
     contextWindow,
     autoCompactThreshold = 0.85,
+    countContextTokens,
+    keepRecentTurns = 2,
     workspaceLock,
     policy,
     backgroundTasks,
@@ -170,6 +175,13 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
     for (let step = 0; step < maxSteps; step++) {
       lastCompletedStep = step;
       if (signal.aborted) return finish('aborted');
+
+      // 在发出请求之前核对容量，覆盖纯文本会话、首次请求和缺少 usage 的网关。
+      if (contextWindow && countContextTokens) {
+        const tokens = await countContextTokens({ messages, system: systemPrompt, tools: tools.listSpecs() });
+        if (signal.aborted) return finish('aborted');
+        await compactContext(tokens, true);
+      }
 
       // 决策点 1：推理深度自适应旁路（TODOS #40 reasoning_effort）
       if (step === 0 && policy) {
@@ -314,6 +326,7 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
       }
 
       if (calls.length === 0) {
+        await compactContext(turn.usage?.inputTokens ?? 0);
         return finish('completed');
       }
 
@@ -389,57 +402,7 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
       }
       if (signal.aborted) return finish('aborted');
 
-      // 决策点 3：上下文压缩前瞻旁路（TODOS #40 context_management）
-      let contextObservation: DecisionObservation | undefined;
-      if (contextWindow && turn.usage?.inputTokens && policy) {
-        const ratio = turn.usage.inputTokens / contextWindow;
-        contextObservation = startDecisionObservation(policy, {
-            taskFamily: 'context_management',
-            instruction: 'Decide whether to prune or compact context history.',
-            state: {
-              summary: `Current token usage: ${turn.usage.inputTokens}/${contextWindow} (${Math.round(ratio * 100)}%)`,
-              history: messages.slice(-2).map((m) => m.role),
-            },
-            candidates: [
-              { id: 'keep', text: 'Keep current history as is' },
-              { id: 'prune_tools', text: 'Prune historical tool outputs only' },
-              { id: 'compact_all', text: 'Compact early history messages into summary' },
-            ],
-            metadata: { inputTokens: turn.usage.inputTokens, contextWindow, ratio },
-          });
-      }
-
-      let contextAction: 'keep' | 'prune_tools' | 'compact_all' = 'keep';
-      // 上下文超限保护（TODOS #31）：若本轮输入的 Token 超过设定阈值，触发智能阶梯压缩
-      if (
-        contextWindow &&
-        turn.usage?.inputTokens &&
-        turn.usage.inputTokens > contextWindow * autoCompactThreshold
-      ) {
-        const beforeTokens = turn.usage.inputTokens;
-        onBeforeCompaction?.();
-        const compactRes = compactHistoryMessages(messages, { keepRecentTurns: 2, pruneTools: true });
-        if (compactRes.compacted) {
-          contextAction = 'compact_all';
-          messages.splice(0, messages.length, ...compactRes.messages);
-          emit({
-            type: 'context_compacted',
-            beforeTokens,
-            summary: `上下文用量已达 ${Math.round((beforeTokens / contextWindow) * 100)}%，已自动归档前序 ${compactRes.discardedTurns} 轮历史并压缩工具长输出。`,
-          });
-        } else {
-          const pruneRes = pruneHistoricalToolResults(messages, { keepRecentTurns: 1 });
-          if (pruneRes.modified) {
-            contextAction = 'prune_tools';
-            emit({
-              type: 'context_compacted',
-              beforeTokens,
-              summary: `上下文用量已达 ${Math.round((beforeTokens / contextWindow) * 100)}%，已压缩历史工具长输出（节省约 ${Math.round(pruneRes.savedChars / 4)} tokens）。`,
-            });
-          }
-        }
-      }
-      contextObservation?.actual({ selectedId: contextAction, description: `Context rule: ${contextAction}` });
+      await compactContext(turn.usage?.inputTokens ?? 0);
     }
     return finish(
       'error',
@@ -453,6 +416,67 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
     const message = err instanceof Error ? err.message : String(err);
     emit({ type: 'error', message });
     return finish('error', message);
+  }
+
+  async function compactContext(inputTokens: number, estimated = false): Promise<void> {
+      // 决策点 3：上下文压缩前瞻旁路（TODOS #40 context_management）
+      let contextObservation: DecisionObservation | undefined;
+      if (contextWindow && inputTokens && policy) {
+        const ratio = inputTokens / contextWindow;
+        contextObservation = startDecisionObservation(policy, {
+            taskFamily: 'context_management',
+            instruction: 'Decide whether to prune or compact context history.',
+            state: {
+              summary: `Current token usage: ${inputTokens}/${contextWindow} (${Math.round(ratio * 100)}%)`,
+              history: messages.slice(-2).map((m) => m.role),
+            },
+            candidates: [
+              { id: 'keep', text: 'Keep current history as is' },
+              { id: 'prune_tools', text: 'Prune historical tool outputs only' },
+              { id: 'compact_all', text: 'Compact early history messages into summary' },
+            ],
+            metadata: { inputTokens, contextWindow, ratio, estimated },
+          });
+      }
+
+      let contextAction: 'keep' | 'prune_tools' | 'compact_all' = 'keep';
+      // 上下文超限保护（TODOS #31）：若本轮输入的 Token 超过设定阈值，触发智能阶梯压缩
+      if (
+        contextWindow &&
+        inputTokens >= contextWindow * autoCompactThreshold
+      ) {
+        const beforeTokens = inputTokens;
+        const candidate = structuredClone(messages);
+        const compactRes = compactHistoryMessages(candidate, { keepRecentTurns, pruneTools: true });
+        const savesTokens = !countContextTokens || await countContextTokens({ messages: compactRes.messages, system: systemPrompt, tools: tools.listSpecs() })
+          < await countContextTokens({ messages, system: systemPrompt, tools: tools.listSpecs() });
+        if (signal.aborted) return;
+        // compacted=false 时也可能已裁剪工具输出，按实际内容提交并保留原文。
+        if (savesTokens && JSON.stringify(compactRes.messages) !== JSON.stringify(messages)) {
+          onBeforeCompaction?.();
+          contextAction = compactRes.compacted ? 'compact_all' : 'prune_tools';
+          messages.splice(0, messages.length, ...compactRes.messages);
+          emit({
+            type: 'context_compacted',
+            beforeTokens,
+            summary: `上下文${estimated ? '本地估算' : '上次请求用量'}达 ${Math.round((beforeTokens / contextWindow) * 100)}%，${compactRes.compacted ? `已自动归档前序 ${compactRes.discardedTurns} 轮历史并压缩工具长输出` : '已自动裁剪历史工具长输出'}。`,
+          });
+        } else {
+          const fallback = structuredClone(messages);
+          const pruneRes = pruneHistoricalToolResults(fallback, { keepRecentTurns: 1 });
+          if (pruneRes.modified) {
+            onBeforeCompaction?.();
+            messages.splice(0, messages.length, ...fallback);
+            contextAction = 'prune_tools';
+            emit({
+              type: 'context_compacted',
+              beforeTokens,
+              summary: `上下文用量已达 ${Math.round((beforeTokens / contextWindow) * 100)}%，已压缩历史工具长输出（节省约 ${Math.round(pruneRes.savedChars / 4)} tokens）。`,
+            });
+          }
+        }
+      }
+      contextObservation?.actual({ selectedId: contextAction, description: `Context rule: ${contextAction}` });
   }
 
   function finish(reason: LoopResult['reason'], errorMessage?: string): LoopResult {

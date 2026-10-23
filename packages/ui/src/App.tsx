@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { lazy, Suspense, useEffect } from 'react';
 import { useStoreSlice } from './useStore.js';
 import type { AppStore } from './store.js';
 import { Sidebar } from './components/Sidebar.js';
@@ -16,10 +16,12 @@ import { PreviewPanel } from './components/PreviewPanel.js';
 import { TurnUndoModal } from './components/TurnUndoModal.js';
 import { FilePreviewModal } from './components/WorkspaceFileTree.js';
 import { updater } from './updater.js';
+const TerminalPanel = lazy(() => import('./components/TerminalPanel.js'));
 
 const selectApp = (s: AppStore) => [
   s.view, s.settings, s.createProjectOpen, s.pendingModelSwitch, s.gitModalOpen,
   s.turnUndoModalTurnId, s.filePreviewPath, s.toast, s.toastKind,
+  s.activeId, s.terminalOpen,
 ];
 
 export function App() {
@@ -55,6 +57,9 @@ export function App() {
             <Transcript />
             <TaskLogsDrawer />
             <BackgroundTasksBar />
+            {store.terminalOpen && store.activeId && <Suspense fallback={<div role="status">[ WAIT ] 正在加载终端</div>}>
+              <TerminalPanel key={store.activeId} sessionId={store.activeId} />
+            </Suspense>}
             <Composer />
           </section>
           <PreviewPanel />

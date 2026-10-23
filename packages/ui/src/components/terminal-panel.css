@@ -1,0 +1,7 @@
+.interactive-terminal { flex: 0 0 auto; height: 280px; min-height: 160px; max-height: 65vh; resize: vertical; overflow: hidden; border-top: 1px solid var(--line, #263730); background: #0b1012; display: flex; flex-direction: column; }
+.interactive-terminal-head { flex: 0 0 auto; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 6px 10px; font-size: 12px; color: var(--green); }
+.interactive-terminal-head .btn { font-size: 11px; padding: 3px 6px; }
+.interactive-terminal-cwd { flex: 1; min-width: 80px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--muted); }
+.interactive-terminal-screen { flex: 1; min-height: 0; padding: 4px 8px; }
+.interactive-terminal-screen .xterm { height: 100%; }
+.interactive-terminal-error { color: var(--red); padding: 4px 10px; font-size: 12px; }
