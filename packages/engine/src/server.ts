@@ -17,7 +17,6 @@ import {
   runWebSearch,
   listFilesRecursively,
   compactHistoryMessages,
-  pruneHistoricalToolResults,
   getGitStatus,
   getGitDiff,
   stageGitFiles,
@@ -331,6 +330,13 @@ export class AgentServer {
     }
 
     const clonedMessages = structuredClone(slicedMessages);
+    // 完整时间线只用于锚点定位/展示；分叉仍保留父会话的压缩边界。
+    // 指定历史锚点时从截取前缀重建，不能继承包含锚点之后事实的旧摘要。
+    const forkContext = rt.data.history
+      ? options?.beforeUserIndex !== undefined || options?.upToMessageId
+        ? compactHistoryMessages(structuredClone(clonedMessages), { keepRecentTurns: 2 }).messages
+        : structuredClone(rt.data.messages)
+      : clonedMessages;
     const now = new Date().toISOString();
     const meta: SessionMeta = {
       id: `s_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
@@ -347,7 +353,8 @@ export class AgentServer {
     const newRuntime: SessionRuntime = {
       data: {
         meta,
-        messages: clonedMessages,
+        messages: forkContext,
+        history: rt.data.history ? clonedMessages : undefined,
         todos: latestTodos ? structuredClone(latestTodos) : undefined,
       },
       approval: new ApprovalManager(this.emitterFor(meta.id), this.settings.defaultApprovalMode),
@@ -374,12 +381,15 @@ export class AgentServer {
       this.ensureMessageIds(rt);
       const history = structuredClone(rt.data.history ?? rt.data.messages);
 
-      const compRes = compactHistoryMessages(rt.data.messages, {
+      // compactHistoryMessages 即使 compacted=false，也可能原地裁剪工具输出。
+      // 在副本上计算，并按消息的实际变化统一提交归档，避免丢原文或漏落盘。
+      const candidate = structuredClone(rt.data.messages);
+      const compRes = compactHistoryMessages(candidate, {
         keepRecentTurns,
         pruneTools: true,
       });
 
-      if (compRes.compacted) {
+      if (JSON.stringify(compRes.messages) !== JSON.stringify(rt.data.messages)) {
         rt.data.history = history;
         rt.data.messages = compRes.messages;
         const latestTodos = extractLatestTodos(rt.data.messages);
@@ -388,13 +398,6 @@ export class AgentServer {
         }
         rt.data.meta.updatedAt = new Date().toISOString();
         await this.persistSession(rt);
-      } else {
-        // 即使轮数未超过 keepRecentTurns，也对历史旧工具的长输出执行折叠压缩
-        const pruneRes = pruneHistoricalToolResults(rt.data.messages, { keepRecentTurns: 1 });
-        if (pruneRes.modified) {
-          rt.data.meta.updatedAt = new Date().toISOString();
-          await this.persistSession(rt);
-        }
       }
       return rt.data;
     });
