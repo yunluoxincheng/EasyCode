@@ -8,7 +8,7 @@ const source = await readFile(new URL('../src/store.ts', import.meta.url), 'utf8
 const compiled = ts.transpileModule(source, { compilerOptions: {
   target: ts.ScriptTarget.ES2022,
   module: ts.ModuleKind.ESNext,
-} }).outputText.replace(/from ["']@easycode\/engine["']/g, `from ${JSON.stringify(import.meta.resolve('@easycode/engine'))}`);
+} }).outputText.replace(/from ["'](@easycode\/(?:engine|core))["']/g, (_, name) => `from ${JSON.stringify(import.meta.resolve(name))}`);
 const { AppStore } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`);
 
 test('后台任务 Store：删除后的旧快照不复活记录，空列表继续刷新且会话隔离', async (t) => {

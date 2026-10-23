@@ -19,6 +19,8 @@ import { searchFilesTool } from './search.js';
 import { runCommandTool } from './shell.js';
 import { readTaskLogsTool, stopTaskTool } from './tasks.js';
 import { todoWriteTool } from './todo.js';
+import { askUserTool } from './questions.js';
+import type { UserQuestionManager } from '../questions.js';
 import { createWebSearchTool, type WebSearchBackendConfig } from './websearch.js';
 import {
   gitStatusTool,
@@ -63,6 +65,7 @@ export interface FileChangeEvent {
 }
 
 export interface ToolContext {
+  questions?: UserQuestionManager;
   host: Host;
   workspace: string;
   signal: AbortSignal;
@@ -94,6 +97,8 @@ export interface Tool {
   sensitive?: boolean;
   /** 是否依赖工作区（默认 true）；false 则未绑定项目的会话也可执行（如联网搜索） */
   requiresWorkspace?: boolean;
+  /** 独占本次工具批次；其余预生成调用只返回未执行结果，下一步由模型重新规划。 */
+  interactionBoundary?: boolean;
   execute(input: unknown, ctx: ToolContext): Promise<string>;
 }
 
@@ -140,6 +145,7 @@ export function createBuiltinTools(options?: {
     .register(readTaskLogsTool)
     .register(stopTaskTool)
     .register(todoWriteTool)
+    .register(askUserTool)
     .register(gitStatusTool)
     .register(gitDiffTool);
   if (options?.webSearch) registry.register(createWebSearchTool(options.webSearch));

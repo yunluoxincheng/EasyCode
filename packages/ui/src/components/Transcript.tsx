@@ -1,10 +1,12 @@
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { useStore, useStoreApi } from '../useStore.js';
+import { QuestionCard } from './QuestionCard.js';
 import { renderMarkdown } from '../markdown.js';
 import { renderAnsi } from '../ansi.js';
 import { diffLines, type TodoItem } from '@easycode/core';
 import type {
   ApprovalItem,
+  QuestionItem,
   AppStore,
   AssistantItem,
   ErrorItem,
@@ -434,7 +436,7 @@ function ItemView({
   item,
   streaming = false,
 }: {
-  item: AssistantItem | ToolItem | ApprovalItem | ErrorItem | TestRunItem;
+  item: AssistantItem | ToolItem | ApprovalItem | ErrorItem | TestRunItem | QuestionItem;
   streaming?: boolean;
 }) {
   switch (item.kind) {
@@ -453,8 +455,9 @@ function ItemView({
       );
     }
     case 'tool':
-      if (item.name === 'todo_write') {
-        // 独立视窗内移除重复的 TodoCard，仅保留顶部吸顶任务清单与回合折叠态汇总
+      if (item.question) return null;
+      if (item.name === 'todo_write' && item.status !== 'denied' && item.status !== 'error') {
+        // 成功清单避免重复展示；拒绝/失败保留工具卡片，不能当作已更新清单。
         return null;
       }
       if (item.name === 'run_command') {
@@ -463,6 +466,8 @@ function ItemView({
       return <ToolCard item={item} />;
     case 'approval':
       return <ApprovalCard item={item} />;
+    case 'question':
+      return <QuestionCard item={item} />;
     case 'testrun':
       return <TestRunCard item={item} />;
     case 'error':
@@ -606,8 +611,9 @@ function LiveTicker() {
   const [elapsed, setElapsed] = useState('0.0');
   const activeTool = store.activeTool;
   const pendingApproval = store.pendingApproval;
+  const pendingQuestion = store.pendingQuestion;
   const preparingTool = store.preparingTool;
-  const startedAt = activeTool?.executionStartedAt;
+  const startedAt = pendingQuestion ? undefined : activeTool?.executionStartedAt;
 
   useEffect(() => {
     if (!startedAt) {
@@ -623,6 +629,13 @@ function LiveTicker() {
     return () => clearInterval(timer);
   }, [startedAt]);
 
+  if (pendingQuestion) {
+    return <div className="live-ticker waiting">
+      <span className="live-ticker-prefix">❯</span>
+      <span className="live-ticker-badge wait">[ WAIT ]</span>
+      <span className="live-ticker-text">等待用户回答问题...</span>
+    </div>;
+  }
   if (pendingApproval) {
     const label = toolLabel(pendingApproval.name);
     return (
@@ -822,7 +835,7 @@ const TurnView = memo(function TurnView({ turn, live, revision, jumpTick, checkp
   const latestTodoTool = turn.items
     .slice()
     .reverse()
-    .find((i): i is ToolItem => i.kind === 'tool' && i.name === 'todo_write');
+    .find((i): i is ToolItem => i.kind === 'tool' && i.name === 'todo_write' && i.status === 'ok');
   // 快照列表通过 Props 传入，非结构性刷新/撤销状态变化也必须使历史视图失效。
   const checkpoint = useMemo(
     () => !live ? store.getTurnCheckpointForTurn(turn) : undefined,

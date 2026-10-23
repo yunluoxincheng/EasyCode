@@ -13,7 +13,7 @@ async function loadHistory(turns: number) {
         type: 'tool_call', id: `call_${i}`, name: 'read_file', input: { path: `file-${i}.txt` },
       }] },
       { role: 'tool_result', id: `r_${i}`, toolCallId: `call_${i}`, toolName: 'read_file',
-        content: `original-output-${i}\n${'long original tool output\n'.repeat(180)}` },
+        approved: true, content: `original-output-${i}\n${'long original tool output\n'.repeat(180)}` },
       { role: 'assistant', id: `f_${i}`, blocks: [{ type: 'text', text: `reply-${i}` }] },
     );
   }

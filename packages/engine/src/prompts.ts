@@ -23,6 +23,7 @@ export function buildSystemPrompt(
 ): string {
   const sep = host.paths.sep;
   const platformHint = sep === '\\' ? 'Windows' : '类 Unix';
+  const questionGuidance = '需要用户补充关键信息或选择方案时调用 ask_user，等待实际提交的回答后再继续依赖步骤；普通实现选择自行判断。提问与操作审批分开，不把默认选项或 YOLO 当作用户回答。';
   if (!workspace) {
     const lines = [
       '你是 EasyCode，一个工作在用户本地电脑上的编程 Agent。',
@@ -39,6 +40,7 @@ export function buildSystemPrompt(
       lines.push('', '# 全局开发偏好', options.rules.globalRules.trim());
     }
     lines.push('你可以正常与用户对话、回答问题、出方案。');
+    lines.push(questionGuidance);
     return lines.join('\n');
   }
   const lines = [
@@ -68,6 +70,7 @@ export function buildSystemPrompt(
   lines.push(
     '',
     '# 工作纪律',
+    questionGuidance,
     '1. 先读取、搜索了解现状，再动手修改；修改已有文件优先用 edit_file 做精确替换，仅在新文件或整体重写时用 write_file。',
     '2. 敏感操作（写文件、执行命令）需要用户批准；被拒绝时不要机械重试，说明意图或换方案。',
     '3. 执行命令前想清楚影响范围；优先使用无副作用或只影响工作区的命令。',

@@ -8,10 +8,10 @@ import {
   MemoryHost,
   Provider,
   StreamRequest, compactHistoryMessages,
-  createBuiltinTools, runAgentLoop
+  createBuiltinTools, runAgentLoop, executeTool, extractLatestTodos, type ToolCallBlock
 } from '../index.js';
 
-test('compactHistoryMessages: 早期轮次归档，提取文件与 Todo，保留最近轮次', () => {
+test('compactHistoryMessages: 仅归档确认成功的文件、命令与 Todo，保留最近轮次', async () => {
   const messages: ChatMessage[] = [
     { role: 'user', content: '轮次 1：初始化项目并规划' },
     {
@@ -36,8 +36,8 @@ test('compactHistoryMessages: 早期轮次归档，提取文件与 Todo，保留
         },
       ],
     },
-    { role: 'tool_result', toolCallId: 't_1', toolName: 'todo_write', content: 'ok' },
-    { role: 'tool_result', toolCallId: 't_2', toolName: 'write_file', content: 'written' },
+    { role: 'tool_result', toolCallId: 't_1', toolName: 'todo_write', content: 'ok', approved: true },
+    { role: 'tool_result', toolCallId: 't_2', toolName: 'write_file', content: 'written', approved: true },
     { role: 'user', content: '轮次 2：执行测试' },
     {
       role: 'assistant',
@@ -50,7 +50,7 @@ test('compactHistoryMessages: 早期轮次归档，提取文件与 Todo，保留
         },
       ],
     },
-    { role: 'tool_result', toolCallId: 't_3', toolName: 'run_command', content: 'all passed' },
+    { role: 'tool_result', toolCallId: 't_3', toolName: 'run_command', content: 'all passed', approved: true },
     { role: 'user', content: '轮次 3：最近交互 A' },
     { role: 'assistant', blocks: [{ type: 'text', text: '正在处理 A' }] },
     { role: 'user', content: '轮次 4：最近交互 B' },
@@ -78,6 +78,75 @@ test('compactHistoryMessages: 早期轮次归档，提取文件与 Todo，保留
   assert.equal(userMessages.length, 3); // 1 summary + 2 preserved user msgs
   assert.equal(userMessages[1].content, '轮次 3：最近交互 A');
   assert.equal(userMessages[2].content, '轮次 4：最近交互 B');
+
+  // 使用实际工具执行器生成许可/校验结果，确认成功 A 不会被未执行的 B 覆盖。
+  const host = new MemoryHost();
+  const approval = new ApprovalManager(() => {}, 'yolo');
+  const context = { host, approval, workspace: '/ws', signal: new AbortController().signal };
+  const tools = createBuiltinTools();
+  const timeline: ChatMessage[] = [{ role: 'user', content: 'plan' }];
+  const a = [{ content: 'A', status: 'pending' }];
+  const b = [{ content: 'B', status: 'completed' }];
+  const call: ToolCallBlock = { type: 'tool_call', id: 'reused', name: 'todo_write', input: { todos: a } };
+  const success = await executeTool(tools, call.name, call.input, context);
+  assert.equal(success.approved, true);
+  assert.equal(success.isError, false);
+  timeline.push({ role: 'assistant', blocks: [call] }, {
+    role: 'tool_result', toolCallId: call.id, toolName: call.name, ...success,
+  });
+  assert.deepEqual(extractLatestTodos(timeline), a);
+  const cases = [
+    { input: { todos: b }, permissionRules: [{ tool: 'todo_write', decision: 'deny' as const, source: 'global' as const }], approved: false, isError: false },
+    { input: { todos: 'invalid' }, approved: false, isError: true },
+    { input: { todos: [{ content: 'B', status: 'invalid' }] }, approved: true, isError: true },
+    { input: { todos: [{ content: '', status: 'pending' }] }, approved: true, isError: true },
+  ];
+  for (const scenario of cases) {
+    const execution = await executeTool(tools, call.name, scenario.input, { ...context, permissionRules: scenario.permissionRules });
+    assert.equal(execution.approved, scenario.approved);
+    assert.equal(execution.isError, scenario.isError);
+    timeline.push({ role: 'assistant', blocks: [{ ...call, input: scenario.input }] }, {
+      role: 'tool_result', toolCallId: call.id, toolName: call.name, ...execution,
+    });
+    assert.deepEqual(extractLatestTodos(timeline), a);
+  }
+  const proposed: ToolCallBlock = { ...call, input: { todos: b } };
+  timeline.push({ role: 'assistant', blocks: [proposed] });
+  assert.deepEqual(extractLatestTodos(timeline), a, '缺失结果不能提交清单');
+  timeline.push({ role: 'tool_result', toolCallId: call.id, toolName: call.name, content: 'ok', isError: false });
+  assert.deepEqual(extractLatestTodos(timeline), a, '旧历史缺少 approved 不能推断成功');
+  timeline.push({ role: 'tool_result', toolCallId: call.id, toolName: call.name, ...success });
+  assert.deepEqual(extractLatestTodos(timeline), a, '重复结果不能升级已消费的结果');
+  timeline.push({ role: 'assistant', blocks: [proposed] }, {
+    role: 'tool_result', toolCallId: call.id, toolName: 'write_file', ...success,
+  });
+  assert.deepEqual(extractLatestTodos(timeline), a, '工具名称必须匹配');
+  timeline.push({ role: 'assistant', blocks: [proposed] }, { role: 'user', content: 'new turn' }, {
+    role: 'tool_result', toolCallId: call.id, toolName: call.name, ...success,
+  });
+  assert.deepEqual(extractLatestTodos(timeline), a, '迟到结果不能跨用户轮次匹配');
+  const updated = await executeTool(tools, call.name, proposed.input, context);
+  timeline.push({ role: 'assistant', blocks: [proposed] }, {
+    role: 'tool_result', toolCallId: call.id, toolName: call.name, ...updated,
+  });
+  assert.deepEqual(extractLatestTodos(timeline), b, '重用调用 ID 的新批次正常成功更新');
+
+  for (const outcome of [undefined, {}, { approved: false, isError: false }, { approved: true, isError: true }]) {
+    const unconfirmed: ChatMessage[] = [{ role: 'user', content: 'old turn' }, {
+      role: 'assistant', blocks: [
+        { type: 'tool_call', id: 'file', name: 'write_file', input: { path: 'unexecuted.conf' } },
+        { type: 'tool_call', id: 'cmd', name: 'run_command', input: { command: 'install unexecuted' } },
+      ],
+    }];
+    if (outcome) unconfirmed.push(
+      { role: 'tool_result', toolCallId: 'file', toolName: 'write_file', content: 'output', ...outcome },
+      { role: 'tool_result', toolCallId: 'cmd', toolName: 'run_command', content: 'output', ...outcome },
+    );
+    unconfirmed.push({ role: 'user', content: 'recent' });
+    const summary = compactHistoryMessages(unconfirmed, { keepRecentTurns: 1 }).messages[0];
+    assert.ok(summary.role === 'user');
+    assert.doesNotMatch(summary.content, /unexecuted|历史涉及文件|早期关键命令/);
+  }
 });
 
 test('runAgentLoop: 当 inputTokens 超出阈值时自动触发上下文压缩并发出事件', async () => {

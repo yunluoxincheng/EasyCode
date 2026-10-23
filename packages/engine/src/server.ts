@@ -1,6 +1,7 @@
 import {
   AgentEvent,
   ApprovalManager,
+  UserQuestionManager,
   AnthropicProvider,
   ResponsesProvider,
   ChatMessage,
@@ -17,6 +18,7 @@ import {
   runWebSearch,
   listFilesRecursively,
   compactHistoryMessages,
+  extractLatestTodos,
   getGitStatus,
   getGitDiff,
   stageGitFiles,
@@ -24,6 +26,8 @@ import {
   splitUnifiedDiff,
   type ApprovalMode,
   type TodoItem,
+  type UserAnswer,
+  type UserQuestionRequest,
   type GitStatusSummary,
   type GitFileChange,
   type GitDiffResult,
@@ -125,6 +129,7 @@ export { splitUnifiedDiff };
 interface SessionRuntime {
   data: SessionData;
   approval: ApprovalManager;
+  questions?: UserQuestionManager;
   controller?: AbortController;
   /** 当前顶层操作（含落盘）的收尾确认；停止不能只等 abort 信号发出。 */
   settled?: Promise<void>;
@@ -589,6 +594,7 @@ export class AgentServer {
         }
       });
       rt.approval.denyAll();
+      rt.questions?.cancelAll();
       this.emitterFor(id)({ type: 'history_replaced', messages, contextMessages: rt.data.messages, todos: rt.data.todos ?? [] });
       signal.throwIfAborted();
     });
@@ -622,6 +628,7 @@ export class AgentServer {
       }
     } finally {
       if (controller.signal.aborted && reason !== 'error') reason = 'aborted';
+      rt.questions?.cancelAll();
       rt.running = false;
       if (rt.controller === controller) rt.controller = undefined;
       if (rt.settled === settled) rt.settled = undefined;
@@ -796,6 +803,7 @@ export class AgentServer {
         messages: wireMessages,
         signal: turnController.signal,
         approval: rt.approval,
+        questions: this.questionsFor(rt),
         policy,
         permissionRules,
         onBeforeCompaction: () => {
@@ -891,10 +899,33 @@ export class AgentServer {
     this.requireSession(id).approval.resolve(requestId, approved);
   }
 
+  private questionsFor(rt: SessionRuntime): UserQuestionManager {
+    return rt.questions ??= new UserQuestionManager((event) => {
+      if (!rt.deleted) this.emitterFor(rt.data.meta.id)(event);
+    });
+  }
+
+  getPendingQuestion(id: string): UserQuestionRequest | null {
+    return this.requireSession(id).questions?.getPending() ?? null;
+  }
+
+  respondQuestion(id: string, requestId: string, answers: UserAnswer[]): void {
+    const manager = this.requireSession(id).questions;
+    if (!manager) throw new Error('问题已过期');
+    manager.respond(requestId, answers);
+  }
+
+  async cancelQuestion(id: string, requestId: string): Promise<void> {
+    const rt = this.requireSession(id);
+    if (!rt.questions?.cancel(requestId)) throw new Error('问题已过期，未停止当前的新回合');
+    await this.abort(id);
+  }
+
   async abort(id: string): Promise<void> {
     const rt = this.sessions.get(id);
     if (!rt) return;
     rt.approval.denyAll();
+    rt.questions?.cancelAll();
     rt.controller?.abort();
     await rt.settled;
   }
@@ -2472,24 +2503,6 @@ export function supportsNativeWebSearch(modelName: string, kind: ProviderEntry['
   if (kind === 'responses') return /^(gpt-|codex-|chatgpt-|o[34](-|$))/i.test(modelName);
   if (kind === 'anthropic') return /^claude-/i.test(modelName);
   return false;
-}
-
-/** 从会话消息列表中提取最新的 todo_write 任务清单快照 */
-function extractLatestTodos(messages: ChatMessage[]): TodoItem[] | undefined {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const msg = messages[i];
-    if (msg.role === 'assistant') {
-      for (const block of msg.blocks) {
-        if (block.type === 'tool_call' && block.name === 'todo_write') {
-          const input = block.input as { todos?: TodoItem[] } | undefined;
-          if (Array.isArray(input?.todos)) {
-            return input.todos;
-          }
-        }
-      }
-    }
-  }
-  return undefined;
 }
 
 /** 联网搜索后端配置是否齐全 */

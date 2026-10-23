@@ -401,6 +401,9 @@ export async function createTauriClient(options?: { reflexPolicy?: DecisionPolic
     respondApproval: async (id, requestId, approved) => {
       server.respondApproval(id, requestId, approved);
     },
+    getPendingQuestion: async (id) => server.getPendingQuestion(id),
+    respondQuestion: async (id, requestId, answers) => { server.respondQuestion(id, requestId, answers); },
+    cancelQuestion: (id, requestId) => server.cancelQuestion(id, requestId),
     abort: async (id) => {
       await server.abort(id);
     },

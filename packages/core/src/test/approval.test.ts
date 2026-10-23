@@ -27,7 +27,7 @@ test('ApprovalManager：订阅者同步应答不会丢失', async () => {
   );
 });
 
-test('executeTool：前置拒绝遵守统一的未执行计时契约', async () => {
+test('executeTool：前置拒绝与实际执行的 0ms 采用不同计时契约', async (t) => {
   const cases = [
     { label: '未知工具', name: 'missing_tool', input: {}, workspace: '/ws', message: /未知工具/ },
     { label: '未绑定工作区', name: 'read_file', input: { path: 'file.txt' }, workspace: '', message: /未绑定工作区/ },
@@ -52,9 +52,6 @@ test('executeTool：前置拒绝遵守统一的未执行计时契约', async () 
     assert.deepEqual(result.timing, { approvalMs: 0 });
     assert.equal(Object.hasOwn(result.timing, 'executionMs'), false);
   }
-});
-
-test('executeTool：实际执行后的 0ms 与未执行不同', async (t) => {
   t.mock.method(performance, 'now', () => 100);
   for (const fails of [false, true]) {
     let called = 0;
@@ -81,6 +78,7 @@ test('executeTool：实际执行后的 0ms 与未执行不同', async (t) => {
     assert.equal(Object.hasOwn(result.timing, 'executionMs'), true);
   }
 });
+
 
 /** 给可能悬挂的 promise 加确定性超时，避免缺陷把测试进程拖死 */
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {

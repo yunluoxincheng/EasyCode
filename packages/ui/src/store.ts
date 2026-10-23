@@ -8,7 +8,11 @@ import type {
   BackgroundTaskInfo,
   TestRunSummary,
   ToolSpec,
+  UserAnswer,
+  UserQuestionRequest,
+  UserQuestion,
 } from '@easycode/core';
+import { parseUserQuestions, parseUserAnswers, extractLatestTodos } from '@easycode/core';
 import {
   providerLabel,
   type ProjectEntry,
@@ -44,6 +48,17 @@ export type ToolItem = {
   startedAt?: number;
   executionStartedAt?: number;
   timing?: { approvalMs: number; executionMs?: number };
+  question?: boolean;
+};
+export type QuestionItem = {
+  kind: 'question';
+  id: string;
+  requestId: string;
+  callId: string;
+  questions: UserQuestion[];
+  status: 'pending' | 'answered' | 'cancelled' | 'expired';
+  answers?: UserAnswer[];
+  draft?: UserAnswer[];
 };
 export type ApprovalItem = {
   kind: 'approval';
@@ -77,6 +92,7 @@ export type TurnEntry =
   | AssistantItem
   | ToolItem
   | ApprovalItem
+  | QuestionItem
   | ErrorItem
   | TestRunItem;
 
@@ -94,8 +110,8 @@ export type TurnItem = {
 /** 顶层时间线条目：用户消息、回合容器，以及回合聚合前的兜底平铺条目 */
 export type TranscriptItem = UserItem | TurnItem | TurnEntry;
 
-/** 会话运行态状态：idle=空闲, running=正在执行, waiting=等待审批, error=出错 */
-export type SessionRunStatus = 'idle' | 'running' | 'waiting' | 'error';
+/** 会话运行态：waiting 等待审批，question 等待回答，两者分别管理。 */
+export type SessionRunStatus = 'idle' | 'running' | 'waiting' | 'question' | 'error';
 
 /** 会话视图状态池化项（TODOS #29）：隔离存储每个会话的时间线、运行态与任务清单 */
 export interface SessionViewState {
@@ -104,6 +120,8 @@ export interface SessionViewState {
   stopping?: boolean;
   operation?: number;
   checkpointRevision?: number;
+  questionRevision?: number;
+  pendingQuestion?: QuestionItem;
   preparingTool?: { callId: string; name: string };
   items: TranscriptItem[];
   currentTurn: TurnItem | null;
@@ -494,6 +512,8 @@ export class AppStore {
     try {
       const data = await this.client.getSession(id);
       if (seq !== this.selectSeq) return; // 已有新的切换请求，防乱序覆盖
+      // 查询历史期间可能已经收到提问事件，不得覆盖事件创建的会话状态。
+      state = this.sessionStates.get(id) ?? state;
 
       // 若之前没有池化状态，从客户端载入历史初始化
       if (!state) {
@@ -542,6 +562,7 @@ export class AppStore {
       void this.refreshBackgroundTasks();
       // TODOS #36：切会话后拉取该会话的回合代码改动快照
       void this.refreshCheckpoints(id);
+      void this.refreshPendingQuestion(id);
     } catch (err) {
       if (seq !== this.selectSeq) return;
       this.showToast(err instanceof Error ? err.message : String(err), 'err');
@@ -822,6 +843,7 @@ export class AppStore {
   private itemsFromSession(data: SessionData): TranscriptItem[] {
     const items: TranscriptItem[] = [];
     const toolById = new Map<string, ToolItem>();
+    const questionByCall = new Map<string, QuestionItem>();
     let turn: TurnItem | null = null;
     let firstTs: number | undefined;
     let lastTs: number | undefined;
@@ -864,7 +886,7 @@ export class AppStore {
       const t = ensureTurn(toTs(msg.createdAt));
       if (msg.role === 'assistant') {
         const view: ViewBlock[] = [];
-        const toolItems: ToolItem[] = [];
+        const toolItems: Array<ToolItem | QuestionItem> = [];
         for (const block of msg.blocks) {
           if (block.type === 'text') view.push({ type: 'text', text: block.text });
           else if (block.type === 'thinking') view.push({ type: 'thinking', text: block.text });
@@ -879,6 +901,17 @@ export class AppStore {
             };
             toolById.set(block.id, item);
             toolItems.push(item);
+            if (block.name === 'ask_user') {
+              try {
+                const question: QuestionItem = {
+                  kind: 'question', id: this.nextId(), callId: block.id,
+                  requestId: `expired_${block.id}`, questions: parseUserQuestions(block.input), status: 'expired',
+                };
+                item.question = true;
+                questionByCall.set(block.id, question);
+                toolItems.push(question);
+              } catch { /* 无效输入保留普通工具错误卡片。 */ }
+            }
           }
         }
         // 助手文本在前，工具卡片随后（与实时事件顺序一致）
@@ -889,32 +922,34 @@ export class AppStore {
       } else {
         const tool = toolById.get(msg.toolCallId);
         if (tool) {
-          tool.status = msg.isError ? 'error' : msg.content.includes('用户拒绝') ? 'denied' : 'ok';
+          tool.status = msg.isError ? 'error' : msg.approved === false || msg.content.includes('用户拒绝') ? 'denied' : 'ok';
           tool.result = msg.content;
+          const question = questionByCall.get(msg.toolCallId);
+          if (question) {
+            try {
+              const result = JSON.parse(msg.content);
+              if (result.kind !== 'user_question_result' || !['answered', 'cancelled'].includes(result.status) || typeof result.requestId !== 'string') throw new Error('not a question result');
+              question.requestId = result.requestId;
+              question.status = result.status;
+              question.answers = result.status === 'answered' ? parseUserAnswers(question.questions, result.answers) : [];
+            } catch {
+              tool.question = false;
+              questionByCall.delete(msg.toolCallId);
+            }
+          }
         }
         lastTs = toTs(msg.createdAt) ?? lastTs;
       }
     }
     closeTurn();
+    for (const item of items) {
+      if (item.kind === 'turn') item.items = item.items.filter((entry) => entry.kind !== 'question' || entry.status === 'answered' || entry.status === 'cancelled' || questionByCall.get(entry.callId) === entry);
+    }
     return items;
   }
 
   private extractTodosFromSession(data: SessionData): TodoItem[] {
-    for (let i = data.messages.length - 1; i >= 0; i--) {
-      const msg = data.messages[i];
-      if (msg.role === 'assistant') {
-        for (let j = msg.blocks.length - 1; j >= 0; j--) {
-          const block = msg.blocks[j];
-          if (block.type === 'tool_call' && block.name === 'todo_write') {
-            const input = block.input as { todos?: TodoItem[] } | undefined;
-            if (Array.isArray(input?.todos)) {
-              return input.todos;
-            }
-          }
-        }
-      }
-    }
-    return [];
+    return extractLatestTodos(data.messages) ?? [];
   }
 
   /* ---------------- 操作 ---------------- */
@@ -1138,6 +1173,77 @@ export class AppStore {
   async respondApproval(requestId: string, approved: boolean): Promise<void> {
     if (!this.activeId) return;
     this.client.respondApproval(this.activeId, requestId, approved);
+  }
+
+  private questionItems(state: SessionViewState): QuestionItem[] {
+    return state.items.flatMap((item) => item.kind === 'turn' ? item.items : [item])
+      .filter((item): item is QuestionItem => item.kind === 'question');
+  }
+
+  get pendingQuestion(): QuestionItem | undefined {
+    const state = this.activeId ? this.sessionStates.get(this.activeId) : undefined;
+    return state?.pendingQuestion?.status === 'pending' ? state.pendingQuestion : undefined;
+  }
+
+  saveQuestionDraft(sessionId: string, requestId: string, answers: UserAnswer[]): void {
+    const state = this.sessionStates.get(sessionId);
+    const question = state?.pendingQuestion;
+    if (question?.status === 'pending' && question.requestId === requestId) question.draft = answers;
+  }
+
+  async respondQuestion(sessionId: string, requestId: string, answers: UserAnswer[]): Promise<boolean> {
+    try {
+      await this.client.respondQuestion(sessionId, requestId, answers);
+      return true;
+    } catch (error) {
+      this.showToast(error instanceof Error ? error.message : String(error), 'err');
+      return false;
+    }
+  }
+
+  async cancelQuestion(sessionId: string, requestId: string): Promise<void> {
+    try { await this.client.cancelQuestion(sessionId, requestId); }
+    catch (error) { this.showToast(error instanceof Error ? error.message : String(error), 'err'); }
+  }
+
+  private addQuestion(state: SessionViewState, request: UserQuestionRequest): void {
+    let item = this.questionItems(state).find((item) => item.requestId === request.requestId)
+      ?? state.currentTurn?.items.find((item): item is QuestionItem => item.kind === 'question' && item.callId === request.callId && item.status === 'expired');
+    if (item?.status === 'answered' || item?.status === 'cancelled') return;
+    if (item) Object.assign(item, request, { status: 'pending' });
+    else {
+      item = { kind: 'question', id: this.nextId(), ...request, status: 'pending' };
+      this.ensureWritableTurnInState(state);
+      this.pushToTurnInState(state, item);
+    }
+    let tool = state.currentTurn?.items.find((item): item is ToolItem => item.kind === 'tool' && item.callId === request.callId && item.status === 'running');
+    if (!tool) {
+      // 后端仍在等回答，但重载快照可能尚无当前工具调用；按真实待答描述补齐追踪。
+      tool = { kind: 'tool', id: this.nextId(), callId: request.callId, name: 'ask_user',
+        input: { questions: request.questions }, status: 'running', question: true };
+      this.ensureWritableTurnInState(state).items.unshift(tool);
+    } else tool.question = true;
+    state.pendingQuestion = item;
+    state.running = true;
+    state.status = 'question';
+  }
+
+  private async refreshPendingQuestion(sessionId: string): Promise<void> {
+    const state = this.sessionStates.get(sessionId);
+    if (!state) return;
+    const revision = state.questionRevision ?? 0;
+    const operation = state.operation;
+    try {
+      const request = await this.client.getPendingQuestion(sessionId);
+      if (!request || this.sessionStates.get(sessionId) !== state || (state.questionRevision ?? 0) !== revision || state.operation !== operation) return;
+      if (!state.currentTurn) {
+        const last = state.items.at(-1);
+        if (last?.kind === 'turn') { state.currentTurn = last; last.durationMs = undefined; last.collapsed = false; }
+      }
+      this.addQuestion(state, request);
+      if (sessionId === this.activeId) this.syncActiveState(state);
+      this.notify(true);
+    } catch { /* 已删除会话或宿主重载后的问题不恢复为可提交状态。 */ }
   }
 
   async stop(): Promise<void> {
@@ -1538,6 +1644,29 @@ export class AppStore {
     const isActive = sessionId === this.activeId;
 
     switch (event.type) {
+      case 'question_request':
+        state.questionRevision = (state.questionRevision ?? 0) + 1;
+        if (isActive) this.flushPendingNotify();
+        this.flushAssistantInState(state);
+        this.addQuestion(state, event.request);
+        if (isActive) this.syncActiveState(state);
+        else this.showToast(`[${this.sessions.find((session) => session.id === sessionId)?.title ?? '后台会话'}] 等待回答`);
+        this.notify(true);
+        break;
+      case 'question_resolved': {
+        state.questionRevision = (state.questionRevision ?? 0) + 1;
+        const question = this.questionItems(state).find((item) => item.requestId === event.result.requestId && item.callId === event.callId);
+        if (question?.status === 'pending') {
+          question.status = event.result.status;
+          question.answers = event.result.answers;
+          question.draft = undefined;
+        }
+        if (state.pendingQuestion?.requestId === event.result.requestId) state.pendingQuestion = undefined;
+        if (state.status === 'question' && !state.pendingQuestion) state.status = state.running ? 'running' : 'idle';
+        if (isActive) this.syncActiveState(state);
+        this.notify(true);
+        break;
+      }
       case 'user_message_committed': {
         const user = [...state.items].reverse().find((item): item is UserItem => item.kind === 'user');
         if (user) user.msgId = event.messageId;
@@ -1545,6 +1674,8 @@ export class AppStore {
         break;
       }
       case 'history_replaced': {
+        state.questionRevision = (state.questionRevision ?? 0) + 1;
+        state.pendingQuestion = undefined;
         if (isActive) this.flushPendingNotify();
         // 使用引擎已提交的原始历史，旧回复、审批、用量采样和待办不能流入新回合。
         state.items = this.itemsFromSession({ messages: event.messages } as SessionData);
@@ -1623,12 +1754,6 @@ export class AppStore {
         state.preparingTool = undefined;
         if (isActive) this.flushPendingNotify();
         this.flushAssistantInState(state);
-        if (event.call.name === 'todo_write') {
-          const input = event.call.input as { todos?: TodoItem[] } | undefined;
-          if (Array.isArray(input?.todos)) {
-            state.activeTodos = input.todos;
-          }
-        }
         this.pushToTurnInState(state, {
           kind: 'tool',
           id: this.nextId(),
@@ -1665,7 +1790,7 @@ export class AppStore {
             tool.result = event.content;
             tool.durationMs = event.durationMs;
             tool.timing = event.timing;
-            if (tool.name === 'todo_write' && !event.isError) {
+            if (tool.name === 'todo_write' && !event.isError && event.approved !== false) {
               const input = tool.input as { todos?: TodoItem[] } | undefined;
               if (Array.isArray(input?.todos)) {
                 state.activeTodos = input.todos;
@@ -1886,6 +2011,11 @@ export class AppStore {
         break;
 
       case 'done':
+        state.pendingQuestion = undefined;
+        state.questionRevision = (state.questionRevision ?? 0) + 1;
+        for (const question of this.questionItems(state)) {
+          if (question.status === 'pending') { question.status = 'expired'; question.draft = undefined; }
+        }
         state.stopping = false;
         state.preparingTool = undefined;
         if (isActive) this.flushPendingNotify();

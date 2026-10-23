@@ -6,6 +6,8 @@ import type {
   DecisionStats,
   ProjectDecisionTree,
   BackgroundTaskInfo,
+  UserAnswer,
+  UserQuestionRequest,
 } from '@easycode/core';
 import type { ModelTestResult, ProviderModelInfo, Settings, ShellInfo } from './settings.js';
 import type {
@@ -63,6 +65,9 @@ export interface AgentClient {
   /** 按消息 ID 编辑任意历史用户消息，并在原会话重新生成。 */
   editUserMessage(id: string, messageId: string, text: string): Promise<void>;
   respondApproval(id: string, requestId: string, approved: boolean): Promise<void>;
+  getPendingQuestion(id: string): Promise<UserQuestionRequest | null>;
+  respondQuestion(id: string, requestId: string, answers: UserAnswer[]): Promise<void>;
+  cancelQuestion(id: string, requestId: string): Promise<void>;
   abort(id: string): Promise<void>;
   setApprovalMode(id: string, mode: ApprovalMode): Promise<void>;
   getApprovalMode(id: string): Promise<ApprovalMode>;

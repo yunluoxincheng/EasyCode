@@ -190,6 +190,15 @@ const handlers: Record<string, Handler> = {
     server.respondApproval(args.id, args.requestId, args.approved);
     return null;
   },
+  'get-pending-question': (args) => server.getPendingQuestion(args.id),
+  'respond-question': (args) => {
+    server.respondQuestion(args.id, args.requestId, args.answers);
+    return null;
+  },
+  'cancel-question': async (args) => {
+    await server.cancelQuestion(args.id, args.requestId);
+    return null;
+  },
   abort: async (args) => {
     await server.abort(args.id);
     return null;
