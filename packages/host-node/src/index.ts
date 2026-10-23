@@ -5,6 +5,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
 import { createStdioHost } from './stdio.js';
+import { spawnWindowsJob } from './windows-job.js';
 import type {
   Host,
   ProcessRunOptions,
@@ -160,23 +161,58 @@ function runShell(
   command: string,
   opts: ProcessRunOptions,
 ): Promise<ProcessResult> {
-  return new Promise((resolve) => {
+  opts.signal?.throwIfAborted();
+  return new Promise((resolve, reject) => {
     const timeoutMs = opts.timeoutMs ?? 120_000;
-    const child = nodeSpawn(command, {
+    const options = {
       shell: resolveNodeShell(opts.shell),
       cwd: opts.cwd,
       windowsHide: true,
-    });
+      detached: process.platform !== 'win32',
+    };
+    // Windows 复用现有 Job 监督器，启动器先退出也不会失去后代；Unix 独立进程组。
+    const shellBin = typeof options.shell === 'string' ? options.shell : process.env.ComSpec || 'cmd.exe';
+    const shellArgs = /(?:^|[\\/])cmd(?:\.exe)?$/i.test(shellBin)
+      ? ['/d', '/s', '/c', command]
+      : /(?:pwsh|powershell)(?:\.exe)?$/i.test(shellBin)
+        ? ['-NoLogo', '-NoProfile', '-Command', command]
+        : ['-c', command];
+    const child = process.platform === 'win32'
+      ? spawnWindowsJob(shellBin, shellArgs, { ...options, shell: false })
+      : nodeSpawn(command, options);
+    const registry = new Map<string, SpawnEntry>([['foreground', {
+      id: 'foreground', child, command, cwd: opts.cwd, startedAt: Date.now(),
+    }]]);
     let stdout = '';
     let stderr = '';
     let settled = false;
+    let stopping: Promise<void> | undefined;
 
-    const onAbort = () => child.kill();
+    const stop = (): Promise<void> => stopping ??= (async () => {
+      if (process.platform === 'win32') {
+        // 终止监督器将关闭 Job；close 在后代释放全部管道后才到达。
+        if (child.exitCode === null && child.signalCode === null && !child.kill()) {
+          throw new Error('终止前台命令 Job 失败，进程可能仍在运行');
+        }
+      } else {
+        await killSpawned(registry, 'foreground');
+      }
+    })();
+    const failedStop = (error: unknown): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      opts.signal?.removeEventListener('abort', onAbort);
+      const failure = new Error(`前台命令停止失败：${error instanceof Error ? error.message : String(error)}`);
+      failure.name = 'ProcessStopError';
+      reject(failure);
+    };
+    const onAbort = () => { void stop().catch(failedStop); };
     opts.signal?.addEventListener('abort', onAbort, { once: true });
 
     const timer = setTimeout(() => {
-      child.kill();
-      stderr += `\n[EasyCode] 命令超时（${Math.round(timeoutMs / 1000)}s），已终止。`;
+      stderr += `\n[EasyCode] 命令超时（${Math.round(timeoutMs / 1000)}s），请求终止进程树。`;
+      void stop().catch(failedStop);
     }, timeoutMs);
 
     child.stdout.setEncoding('utf8');
@@ -194,7 +230,9 @@ function runShell(
       opts.signal?.removeEventListener('abort', onAbort);
       resolve({ code: null, stdout, stderr: stderr + String(err) });
     });
-    child.on('close', (code) => {
+    child.on('close', async (code) => {
+      if (settled) return;
+      try { await stopping; } catch (error) { failedStop(error); return; }
       if (settled) return;
       settled = true;
       clearTimeout(timer);

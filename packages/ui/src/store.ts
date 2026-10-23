@@ -99,6 +99,11 @@ export type SessionRunStatus = 'idle' | 'running' | 'waiting' | 'error';
 
 /** 会话视图状态池化项（TODOS #29）：隔离存储每个会话的时间线、运行态与任务清单 */
 export interface SessionViewState {
+  /** 模型上下文视图与可编辑原始时间线分开，避免归档历史计入容量。 */
+  contextItems?: TranscriptItem[];
+  stopping?: boolean;
+  operation?: number;
+  checkpointRevision?: number;
   preparingTool?: { callId: string; name: string };
   items: TranscriptItem[];
   currentTurn: TurnItem | null;
@@ -516,6 +521,9 @@ export class AppStore {
         state.activeTodos = data.todos ?? this.extractTodosFromSession(data);
       }
 
+      if (!state.running && data.history) {
+        state.contextItems = this.itemsFromSession({ ...data, history: undefined });
+      }
       this.activeId = id;
       this.syncActiveState(state);
 
@@ -575,8 +583,11 @@ export class AppStore {
   async compressContext(keepRecentTurns = 2): Promise<void> {
     if (!this.activeId || this.running) return;
     try {
-      await this.client.trimSessionHistory(this.activeId, keepRecentTurns);
-      await this.selectSession(this.activeId);
+      const id = this.activeId;
+      const data = await this.client.trimSessionHistory(id, keepRecentTurns);
+      const state = this.sessionStates.get(id);
+      if (state) state.contextItems = this.itemsFromSession({ ...data, history: undefined });
+      await this.selectSession(id);
       this.showToast('✓ 上下文已智能压缩，已腾出 Token 空间');
     } catch (err) {
       this.showToast(`压缩失败: ${err instanceof Error ? err.message : String(err)}`, 'err');
@@ -684,10 +695,13 @@ export class AppStore {
   /** 刷新指定会话（默认活动会话）的回合代码改动快照列表 */
   async refreshCheckpoints(sessionId = this.activeId): Promise<void> {
     if (!sessionId || !this.client.listTurnCheckpoints) return;
+    const state = this.getOrCreateSessionState(sessionId);
+    const revision = state.checkpointRevision = (state.checkpointRevision ?? 0) + 1;
+    const operation = state.operation;
     try {
       const list = await this.client.listTurnCheckpoints(sessionId);
-      const state = this.sessionStates.get(sessionId);
-      if (state) state.checkpoints = list;
+      if (this.sessionStates.get(sessionId) !== state || state.operation !== operation || state.checkpointRevision !== revision) return;
+      state.checkpoints = list;
       if (sessionId === this.activeId) {
         this.checkpoints = list;
         this.notify(false);
@@ -753,6 +767,7 @@ export class AppStore {
       if (state) {
         state.checkpoints = res.checkpoints;
         state.items = this.itemsFromSession(res.session);
+        state.contextItems = this.itemsFromSession({ ...res.session, history: undefined });
       }
       this.checkpoints = res.checkpoints;
       if (state) this.syncActiveState(state);
@@ -834,7 +849,7 @@ export class AppStore {
       return turn;
     };
 
-    for (const msg of data.messages) {
+    for (const msg of data.history ?? data.messages) {
       if (msg.role === 'user') {
         closeTurn();
         items.push({
@@ -1045,8 +1060,11 @@ export class AppStore {
     const state = this.getOrCreateSessionState(id);
     state.running = true;
     state.status = 'running';
+    const operation = state.operation = (state.operation ?? 0) + 1;
     this.running = true;
-    state.items.push({ kind: 'user', id: this.nextId(), text: text.trim(), ts: Date.now() });
+    const user: UserItem = { kind: 'user', id: this.nextId(), text: text.trim(), ts: Date.now() };
+    state.items.push(user);
+    state.contextItems?.push(user);
     const turn: TurnItem = {
       kind: 'turn',
       id: this.nextId(),
@@ -1055,6 +1073,7 @@ export class AppStore {
       items: [],
     };
     state.items.push(turn);
+    state.contextItems?.push(turn);
     state.currentTurn = turn;
     this.syncActiveState(state);
     this.turnAtBottom = true;
@@ -1066,6 +1085,7 @@ export class AppStore {
     try {
       await this.client.sendMessage(id, text.trim());
     } catch (err) {
+      if (state.operation !== operation) return;
       const errorItem: ErrorItem = {
         kind: 'error',
         id: this.nextId(),
@@ -1084,59 +1104,29 @@ export class AppStore {
     }
   }
 
-  /** 编辑最近一条用户消息并重新生成：UI 截断该消息之后的内容，新建回合容器承接流式事件 */
+  /** 引擎确认历史替换后才截断 UI，使用持久消息 ID 定位，拒绝时保留原时间线。 */
   async editAndResend(userItemId: string, text: string): Promise<void> {
     const id = this.activeId;
     if (!id || this.running || !text.trim()) return;
     const state = this.getOrCreateSessionState(id);
-    const idx = state.items.findIndex((i) => i.id === userItemId);
-    if (idx === -1) return;
-    state.items = state.items
-      .slice(0, idx + 1)
-      .map((i) => (i.id === userItemId && i.kind === 'user' ? { ...i, text: text.trim() } : i));
-    // P2 #6：截断后续回合时，立即从前端视图状态移除属于被截断回合的快照
-    const retainedCallIds = new Set<string>();
-    for (const it of state.items) {
-      if (it.kind === 'turn') {
-        for (const sub of it.items) {
-          if (sub.kind === 'tool' && sub.callId) retainedCallIds.add(sub.callId);
-        }
-      }
+    const item = state.items.find((i): i is UserItem => i.kind === 'user' && i.id === userItemId);
+    if (!item?.msgId) {
+      this.showToast('消息标识尚未同步，请重新加载会话后再编辑', 'err');
+      return;
     }
-    state.checkpoints = state.checkpoints.filter((c) =>
-      c.toolCallIds.some((cid) => retainedCallIds.has(cid)),
-    );
-    const turn: TurnItem = {
-      kind: 'turn',
-      id: this.nextId(),
-      startedAt: Date.now(),
-      collapsed: false,
-      items: [],
-    };
-    state.items.push(turn);
-    state.currentTurn = turn;
+    const operation = state.operation = (state.operation ?? 0) + 1;
     state.running = true;
     state.status = 'running';
     this.syncActiveState(state);
-    this.turnAtBottom = true;
-    if (this.autoScrollOn) {
-      this.scrollTick++;
-      this.atBottom = true;
-    }
     this.notify(true);
     try {
-      await this.client.editLastUserMessage(id, text);
+      await this.client.editUserMessage(id, item.msgId, text.trim());
     } catch (err) {
-      const errorItem: ErrorItem = {
-        kind: 'error',
-        id: this.nextId(),
-        message: err instanceof Error ? err.message : String(err),
-      };
-      if (state.currentTurn) state.currentTurn.items.push(errorItem);
-      else state.items.push(errorItem);
+      if (state.operation !== operation) return;
       state.running = false;
       state.preparingTool = undefined;
       state.status = 'error';
+      this.showToast(err instanceof Error ? err.message : String(err), 'err');
       if (this.activeId === id) {
         this.syncActiveState(state);
         this.turnAtBottom = true;
@@ -1157,17 +1147,33 @@ export class AppStore {
 
   async stopSession(id: string): Promise<void> {
     const state = this.sessionStates.get(id);
-    if (state) {
-      state.running = false;
-      state.preparingTool = undefined;
-      state.status = 'idle';
-      if (id === this.activeId) {
-        this.syncActiveState(state);
-        this.turnAtBottom = true;
+    if (!state || state.stopping) return;
+    state.stopping = true;
+    const operation = state.operation;
+    this.notify(true);
+    try {
+      await this.client.abort(id);
+    } catch (err) {
+      this.showToast(`停止失败：${err instanceof Error ? err.message : String(err)}`, 'err');
+    } finally {
+      if (state.operation === operation) {
+        state.stopping = false;
+        state.preparingTool = undefined;
+        if (id === this.activeId) {
+          this.syncActiveState(state);
+          this.turnAtBottom = true;
+        }
+        this.notify(true);
       }
     }
-    await this.client.abort(id);
-    this.notify(true);
+  }
+
+  get stopping(): boolean {
+    return this.activeId ? this.sessionStates.get(this.activeId)?.stopping === true : false;
+  }
+
+  get contextItems(): TranscriptItem[] {
+    return (this.activeId ? this.sessionStates.get(this.activeId)?.contextItems : undefined) ?? this.items;
   }
 
   /* ---------------- 后台任务与内嵌预览 (TODOS #37 / #44) ---------------- */
@@ -1532,6 +1538,37 @@ export class AppStore {
     const isActive = sessionId === this.activeId;
 
     switch (event.type) {
+      case 'user_message_committed': {
+        const user = [...state.items].reverse().find((item): item is UserItem => item.kind === 'user');
+        if (user) user.msgId = event.messageId;
+        if (isActive) this.notify(false);
+        break;
+      }
+      case 'history_replaced': {
+        if (isActive) this.flushPendingNotify();
+        // 使用引擎已提交的原始历史，旧回复、审批、用量采样和待办不能流入新回合。
+        state.items = this.itemsFromSession({ messages: event.messages } as SessionData);
+        state.currentAssistant = null;
+        state.preparingTool = undefined;
+        state.turnItemSet = new WeakSet();
+        state.activeTodos = event.todos;
+        state.lastUsage = null;
+        state.checkpointRevision = (state.checkpointRevision ?? 0) + 1;
+        const retainedIds = new Set(event.messages.map((m) => m.id));
+        state.checkpoints = state.checkpoints.filter((c) => retainedIds.has(c.userMessageId));
+        state.currentTurn = {
+          kind: 'turn', id: this.nextId(), startedAt: Date.now(), collapsed: false, items: [],
+        };
+        state.items.push(state.currentTurn);
+        state.contextItems = this.itemsFromSession({ messages: event.contextMessages } as SessionData);
+        state.contextItems.push(state.currentTurn);
+        if (isActive) {
+          this.syncActiveState(state);
+          if (this.autoScrollOn) this.scrollTick++;
+          this.notify(true);
+        }
+        break;
+      }
       case 'assistant_start':
         state.preparingTool = undefined;
         if (isActive) this.flushPendingNotify();
@@ -1719,6 +1756,14 @@ export class AppStore {
         break;
 
       case 'context_compacted':
+        if (event.messages) {
+          state.contextItems = this.itemsFromSession({ messages: event.messages } as SessionData);
+          // 压缩保留当前回合原文；后续流式事件继续更新同一个回合引用。
+          if (state.currentTurn) {
+            if (state.contextItems.at(-1)?.kind === 'turn') state.contextItems.pop();
+            state.contextItems.push(state.currentTurn);
+          }
+        }
         if (isActive) {
           this.flushPendingNotify();
           this.showToast(`[系统] ${event.summary}`);
@@ -1797,6 +1842,7 @@ export class AppStore {
       }
 
       case 'test_loop_done': {
+        state.stopping = false;
         if (isActive) this.flushPendingNotify();
         // 循环收敛：折叠本轮自愈回合并复位运行态（最后一轮测试后可能没有后续 done 事件）
         const hadError = state.currentTurn?.items.some((i) => i.kind === 'error') ?? false;
@@ -1840,9 +1886,20 @@ export class AppStore {
         break;
 
       case 'done':
+        state.stopping = false;
         state.preparingTool = undefined;
         if (isActive) this.flushPendingNotify();
         this.flushAssistantInState(state);
+        if (event.reason === 'aborted' && state.currentTurn) {
+          for (const item of state.currentTurn.items) {
+            if (item.kind === 'tool' && item.status === 'running') {
+              item.status = 'error';
+              item.result = '当前回合已中止，此调用未完成。';
+            } else if (item.kind === 'approval' && item.status === 'pending') {
+              item.status = 'denied';
+            }
+          }
+        }
         if (state.currentTurn) {
           state.currentTurn.durationMs = Date.now() - state.currentTurn.startedAt;
           state.currentTurn.collapsed = true;
@@ -1850,7 +1907,7 @@ export class AppStore {
           state.currentTurn = null;
           state.running = false;
           state.status = hadError ? 'error' : 'idle';
-          this.sendDesktopNotification(hadError, sessionId);
+          if (event.reason !== 'aborted') this.sendDesktopNotification(hadError, sessionId);
           void this.refreshCheckpoints(sessionId);
           this.fileTreeRefreshTick++;
         } else {
@@ -1863,7 +1920,7 @@ export class AppStore {
           this.notify(true);
         } else {
           const sessionTitle = this.sessions.find((s) => s.id === sessionId)?.title || '后台会话';
-          this.showToast(`[${sessionTitle}] 任务执行完成`);
+          this.showToast(`[${sessionTitle}] ${event.reason === 'aborted' ? '任务已停止' : '任务执行完成'}`);
           this.notify(false);
         }
         break;

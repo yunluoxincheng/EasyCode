@@ -237,6 +237,7 @@ export async function executeTool(
   const started = Date.now();
   const timing: NonNullable<ToolExecution['timing']> = { approvalMs: 0 };
   const tool = registry.get(name);
+  ctx.signal.throwIfAborted();
   if (!tool) {
     return { content: `未知工具: ${name}`, approved: false, isError: true, durationMs: 0, timing };
   }
@@ -363,6 +364,7 @@ export async function executeTool(
     ? await ctx.approval.request(name, approvalInput, {
         force: requirement.force,
         reason: requirement.reason,
+        signal: ctx.signal,
       })
     : true;
   timing.approvalMs = Math.max(0, Math.round(performance.now() - approvalStarted));
@@ -428,7 +430,9 @@ export async function executeTool(
         ? { ...(permissionInput as Record<string, unknown>) }
         : validated.value;
     const run = async () => {
+      ctx.signal.throwIfAborted();
       ctx.onExecutionStart?.();
+      ctx.signal.throwIfAborted();
       const executionStarted = performance.now();
       try {
         return await tool.execute(executeInput, ctx);
@@ -452,6 +456,7 @@ export async function executeTool(
     safetyObservation?.outcome(getToolExecutionOutcome(name, execution));
     return execution;
   } catch (err) {
+    if (err instanceof Error && err.name === 'ProcessStopError') throw err;
     safetyObservation?.outcome({ status: 'failure', evidence: 'Tool execution failed' });
     return {
       content: `工具执行失败: ${err instanceof Error ? err.message : String(err)}`,

@@ -135,10 +135,27 @@ export async function createTauriHost(): Promise<Host> {
     },
     process: {
       run: async (command, opts) => {
+        opts.signal?.throwIfAborted();
         const id = crypto.randomUUID();
+        let stopError: unknown;
+        let stopping: Promise<void> | undefined;
+        let stopRevision = 0;
         const onAbort = () => {
-          invoke('proc_kill', { id }).catch(() => {});
+          const revision = ++stopRevision;
+          stopping = invoke<void>('proc_kill', { id }).then(
+            () => { if (revision === stopRevision) stopError = undefined; },
+            (error) => { if (revision === stopRevision) stopError = error; },
+          );
         };
+        const checkStop = () => {
+          if (stopError) {
+            const failure = new Error(`前台命令停止失败：${String(stopError)}`);
+            failure.name = 'ProcessStopError';
+            throw failure;
+          }
+        };
+        const started = new Channel<null>();
+        started.onmessage = () => { if (opts.signal?.aborted) onAbort(); };
         opts.signal?.addEventListener('abort', onAbort, { once: true });
         try {
           const result = await invoke<ProcessResult>('proc_run', {
@@ -147,8 +164,15 @@ export async function createTauriHost(): Promise<Host> {
             cwd: opts.cwd,
             timeoutMs: opts.timeoutMs ?? 120_000,
             shell: opts.shell,
+            onStarted: started,
           });
+          await stopping;
+          checkStop();
           return result;
+        } catch (error) {
+          await stopping;
+          checkStop();
+          throw error;
         } finally {
           opts.signal?.removeEventListener('abort', onAbort);
         }
@@ -373,11 +397,12 @@ export async function createTauriClient(options?: { reflexPolicy?: DecisionPolic
     editLastUserMessage: async (id, text) => {
       await server.editLastUserMessage(id, text);
     },
+    editUserMessage: (id, messageId, text) => server.editUserMessage(id, messageId, text),
     respondApproval: async (id, requestId, approved) => {
       server.respondApproval(id, requestId, approved);
     },
     abort: async (id) => {
-      server.abort(id);
+      await server.abort(id);
     },
     setApprovalMode: async (id, mode) => {
       server.setApprovalMode(id, mode);

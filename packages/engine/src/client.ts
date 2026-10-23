@@ -60,6 +60,8 @@ export interface AgentClient {
   sendMessage(id: string, text: string): Promise<void>;
   /** 编辑最近一条用户消息并重新生成（截断其后内容） */
   editLastUserMessage(id: string, text: string): Promise<void>;
+  /** 按消息 ID 编辑任意历史用户消息，并在原会话重新生成。 */
+  editUserMessage(id: string, messageId: string, text: string): Promise<void>;
   respondApproval(id: string, requestId: string, approved: boolean): Promise<void>;
   abort(id: string): Promise<void>;
   setApprovalMode(id: string, mode: ApprovalMode): Promise<void>;

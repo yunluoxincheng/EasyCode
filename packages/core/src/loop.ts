@@ -40,6 +40,9 @@ export interface LoopOptions {
   onFileChange?: (change: FileChangeEvent) => Promise<void> | void;
   /** 权限规则（TODOS #47）：全局 + 项目级规则并集，命中即优先于审批模式 */
   permissionRules?: PermissionRule[];
+  /** 压缩前保留可编辑的原始历史；归档数据不参与模型请求。 */
+  onBeforeCompaction?: () => void;
+  onMessage?: (message: ChatMessage) => void;
 }
 
 export interface LoopResult {
@@ -150,6 +153,8 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
     backgroundTasks,
     onFileChange,
     permissionRules,
+    onBeforeCompaction,
+    onMessage,
   } = options;
 
   let pendingRecoveries: Array<{ observation: DecisionObservation; name: string; input: unknown }> = [];
@@ -213,23 +218,34 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
       }
 
       emit({ type: 'assistant_start' });
+      if (signal.aborted) return finish('aborted');
       const request: StreamRequest = {
         messages,
         tools: tools.listSpecs(),
         system: systemPrompt,
         reasoningEffort: reasoningEffort || undefined,
       };
-      const turn = await provider.stream(request, {
-        signal,
-        emit: (pe) => {
-          if (pe.type === 'text_delta') emit({ type: 'text_delta', delta: pe.delta });
-          else if (pe.type === 'reasoning_delta')
-            emit({ type: 'reasoning_delta', delta: pe.delta });
-          else if (pe.type === 'tool_call_preparing') emit(pe);
-        },
-      });
+      let streaming = true;
+      let turn: Awaited<ReturnType<Provider['stream']>>;
+      try {
+        turn = await provider.stream(request, {
+          signal,
+          emit: (pe) => {
+            if (!streaming || signal.aborted) return;
+            if (pe.type === 'text_delta') emit({ type: 'text_delta', delta: pe.delta });
+            else if (pe.type === 'reasoning_delta')
+              emit({ type: 'reasoning_delta', delta: pe.delta });
+            else if (pe.type === 'tool_call_preparing') emit(pe);
+          },
+        });
+      } finally {
+        streaming = false;
+      }
 
-      messages.push(stamp({ role: 'assistant', blocks: turn.blocks }));
+      if (signal.aborted) return finish('aborted');
+      const assistantMessage = stamp({ role: 'assistant', blocks: turn.blocks });
+      messages.push(assistantMessage);
+      onMessage?.(assistantMessage);
       emit({ type: 'step_end', usage: turn.usage });
 
       const calls = extractToolCalls(turn.blocks);
@@ -366,7 +382,10 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
           content: execution.content,
           isError: execution.isError,
         };
-        messages.push(stamp(resultMessage));
+        const stampedResult = stamp(resultMessage);
+        messages.push(stampedResult);
+        onMessage?.(stampedResult);
+        if (signal.aborted) return finish('aborted');
       }
 
       // 决策点 3：上下文压缩前瞻旁路（TODOS #40 context_management）
@@ -397,6 +416,7 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
         turn.usage.inputTokens > contextWindow * autoCompactThreshold
       ) {
         const beforeTokens = turn.usage.inputTokens;
+        onBeforeCompaction?.();
         const compactRes = compactHistoryMessages(messages, { keepRecentTurns: 2, pruneTools: true });
         if (compactRes.compacted) {
           contextAction = 'compact_all';
@@ -428,7 +448,7 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
     if (err instanceof DOMException && err.name === 'AbortError') {
       return finish('aborted');
     }
-    if (signal.aborted) return finish('aborted');
+    if (signal.aborted && !(err instanceof Error && err.name === 'ProcessStopError')) return finish('aborted');
     const message = err instanceof Error ? err.message : String(err);
     emit({ type: 'error', message });
     return finish('error', message);

@@ -18,6 +18,9 @@ use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 mod secrets;
 mod stdio;
+#[cfg(windows)]
+#[path = "stdio_job.rs"]
+mod foreground_job;
 use stdio::{stdio_open, stdio_write, stdio_close, stdio_reset, stdio_ack};
 use secrets::{secret_delete, secret_get, secret_set, secret_status};
 
@@ -27,6 +30,24 @@ const MAX_STR: usize = 200_000;
 /// 运行中子进程注册表：id -> pid，供中止信号杀进程
 #[derive(Default)]
 struct PidMap(Mutex<HashMap<String, u32>>);
+#[derive(Default)]
+struct ForegroundMap(Mutex<HashMap<String, std::sync::Arc<ForegroundProcess>>>);
+
+struct ForegroundProcess {
+    #[cfg(windows)]
+    job: foreground_job::Job,
+    #[cfg(not(windows))]
+    pid: u32,
+}
+
+impl ForegroundProcess {
+    fn stop(&self) -> Result<(), String> {
+        #[cfg(windows)]
+        { self.job.terminate() }
+        #[cfg(not(windows))]
+        { kill_process(self.pid) }
+    }
+}
 
 /// 后台任务注册表（TODOS #37）：id -> 元数据。WebView 重载后 proc_list 恢复接管；
 /// 应用退出时 kill_all_spawned 清场，杜绝孤儿 dev server 占端口。
@@ -828,11 +849,13 @@ fn process_exists(pid: u32) -> bool {
 #[tauri::command]
 async fn proc_run(
     state: tauri::State<'_, PidMap>,
+    foreground: tauri::State<'_, ForegroundMap>,
     id: String,
     command: String,
     cwd: Option<String>,
     timeout_ms: Option<u64>,
     shell: Option<String>,
+    on_started: Channel<()>,
 ) -> Result<serde_json::Value, String> {
     // 超时上限必须与引擎/设置页保持一致（1800s）。早期硬编码 600s，
     // 导致用户设置 20/30 分钟时 Tauri 主力端会在 10 分钟强行终止命令
@@ -843,9 +866,25 @@ async fn proc_run(
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).stdin(Stdio::null());
     hide_window(&mut cmd);
 
+    #[cfg(windows)]
+    let (mut child, job) = foreground_job::Job::spawn(&mut cmd)?;
+    #[cfg(not(windows))]
     let mut child = cmd.spawn().map_err(|e| format!("启动命令失败: {}", e))?;
     let pid = child.id();
+    let process = std::sync::Arc::new(ForegroundProcess {
+        #[cfg(windows)] job,
+        #[cfg(not(windows))] pid,
+    });
+    foreground.0.lock().unwrap().insert(id.clone(), process.clone());
     state.0.lock().unwrap().insert(id.clone(), pid);
+    // TS 在登记完成后重检取消，封闭 proc_kill 先于 proc_run 登记的窗口。
+    if on_started.send(()).is_err() {
+        process.stop()?;
+        let _ = child.wait();
+        state.0.lock().unwrap().remove(&id);
+        foreground.0.lock().unwrap().remove(&id);
+        return Err("终端接收方已关闭，命令已取消".into());
+    }
 
     let mut stdout_pipe = child.stdout.take();
     let mut stderr_pipe = child.stderr.take();
@@ -875,7 +914,7 @@ async fn proc_run(
             }
             Ok(None) => {
                 if Instant::now() >= deadline {
-                    let _ = child.kill();
+                    process.stop()?;
                     let _ = child.wait();
                     timed_out = true;
                     break;
@@ -883,12 +922,17 @@ async fn proc_run(
                 tokio::time::sleep(Duration::from_millis(80)).await;
             }
             Err(e) => {
+                process.stop()?;
                 state.0.lock().unwrap().remove(&id);
+                foreground.0.lock().unwrap().remove(&id);
                 return Err(format!("等待命令失败: {}", e));
             }
         }
     }
+    // 组长提前退出也清理仍持有输出管道的后代，避免 read/join 无限等待。
+    process.stop()?;
     state.0.lock().unwrap().remove(&id);
+    foreground.0.lock().unwrap().remove(&id);
 
     let stdout = decode_output(&out_handle.join().unwrap_or_default());
     let mut stderr = decode_output(&err_handle.join().unwrap_or_default());
@@ -909,8 +953,15 @@ async fn proc_run(
 fn proc_kill(
     pids: tauri::State<'_, PidMap>,
     spawns: tauri::State<'_, SpawnMap>,
+    foreground: tauri::State<'_, ForegroundMap>,
     id: String,
 ) -> Result<(), String> {
+    let running = foreground.0.lock().unwrap().get(&id).cloned();
+    if let Some(process) = running {
+        process.stop()?;
+        // proc_run 在输出排空后回收，避免与已在途的取消发生重用竞争。
+        return Ok(());
+    }
     // 返回前同步移除恢复元数据；停止失败则两份记录均保留。
     stop_registered_process(&pids, &spawns, &id, kill_process)
 }
@@ -1399,6 +1450,7 @@ fn main() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .manage(PidMap::default())
+        .manage(ForegroundMap::default())
         .manage(stdio::StdioMap::default())
         .manage(SpawnMap::default())
         .manage(HttpAbortMap::default())

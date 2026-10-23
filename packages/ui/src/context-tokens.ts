@@ -112,7 +112,7 @@ export function estimateSessionTokens(
 
   const rows: Array<{ label: string; tokens: number }> = [];
   let msgTokens = 0;
-  for (const it of store.items) {
+  for (const it of store.contextItems) {
     if (it.kind === 'user') {
       msgTokens += countUserItem(it);
     } else if (it.kind === 'turn') {
@@ -155,7 +155,7 @@ export function estimateSessionTokens(
   rows.push({ label: '系统工具', tokens: staticTokensCache.toolsTokens });
   rows.push({ label: '系统提示词', tokens: staticTokensCache.promptTokens });
 
-  const other = store.items.length * 4;
+  const other = store.contextItems.length * 4;
   rows.push({ label: '其他', tokens: other });
 
   const used = rows.reduce((a, r) => a + r.tokens, 0);

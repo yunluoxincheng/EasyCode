@@ -658,19 +658,33 @@ export class CheckpointManager {
     sessionId: string,
     removedUserMessageIds: string[],
     removedToolCallIds: string[],
+    commitHistory?: () => Promise<void>,
   ): Promise<void> {
     const records = await this.loadSessionRecords(sessionId);
     const userSet = new Set(removedUserMessageIds);
     const callSet = new Set(removedToolCallIds);
-    if (userSet.size === 0 && callSet.size === 0) return;
     const filtered = records.filter(
       (r) =>
         !userSet.has(r.userMessageId) &&
         !r.toolCallIds.some((cid) => callSet.has(cid)),
     );
-    if (filtered.length !== records.length) {
-      this.cache.set(sessionId, filtered);
-      await this.persistSessionRecords(sessionId);
+    const changed = filtered.length !== records.length;
+    try {
+      if (changed) {
+        this.cache.set(sessionId, filtered);
+        await this.persistSessionRecords(sessionId);
+      }
+      await commitHistory?.();
+    } catch (error) {
+      this.cache.set(sessionId, records);
+      if (changed) {
+        try {
+          await this.persistSessionRecords(sessionId);
+        } catch {
+          throw new Error('历史编辑未完成，快照恢复落盘也失败；请检查数据目录后重新加载会话');
+        }
+      }
+      throw error;
     }
   }
 

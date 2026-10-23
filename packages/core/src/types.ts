@@ -76,6 +76,8 @@ export interface TodoItem {
 export interface SessionData {
   meta: SessionMeta;
   messages: ChatMessage[];
+  /** 压缩前的原始时间线，仅供展示/编辑；模型请求始终使用 messages。旧版本丢弃的历史无法恢复。 */
+  history?: ChatMessage[];
   /** 会话累计 token 用量与步数（引擎累计并持久化） */
   usage?: { input: number; output: number; steps: number; cached?: number };
   /** 当前任务清单（由 todo_write 工具维护） */
