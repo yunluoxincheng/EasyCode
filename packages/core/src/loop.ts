@@ -482,7 +482,7 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
   function recordToolResult(call: ToolCallBlock, execution: ToolExecution): void {
     const resultMessage: ToolResultMessage = {
       role: 'tool_result', toolCallId: call.id, toolName: call.name,
-      content: execution.content, isError: execution.isError,
+      content: execution.content, isError: execution.isError, approved: execution.approved,
     };
     const stampedResult = stamp(resultMessage);
     messages.push(stampedResult);

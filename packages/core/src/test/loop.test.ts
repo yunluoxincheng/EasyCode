@@ -14,7 +14,7 @@ import {
   runAgentLoop,
   toOpenAIWireMessages,
   toAnthropicWireMessages,
-  UserQuestionManager, ResponsesProvider, extractLatestTodos
+  UserQuestionManager, ResponsesProvider, extractLatestTodos, compactHistoryMessages
 } from '../index.js';
 
 /** 收集事件 + 消息的测试脚手架 */
@@ -79,6 +79,10 @@ test('【P2 拒绝态】权限规则拒绝时 tool_result 事件显式携带 app
   assert.match(event.content, /权限规则拒绝执行/);
   assert.deepEqual(event.timing, { approvalMs: 0 });
   assert.equal(event.timing.executionMs, undefined);
+  const persisted = env.messages.find((message) => message.role === 'tool_result');
+  assert.ok(persisted?.role === 'tool_result');
+  assert.equal(persisted.approved, false);
+  assert.equal(persisted.isError, false);
 });
 
 test('交互批次：答案重规划前不执行旧参数，停止也补齐全部协议结果', async (t) => {
@@ -91,7 +95,7 @@ test('交互批次：答案重规划前不执行旧参数，停止也补齐全�
     env.host.fs.writeFile = async (path, content) => { writes.push(content); await write(path, content); };
     env.host.process.run = async () => { commands++; return { code: 0, stdout: '', stderr: '' }; };
     const calls: ToolCallBlock[] = [
-      { type: 'tool_call', id: 'old_before', name: 'write_file', input: { path: 'db.txt', content: 'postgresql' } },
+      { type: 'tool_call', id: 'old_before', name: 'write_file', input: { path: 'postgresql.conf', content: 'postgresql' } },
       { type: 'tool_call', id: 'question', name: 'ask_user', input: { questions: [{ id: 'db', question: 'Database?', options: [{ label: 'PostgreSQL' }, { label: 'MySQL' }] }] } },
       { type: 'tool_call', id: 'old_after', name: 'run_command', input: { command: 'install postgresql' } },
       { type: 'tool_call', id: 'old_todo', name: 'todo_write', input: { todos: [{ content: 'use postgresql', status: 'pending' }] } },
@@ -136,6 +140,7 @@ test('交互批次：答案重规划前不执行旧参数，停止也补齐全�
     for (const call of calls.filter((call) => call.id !== 'question')) {
       const deferred = results.find((message) => message.toolCallId === call.id)!;
       assert.equal(deferred.isError, true);
+      assert.equal(deferred.approved, false);
       assert.equal(env.events.some((event) => event.type === 'tool_execution_start' && event.callId === call.id), false);
     }
     if (!cancel) assert.match(results.find((message) => message.toolCallId === 'read_after_answer')!.content, /hello easycode/);
@@ -152,6 +157,22 @@ test('交互批次：答案重规划前不执行旧参数，停止也补齐全�
     await new ResponsesProvider('wire-check', { baseURL: 'https://example.invalid', model: 'test' }).stream({ messages: env.messages, tools: [] }, { signal: new AbortController().signal, emit: () => {} });
     assert.deepEqual(responseIds, expected);
     t.mock.restoreAll();
+
+    // 对实际交互循环的历史执行压缩，不能把旧参数提升为已执行事实。
+    const compacted = compactHistoryMessages([...env.messages,
+      { role: 'user', content: 'later turn' },
+      { role: 'assistant', blocks: [{ type: 'text', text: 'later reply' }] },
+      { role: 'user', content: 'latest turn' },
+    ], { keepRecentTurns: 2 });
+    assert.equal(compacted.compacted, true);
+    const summary = compacted.messages[0];
+    assert.ok(summary.role === 'user');
+    assert.doesNotMatch(summary.content, /postgresql|任务清单状态/);
+    if (!cancel) {
+      assert.match(summary.content, /db\.txt/);
+      assert.match(summary.content, /hello\.txt/);
+      assert.equal(results.find((message) => message.toolCallId === 'mysql_after_answer')!.approved, true);
+    } else assert.doesNotMatch(summary.content, /历史涉及文件|早期关键命令/);
   }
 });
 

@@ -38,6 +38,8 @@ export interface ToolResultMessage {
   toolName: string;
   content: string;
   isError?: boolean;
+  /** 实际执行许可；旧历史缺省时未知，不能据此确认工具执行成功。 */
+  approved?: boolean;
   id?: string;
   createdAt?: string;
 }

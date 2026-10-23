@@ -922,7 +922,7 @@ export class AppStore {
       } else {
         const tool = toolById.get(msg.toolCallId);
         if (tool) {
-          tool.status = msg.isError ? 'error' : msg.content.includes('用户拒绝') ? 'denied' : 'ok';
+          tool.status = msg.isError ? 'error' : msg.approved === false || msg.content.includes('用户拒绝') ? 'denied' : 'ok';
           tool.result = msg.content;
           const question = questionByCall.get(msg.toolCallId);
           if (question) {

@@ -1,4 +1,4 @@
-import type { ChatMessage, TodoItem } from './types.js';
+import type { ChatMessage, TodoItem, ToolCallBlock } from './types.js';
 
 export interface PruneToolOptions {
   /** 保留最近几轮用户交互中的工具输出不折叠（默认 1，即当前/最近轮次不折叠） */
@@ -92,23 +92,34 @@ export function pruneHistoricalToolResults(
   return { modified, prunedCount, savedChars };
 }
 
-/** 从会话消息列表中提取最新的 todo_write 任务清单快照 */
-export function extractLatestTodos(messages: ChatMessage[]): TodoItem[] | undefined {
-  const failed = new Set<string>();
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const msg = messages[i];
-    if (msg.role === 'tool_result' && msg.isError) failed.add(msg.toolCallId);
+/** 仅匹配当前助手批次的成功结果；缺少许可信息的旧历史不推断为已执行。 */
+function successfulToolCalls(messages: ChatMessage[]): ToolCallBlock[] {
+  const pending = new Map<string, ToolCallBlock>();
+  const successful: ToolCallBlock[] = [];
+  for (const msg of messages) {
+    if (msg.role === 'user' || msg.role === 'assistant') pending.clear();
     if (msg.role === 'assistant') {
-      for (const block of [...msg.blocks].reverse()) {
-        if (block.type === 'tool_call' && block.name === 'todo_write' && !failed.has(block.id)) {
-          const input = block.input as { todos?: TodoItem[] } | undefined;
-          if (Array.isArray(input?.todos)) {
-            return input.todos;
-          }
-        }
+      for (const block of msg.blocks) {
+        if (block.type === 'tool_call') pending.set(block.id, block);
       }
-      // 调用 ID 只在该助手批次内匹配，后续批次复用 ID 不影响早期已执行的清单。
-      for (const block of msg.blocks) if (block.type === 'tool_call') failed.delete(block.id);
+    } else if (msg.role === 'tool_result') {
+      const call = pending.get(msg.toolCallId);
+      pending.delete(msg.toolCallId);
+      if (call?.name === msg.toolName && msg.approved === true && msg.isError !== true) {
+        successful.push(call);
+      }
+    }
+  }
+  return successful;
+}
+
+/** 从已确认成功的 todo_write 结果中提取最新清单，未执行/失败/未知结果不覆盖旧清单。 */
+export function extractLatestTodos(messages: ChatMessage[]): TodoItem[] | undefined {
+  const calls = successfulToolCalls(messages);
+  for (let i = calls.length - 1; i >= 0; i--) {
+    if (calls[i].name === 'todo_write') {
+      const input = calls[i].input as { todos?: TodoItem[] } | undefined;
+      if (Array.isArray(input?.todos)) return input.todos;
     }
   }
   return undefined;
@@ -165,23 +176,15 @@ export function compactHistoryMessages(
   const filesTouched = new Set<string>();
   const commandsRun: string[] = [];
 
-  for (const msg of discarded) {
-    if (msg.role === 'assistant') {
-      for (const block of msg.blocks) {
-        if (block.type === 'tool_call') {
-          const input = block.input as Record<string, unknown> | undefined;
-          if (['read_file', 'write_file', 'edit_file'].includes(block.name)) {
-            const path = (input?.filePath || input?.path) as string | undefined;
-            if (path && typeof path === 'string') {
-              filesTouched.add(path);
-            }
-          } else if (block.name === 'run_command') {
-            const cmd = input?.command as string | undefined;
-            if (cmd && typeof cmd === 'string') {
-              commandsRun.push(cmd.length > 50 ? cmd.slice(0, 47) + '...' : cmd);
-            }
-          }
-        }
+  for (const block of successfulToolCalls(discarded)) {
+    const input = block.input as Record<string, unknown> | undefined;
+    if (['read_file', 'write_file', 'edit_file'].includes(block.name)) {
+      const path = (input?.filePath || input?.path) as string | undefined;
+      if (path && typeof path === 'string') filesTouched.add(path);
+    } else if (block.name === 'run_command') {
+      const cmd = input?.command as string | undefined;
+      if (cmd && typeof cmd === 'string') {
+        commandsRun.push(cmd.length > 50 ? cmd.slice(0, 47) + '...' : cmd);
       }
     }
   }

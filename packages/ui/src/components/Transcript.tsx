@@ -456,8 +456,8 @@ function ItemView({
     }
     case 'tool':
       if (item.question) return null;
-      if (item.name === 'todo_write') {
-        // 独立视窗内移除重复的 TodoCard，仅保留顶部吸顶任务清单与回合折叠态汇总
+      if (item.name === 'todo_write' && item.status !== 'denied' && item.status !== 'error') {
+        // 成功清单避免重复展示；拒绝/失败保留工具卡片，不能当作已更新清单。
         return null;
       }
       if (item.name === 'run_command') {
@@ -835,7 +835,7 @@ const TurnView = memo(function TurnView({ turn, live, revision, jumpTick, checkp
   const latestTodoTool = turn.items
     .slice()
     .reverse()
-    .find((i): i is ToolItem => i.kind === 'tool' && i.name === 'todo_write');
+    .find((i): i is ToolItem => i.kind === 'tool' && i.name === 'todo_write' && i.status === 'ok');
   // 快照列表通过 Props 传入，非结构性刷新/撤销状态变化也必须使历史视图失效。
   const checkpoint = useMemo(
     () => !live ? store.getTurnCheckpointForTurn(turn) : undefined,
