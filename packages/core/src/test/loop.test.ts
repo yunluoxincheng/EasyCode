@@ -13,7 +13,8 @@ import {
   createBuiltinTools,
   runAgentLoop,
   toOpenAIWireMessages,
-  toAnthropicWireMessages
+  toAnthropicWireMessages,
+  UserQuestionManager, ResponsesProvider, extractLatestTodos
 } from '../index.js';
 
 /** 收集事件 + 消息的测试脚手架 */
@@ -80,27 +81,78 @@ test('【P2 拒绝态】权限规则拒绝时 tool_result 事件显式携带 app
   assert.equal(event.timing.executionMs, undefined);
 });
 
-test('循环：工具调用 → 结果回传 → 第二轮完成', async () => {
-  const env = makeEnv('yolo');
-  const call: ToolCallBlock = {
-    type: 'tool_call',
-    id: 'c1',
-    name: 'read_file',
-    input: { path: 'hello.txt' },
-  };
-  const provider = scriptedProvider([
-    { blocks: [call] },
-    { blocks: [{ type: 'text', text: '读完了' }] },
-  ]);
-  const result = await runAgentLoop({ ...env, provider, tools: toolsFor(), workspace: '/ws', systemPrompt: 's' });
-  assert.equal(result.reason, 'completed');
-  const toolResult = env.messages.find((m) => m.role === 'tool_result');
-  assert.ok(toolResult, '缺少 tool_result 消息');
-  assert.equal(toolResult.role, 'tool_result');
-  assert.match(toolResult.content, /hello easycode/);
-  // 事件序列包含 tool_call_start 与 tool_result
-  assert.ok(env.events.some((e) => e.type === 'tool_call_start'));
-  assert.ok(env.events.some((e) => e.type === 'tool_result'));
+test('交互批次：答案重规划前不执行旧参数，停止也补齐全部协议结果', async (t) => {
+  for (const cancel of [false, true]) {
+    const env = makeEnv('yolo');
+    const controller = new AbortController();
+    const writes: string[] = [];
+    let commands = 0;
+    const write = env.host.fs.writeFile;
+    env.host.fs.writeFile = async (path, content) => { writes.push(content); await write(path, content); };
+    env.host.process.run = async () => { commands++; return { code: 0, stdout: '', stderr: '' }; };
+    const calls: ToolCallBlock[] = [
+      { type: 'tool_call', id: 'old_before', name: 'write_file', input: { path: 'db.txt', content: 'postgresql' } },
+      { type: 'tool_call', id: 'question', name: 'ask_user', input: { questions: [{ id: 'db', question: 'Database?', options: [{ label: 'PostgreSQL' }, { label: 'MySQL' }] }] } },
+      { type: 'tool_call', id: 'old_after', name: 'run_command', input: { command: 'install postgresql' } },
+      { type: 'tool_call', id: 'old_todo', name: 'todo_write', input: { todos: [{ content: 'use postgresql', status: 'pending' }] } },
+    ];
+    let writesAtQuestion: string[] = [];
+    let todosAtQuestion: unknown;
+    const questions = new UserQuestionManager((event) => {
+      env.events.push(event);
+      if (event.type === 'question_request') {
+        writesAtQuestion = [...writes];
+        todosAtQuestion = extractLatestTodos(env.messages);
+        if (cancel) controller.abort();
+        else questions.respond(event.request.requestId, [{ questionId: 'db', selectedOption: 'MySQL' }]);
+      }
+    });
+    let rounds = 0;
+    const provider: Provider = { id: 'fixed-mixed-batch', async stream(request) {
+      rounds++;
+      if (rounds === 1) return { blocks: calls };
+      if (rounds === 2) {
+        const results = request.messages.filter((message) => message.role === 'tool_result');
+        assert.deepEqual(results.map((message) => message.toolCallId).sort(), calls.map((call) => call.id).sort());
+        const answer = results.find((message) => message.toolCallId === 'question')!;
+        assert.equal(JSON.parse(answer.content).answers[0].selectedOption, 'MySQL');
+        assert.equal(extractLatestTodos(request.messages), undefined, '未执行的预生成清单不能覆盖真实状态');
+        return { blocks: [
+          { type: 'tool_call', id: 'read_after_answer', name: 'read_file', input: { path: 'hello.txt' } },
+          { type: 'tool_call', id: 'mysql_after_answer', name: 'write_file', input: { path: 'db.txt', content: 'mysql' } },
+        ] };
+      }
+      return { blocks: [{ type: 'text', text: 'done' }] };
+    } };
+    const result = await runAgentLoop({ ...env, provider, questions, tools: toolsFor(), signal: controller.signal, workspace: '/ws', systemPrompt: 's' });
+    assert.equal(result.reason, cancel ? 'aborted' : 'completed');
+    assert.deepEqual(writesAtQuestion, []);
+    assert.equal(todosAtQuestion, undefined);
+    assert.deepEqual(writes, cancel ? [] : ['mysql']);
+    assert.equal(commands, 0);
+    assert.equal(rounds, cancel ? 1 : 3);
+    const results = env.messages.filter((message) => message.role === 'tool_result');
+    assert.equal(results.length, cancel ? 4 : 6);
+    for (const call of calls.filter((call) => call.id !== 'question')) {
+      const deferred = results.find((message) => message.toolCallId === call.id)!;
+      assert.equal(deferred.isError, true);
+      assert.equal(env.events.some((event) => event.type === 'tool_execution_start' && event.callId === call.id), false);
+    }
+    if (!cancel) assert.match(results.find((message) => message.toolCallId === 'read_after_answer')!.content, /hello easycode/);
+    const expected = results.map((message) => message.toolCallId);
+    assert.deepEqual(toOpenAIWireMessages(env.messages).filter((message) => message.role === 'tool').map((message) => message.tool_call_id), expected);
+    const anthropic = toAnthropicWireMessages(env.messages).flatMap((message) => message.content as Array<{ type: string; tool_use_id?: string }>);
+    assert.deepEqual(anthropic.filter((block) => block.type === 'tool_result').map((block) => block.tool_use_id), expected);
+    let responseIds: string[] = [];
+    t.mock.method(globalThis, 'fetch', async (_input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+      const body = JSON.parse(String(init?.body));
+      responseIds = body.input.filter((item: { type: string }) => item.type === 'function_call_output').map((item: { call_id: string }) => item.call_id);
+      return new Response('data: {"type":"response.completed","response":{"output":[]}}\n\n', { headers: { 'content-type': 'text/event-stream' } });
+    });
+    await new ResponsesProvider('wire-check', { baseURL: 'https://example.invalid', model: 'test' }).stream({ messages: env.messages, tools: [] }, { signal: new AbortController().signal, emit: () => {} });
+    assert.deepEqual(responseIds, expected);
+    t.mock.restoreAll();
+  }
 });
 
 test('审批：拒绝时工具不执行，模型收到拒绝说明', async () => {

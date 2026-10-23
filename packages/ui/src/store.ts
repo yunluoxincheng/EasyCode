@@ -12,7 +12,7 @@ import type {
   UserQuestionRequest,
   UserQuestion,
 } from '@easycode/core';
-import { parseUserQuestions, parseUserAnswers } from '@easycode/core';
+import { parseUserQuestions, parseUserAnswers, extractLatestTodos } from '@easycode/core';
 import {
   providerLabel,
   type ProjectEntry,
@@ -949,21 +949,7 @@ export class AppStore {
   }
 
   private extractTodosFromSession(data: SessionData): TodoItem[] {
-    for (let i = data.messages.length - 1; i >= 0; i--) {
-      const msg = data.messages[i];
-      if (msg.role === 'assistant') {
-        for (let j = msg.blocks.length - 1; j >= 0; j--) {
-          const block = msg.blocks[j];
-          if (block.type === 'tool_call' && block.name === 'todo_write') {
-            const input = block.input as { todos?: TodoItem[] } | undefined;
-            if (Array.isArray(input?.todos)) {
-              return input.todos;
-            }
-          }
-        }
-      }
-    }
-    return [];
+    return extractLatestTodos(data.messages) ?? [];
   }
 
   /* ---------------- 操作 ---------------- */
@@ -1768,12 +1754,6 @@ export class AppStore {
         state.preparingTool = undefined;
         if (isActive) this.flushPendingNotify();
         this.flushAssistantInState(state);
-        if (event.call.name === 'todo_write') {
-          const input = event.call.input as { todos?: TodoItem[] } | undefined;
-          if (Array.isArray(input?.todos)) {
-            state.activeTodos = input.todos;
-          }
-        }
         this.pushToTurnInState(state, {
           kind: 'tool',
           id: this.nextId(),
@@ -1810,7 +1790,7 @@ export class AppStore {
             tool.result = event.content;
             tool.durationMs = event.durationMs;
             tool.timing = event.timing;
-            if (tool.name === 'todo_write' && !event.isError) {
+            if (tool.name === 'todo_write' && !event.isError && event.approved !== false) {
               const input = tool.input as { todos?: TodoItem[] } | undefined;
               if (Array.isArray(input?.todos)) {
                 state.activeTodos = input.todos;

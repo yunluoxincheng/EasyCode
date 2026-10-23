@@ -3,6 +3,7 @@ import { parseUserQuestions } from '../questions.js';
 
 export const askUserTool: Tool = {
   requiresWorkspace: false,
+  interactionBoundary: true,
   validateInput(input) {
     try { return { ok: true, value: { questions: parseUserQuestions(input) } }; }
     catch (error) { return { ok: false, error: error instanceof Error ? error.message : String(error) }; }
@@ -10,6 +11,7 @@ export const askUserTool: Tool = {
   spec: {
     name: 'ask_user',
     description: '需要澄清需求、补充信息或由用户选择方案时，提出 1–3 个相关问题并等待实际回答。' +
+      '请单独调用本工具；同批其他预生成调用不会执行，收到回答后须先重新规划工具参数。' +
       '可提供 2–6 个选项（每项有 label 和可选 description），也可仅自由文本；任何选项都不代表默认回答。' +
       '收到回答后继续同一任务；问题与工具执行审批不同，YOLO 也必须等待用户提交。',
     parameters: {

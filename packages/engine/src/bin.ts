@@ -11,7 +11,7 @@
 import { homedir } from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
-import readline from 'node:readline';
+import { CliInput } from './cli-input.js';
 import { NodeHost } from '@easycode/host-node';
 import { AgentServer } from './index.js';
 import type { AgentEvent, UserAnswer, UserQuestionRequest } from '@easycode/core';
@@ -70,16 +70,6 @@ const yellow = (s: string) => `\x1b[33m${s}\x1b[0m`;
 const red = (s: string) => `\x1b[31m${s}\x1b[0m`;
 const green = (s: string) => `\x1b[32m${s}\x1b[0m`;
 
-async function confirm(question: string): Promise<boolean> {
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  return new Promise((resolve) => {
-    rl.question(`${yellow('?')} ${question} (y/N) `, (answer) => {
-      rl.close();
-      resolve(/^y(es)?$/i.test(answer.trim()));
-    });
-  });
-}
-
 function printEvent(event: AgentEvent, askConfirm: (q: string) => Promise<boolean>): void {
   switch (event.type) {
     case 'assistant_start':
@@ -127,7 +117,7 @@ function printEvent(event: AgentEvent, askConfirm: (q: string) => Promise<boolea
 
 let onApproval: ((requestId: string, approved: boolean) => void) | null = null;
 
-async function answerQuestions(request: UserQuestionRequest, signal: AbortSignal): Promise<UserAnswer[]> {
+async function answerQuestions(request: UserQuestionRequest, signal: AbortSignal, input: CliInput): Promise<UserAnswer[]> {
   const answers: UserAnswer[] = [];
   for (const question of request.questions) {
     signal.throwIfAborted();
@@ -135,28 +125,7 @@ async function answerQuestions(request: UserQuestionRequest, signal: AbortSignal
     question.options?.forEach((option, index) => console.log(`  ${index + 1}. ${option.label}${option.description ? ` — ${option.description}` : ''}`));
     let value = '';
     while (!value.trim()) {
-      value = await new Promise<string>((resolve, reject) => {
-        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-        let settled = false;
-        const cancel = () => {
-          if (settled) return;
-          settled = true;
-          signal.removeEventListener('abort', cancel);
-          rl.close();
-          reject(new DOMException('Question cancelled', 'AbortError'));
-        };
-        signal.addEventListener('abort', cancel, { once: true });
-        rl.once('close', cancel);
-        rl.once('SIGINT', cancel);
-        if (signal.aborted) { cancel(); return; }
-        rl.question('回答（选项编号或自由文本）：', (input) => {
-          if (settled) return;
-          settled = true;
-          signal.removeEventListener('abort', cancel);
-          rl.close();
-          resolve(input);
-        });
-      });
+      value = await input.read('回答（选项编号或自由文本）：', signal);
     }
     const index = /^\d+$/.test(value.trim()) ? Number(value.trim()) - 1 : -1;
     const selected = question.options?.[index];
@@ -173,6 +142,12 @@ async function main(): Promise<number> {
     return 1;
   }
 
+  const input = new CliInput(process.stdin, process.stdout);
+  try { return await run(args, input); }
+  finally { input.close(); }
+}
+
+async function run(args: Args, input: CliInput): Promise<number> {
   const dataDir = args.dataDir ?? path.join(homedir(), '.easycode');
   const host = new NodeHost({ dataDir });
   const server = new AgentServer(host);
@@ -199,15 +174,21 @@ async function main(): Promise<number> {
   console.log(dim(`EasyCode CLI | 工作区: ${session.workspaceRoot} | Provider: ${args.provider}${args.model ? ` (${args.model})` : ''} | 模式: ${args.yolo ? 'YOLO' : 'ASK'}`));
 
   onApproval = (requestId, approved) => server.respondApproval(session.id, requestId, approved);
-  const askConfirm = (q: string) => confirm(q);
   const questions = new Map<string, AbortController>();
   let questionCancelled = false;
+  const inputFailed = () => { questionCancelled = true; void server.abort(session.id); };
+  if (input.signal.aborted) return input.signal.reason?.name === 'AbortError' ? 130 : 1;
+  input.signal.addEventListener('abort', inputFailed, { once: true });
+  const askConfirm = async (question: string) => {
+    try { return /^y(es)?$/i.test((await input.read(`${yellow('?')} ${question} (y/N) `)).trim()); }
+    catch { questionCancelled = true; void server.abort(session.id); return false; }
+  };
   server.onEvent(({ event }) => {
     printEvent(event, askConfirm);
     if (event.type === 'question_request') {
       const controller = new AbortController();
       questions.set(event.request.requestId, controller);
-      void answerQuestions(event.request, controller.signal).then((answers) => {
+      void answerQuestions(event.request, controller.signal, input).then((answers) => {
         server.respondQuestion(session.id, event.request.requestId, answers);
       }).catch((error) => {
         if (!controller.signal.aborted) {
@@ -226,9 +207,11 @@ async function main(): Promise<number> {
   } catch (err) {
     console.error(red(`失败: ${err instanceof Error ? err.message : String(err)}`));
     return 1;
+  } finally {
+    input.signal.removeEventListener('abort', inputFailed);
   }
   process.stdout.write('\n');
-  return questionCancelled ? 1 : 0;
+  return input.signal.aborted && input.signal.reason?.name === 'AbortError' ? 130 : questionCancelled ? 1 : 0;
 }
 
 main().then(

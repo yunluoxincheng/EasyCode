@@ -97,6 +97,8 @@ export interface Tool {
   sensitive?: boolean;
   /** 是否依赖工作区（默认 true）；false 则未绑定项目的会话也可执行（如联网搜索） */
   requiresWorkspace?: boolean;
+  /** 独占本次工具批次；其余预生成调用只返回未执行结果，下一步由模型重新规划。 */
+  interactionBoundary?: boolean;
   execute(input: unknown, ctx: ToolContext): Promise<string>;
 }
 

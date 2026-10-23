@@ -1,12 +1,12 @@
 import type { AgentEvent } from './events.js';
 import type { Host } from './host.js';
-import type { ChatMessage, ToolResultMessage } from './types.js';
+import type { ChatMessage, ToolCallBlock, ToolResultMessage } from './types.js';
 import type { Provider, StreamRequest } from './providers/index.js';
 import { extractToolCalls } from './providers/index.js';
 import { ApprovalManager } from './approval.js';
-import { executeTool, getToolExecutionOutcome, ToolRegistry, type FileChangeEvent } from './tools/index.js';
+import { executeTool, getToolExecutionOutcome, ToolRegistry, type FileChangeEvent, type ToolExecution } from './tools/index.js';
 import { compactHistoryMessages, pruneHistoricalToolResults } from './compaction.js';
-import { startDecisionObservation, type DecisionPolicy, type DecisionObservation } from './policy.js';
+import { startDecisionObservation, type DecisionPolicy, type DecisionObservation, type DecisionOutcome } from './policy.js';
 import type { PermissionRule } from './permissions.js';
 import type { BackgroundTaskManager } from './tasks.js';
 import type { UserQuestionManager } from './questions.js';
@@ -163,6 +163,8 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
   let pendingRecoveries: Array<{ observation: DecisionObservation; name: string; input: unknown }> = [];
   let reasoningObs: DecisionObservation | undefined;
   let lastCompletedStep = 0;
+  let activeCalls: ToolCallBlock[] = [];
+  let settledCalls = new Set<ToolCallBlock>();
   try {
     const readFiles = new Set<string>();
     for (let step = 0; step < maxSteps; step++) {
@@ -248,10 +250,12 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
       if (signal.aborted) return finish('aborted');
       const assistantMessage = stamp({ role: 'assistant', blocks: turn.blocks });
       messages.push(assistantMessage);
+      const calls = extractToolCalls(turn.blocks);
+      activeCalls = calls;
+      settledCalls = new Set();
       onMessage?.(assistantMessage);
       emit({ type: 'step_end', usage: turn.usage });
 
-      const calls = extractToolCalls(turn.blocks);
       let recoveryFollowup: DecisionObservation | undefined;
       if (pendingRecoveries.length > 0) {
         const first = calls[0];
@@ -313,9 +317,23 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
         return finish('completed');
       }
 
-      for (const call of calls) {
-        if (signal.aborted) return finish('aborted');
+      // 注册工具声明交互边界；不能证明同批预生成调用独立，边界前后的调用均暂不执行。
+      const boundary = calls.find((call) => tools.get(call.name)?.interactionBoundary);
+      // 先明确撤销其余调用，再等待交互；等待期间的回读也不能把旧计划当作已执行。
+      const executionCalls = boundary ? [...calls.filter((call) => call !== boundary), boundary] : calls;
+      for (const call of executionCalls) {
         emit({ type: 'tool_call_start', call });
+        if (signal.aborted || (boundary && call !== boundary)) {
+          recordToolResult(call, unexecuted(signal.aborted
+            ? '当前回合已停止，本调用未执行。'
+            : '本批次存在用户交互，本调用未执行。请先读取交互结果，再根据实际回答重新规划并生成新的工具参数。'));
+          if (call === calls[0]) {
+            const outcome: DecisionOutcome = { status: 'unknown', evidence: 'Tool batch interrupted or deferred at interaction boundary' };
+            toolRoutingFollowup?.outcome(outcome);
+            recoveryFollowup?.outcome(outcome);
+          }
+          continue;
+        }
         const execution = await executeTool(tools, call.name, call.input, {
           questions,
           host,
@@ -367,30 +385,9 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
           if (observation) pendingRecoveries.push({ observation, name: call.name, input: call.input });
         }
 
-        emit({
-          type: 'tool_result',
-          callId: call.id,
-          toolName: call.name,
-          content: execution.content,
-          isError: execution.isError,
-          durationMs: execution.durationMs,
-          timing: execution.timing,
-          // 结构化传递「是否被批准」：权限规则拒绝也必须让 UI 显示拒绝态，
-          // 不能靠匹配提示文本（TODOS #47）
-          approved: execution.approved,
-        });
-        const resultMessage: ToolResultMessage = {
-          role: 'tool_result',
-          toolCallId: call.id,
-          toolName: call.name,
-          content: execution.content,
-          isError: execution.isError,
-        };
-        const stampedResult = stamp(resultMessage);
-        messages.push(stampedResult);
-        onMessage?.(stampedResult);
-        if (signal.aborted) return finish('aborted');
+        recordToolResult(call, execution);
       }
+      if (signal.aborted) return finish('aborted');
 
       // 决策点 3：上下文压缩前瞻旁路（TODOS #40 context_management）
       let contextObservation: DecisionObservation | undefined;
@@ -459,6 +456,10 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
   }
 
   function finish(reason: LoopResult['reason'], errorMessage?: string): LoopResult {
+    // 中止或异常也为本批每个调用保留结果，不给 Provider 留下悬空 ID。
+    for (const call of activeCalls) {
+      if (!settledCalls.has(call)) recordToolResult(call, unexecuted('当前回合已结束，本调用未获得完成结果，已中断；请勿将此结果视为执行成功。'));
+    }
     if (reasoningObs) {
       reasoningObs.outcome({
         status: reason === 'completed' ? 'success' : 'failure',
@@ -472,5 +473,21 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
     pendingRecoveries = [];
     emit({ type: 'done', reason });
     return errorMessage === undefined ? { reason } : { reason, errorMessage };
+  }
+
+  function unexecuted(content: string): ToolExecution {
+    return { content, approved: false, isError: true, durationMs: 0, timing: { approvalMs: 0 } };
+  }
+
+  function recordToolResult(call: ToolCallBlock, execution: ToolExecution): void {
+    const resultMessage: ToolResultMessage = {
+      role: 'tool_result', toolCallId: call.id, toolName: call.name,
+      content: execution.content, isError: execution.isError,
+    };
+    const stampedResult = stamp(resultMessage);
+    messages.push(stampedResult);
+    settledCalls.add(call);
+    onMessage?.(stampedResult);
+    emit({ type: 'tool_result', callId: call.id, toolName: call.name, ...execution });
   }
 }

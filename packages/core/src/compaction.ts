@@ -94,17 +94,21 @@ export function pruneHistoricalToolResults(
 
 /** 从会话消息列表中提取最新的 todo_write 任务清单快照 */
 export function extractLatestTodos(messages: ChatMessage[]): TodoItem[] | undefined {
+  const failed = new Set<string>();
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
+    if (msg.role === 'tool_result' && msg.isError) failed.add(msg.toolCallId);
     if (msg.role === 'assistant') {
-      for (const block of msg.blocks) {
-        if (block.type === 'tool_call' && block.name === 'todo_write') {
+      for (const block of [...msg.blocks].reverse()) {
+        if (block.type === 'tool_call' && block.name === 'todo_write' && !failed.has(block.id)) {
           const input = block.input as { todos?: TodoItem[] } | undefined;
           if (Array.isArray(input?.todos)) {
             return input.todos;
           }
         }
       }
+      // 调用 ID 只在该助手批次内匹配，后续批次复用 ID 不影响早期已执行的清单。
+      for (const block of msg.blocks) if (block.type === 'tool_call') failed.delete(block.id);
     }
   }
   return undefined;
