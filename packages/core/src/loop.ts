@@ -9,8 +9,10 @@ import { compactHistoryMessages, pruneHistoricalToolResults } from './compaction
 import { startDecisionObservation, type DecisionPolicy, type DecisionObservation } from './policy.js';
 import type { PermissionRule } from './permissions.js';
 import type { BackgroundTaskManager } from './tasks.js';
+import type { UserQuestionManager } from './questions.js';
 
 export interface LoopOptions {
+  questions?: UserQuestionManager;
   provider: Provider;
   tools: ToolRegistry;
   host: Host;
@@ -153,6 +155,7 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
     backgroundTasks,
     onFileChange,
     permissionRules,
+    questions,
     onBeforeCompaction,
     onMessage,
   } = options;
@@ -314,6 +317,7 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
         if (signal.aborted) return finish('aborted');
         emit({ type: 'tool_call_start', call });
         const execution = await executeTool(tools, call.name, call.input, {
+          questions,
           host,
           workspace,
           signal,

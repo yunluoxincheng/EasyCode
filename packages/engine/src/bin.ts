@@ -14,7 +14,7 @@ import process from 'node:process';
 import readline from 'node:readline';
 import { NodeHost } from '@easycode/host-node';
 import { AgentServer } from './index.js';
-import type { AgentEvent } from '@easycode/core';
+import type { AgentEvent, UserAnswer, UserQuestionRequest } from '@easycode/core';
 
 interface Args {
   task: string;
@@ -127,6 +127,44 @@ function printEvent(event: AgentEvent, askConfirm: (q: string) => Promise<boolea
 
 let onApproval: ((requestId: string, approved: boolean) => void) | null = null;
 
+async function answerQuestions(request: UserQuestionRequest, signal: AbortSignal): Promise<UserAnswer[]> {
+  const answers: UserAnswer[] = [];
+  for (const question of request.questions) {
+    signal.throwIfAborted();
+    console.log(`\n[ WAIT ] ${question.question}`);
+    question.options?.forEach((option, index) => console.log(`  ${index + 1}. ${option.label}${option.description ? ` — ${option.description}` : ''}`));
+    let value = '';
+    while (!value.trim()) {
+      value = await new Promise<string>((resolve, reject) => {
+        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+        let settled = false;
+        const cancel = () => {
+          if (settled) return;
+          settled = true;
+          signal.removeEventListener('abort', cancel);
+          rl.close();
+          reject(new DOMException('Question cancelled', 'AbortError'));
+        };
+        signal.addEventListener('abort', cancel, { once: true });
+        rl.once('close', cancel);
+        rl.once('SIGINT', cancel);
+        if (signal.aborted) { cancel(); return; }
+        rl.question('回答（选项编号或自由文本）：', (input) => {
+          if (settled) return;
+          settled = true;
+          signal.removeEventListener('abort', cancel);
+          rl.close();
+          resolve(input);
+        });
+      });
+    }
+    const index = /^\d+$/.test(value.trim()) ? Number(value.trim()) - 1 : -1;
+    const selected = question.options?.[index];
+    answers.push(selected ? { questionId: question.id, selectedOption: selected.label } : { questionId: question.id, text: value.trim() });
+  }
+  return answers;
+}
+
 async function main(): Promise<number> {
   const args = parseArgs(process.argv.slice(2));
   if (!args.task) {
@@ -162,7 +200,26 @@ async function main(): Promise<number> {
 
   onApproval = (requestId, approved) => server.respondApproval(session.id, requestId, approved);
   const askConfirm = (q: string) => confirm(q);
-  server.onEvent(({ event }) => printEvent(event, askConfirm));
+  const questions = new Map<string, AbortController>();
+  let questionCancelled = false;
+  server.onEvent(({ event }) => {
+    printEvent(event, askConfirm);
+    if (event.type === 'question_request') {
+      const controller = new AbortController();
+      questions.set(event.request.requestId, controller);
+      void answerQuestions(event.request, controller.signal).then((answers) => {
+        server.respondQuestion(session.id, event.request.requestId, answers);
+      }).catch((error) => {
+        if (!controller.signal.aborted) {
+          console.error(red(`回答未提交: ${error instanceof Error ? error.message : '交互已取消'}`));
+          void server.cancelQuestion(session.id, event.request.requestId).catch(() => {});
+        }
+      }).finally(() => questions.delete(event.request.requestId));
+    } else if (event.type === 'question_resolved') {
+      if (event.result.status === 'cancelled') questionCancelled = true;
+      questions.get(event.result.requestId)?.abort();
+    }
+  });
 
   try {
     await server.sendMessage(session.id, args.task);
@@ -171,7 +228,7 @@ async function main(): Promise<number> {
     return 1;
   }
   process.stdout.write('\n');
-  return 0;
+  return questionCancelled ? 1 : 0;
 }
 
 main().then(

@@ -9,6 +9,8 @@ import {
   type BackgroundTaskInfo,
   type TestCommandDetection,
   type ToolSpec,
+  type UserAnswer,
+  type UserQuestionRequest,
 } from '@easycode/core';
 import { AgentServer, type AgentClient, type ProviderEntry, type Settings } from '@easycode/engine';
 import type {
@@ -82,6 +84,15 @@ export class IpcAgentClient implements AgentClient {
   }
   respondApproval(id: string, requestId: string, approved: boolean) {
     return this.invoke<void>('respond-approval', { id, requestId, approved });
+  }
+  getPendingQuestion(id: string) {
+    return this.invoke<UserQuestionRequest | null>('get-pending-question', { id });
+  }
+  respondQuestion(id: string, requestId: string, answers: UserAnswer[]) {
+    return this.invoke<void>('respond-question', { id, requestId, answers });
+  }
+  cancelQuestion(id: string, requestId: string) {
+    return this.invoke<void>('cancel-question', { id, requestId });
   }
   abort(id: string) {
     return this.invoke<void>('abort', { id });
@@ -312,6 +323,9 @@ export function createDemoClient(): AgentClient {
     sendMessage: (id, text) => wrap(() => server.sendMessage(id, text)),
     editLastUserMessage: (id, text) => wrap(() => server.editLastUserMessage(id, text)),
     editUserMessage: (id, messageId, text) => wrap(() => server.editUserMessage(id, messageId, text)),
+    getPendingQuestion: (id) => wrap(() => server.getPendingQuestion(id)),
+    respondQuestion: (id, requestId, answers) => wrap(() => { server.respondQuestion(id, requestId, answers); }),
+    cancelQuestion: (id, requestId) => wrap(() => server.cancelQuestion(id, requestId)),
     respondApproval: (id, requestId, approved) =>
       wrap(() => {
         server.respondApproval(id, requestId, approved);

@@ -38,7 +38,7 @@ function SessionItemRow({
 }: {
   session: SessionMetaLite;
   active: boolean;
-  status: 'idle' | 'running' | 'waiting' | 'error';
+  status: 'idle' | 'running' | 'waiting' | 'question' | 'error';
   onSelect: () => void;
   onDelete: () => void;
   onRename: (newTitle: string) => Promise<void>;
@@ -104,6 +104,8 @@ function SessionItemRow({
               title={
                 status === 'running'
                   ? '正在执行任务'
+                  : status === 'question'
+                    ? '等待用户回答'
                   : status === 'waiting'
                     ? '等待用户审批'
                     : '执行遇到错误'

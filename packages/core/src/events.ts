@@ -1,9 +1,12 @@
 import type { ChatMessage, TodoItem, ToolCallBlock, Usage } from './types.js';
 import type { BackgroundTaskInfo } from './tasks.js';
 import type { TestRunSummary } from './test-runner.js';
+import type { UserAnswer, UserQuestionRequest, UserQuestionResult } from './questions.js';
 
 /** 引擎 → UI 的单向事件流（传输层无关：IPC / 进程内 / CLI 终端皆可承载） */
 export type AgentEvent =
+  | { type: 'question_request'; request: UserQuestionRequest }
+  | { type: 'question_resolved'; callId: string; result: UserQuestionResult }
   | { type: 'user_message_committed'; messageId: string }
   | { type: 'history_replaced'; messages: ChatMessage[]; contextMessages: ChatMessage[]; todos: TodoItem[] }
   /** 全局 MCP 目录失效通知，不携带配置或凭据，sessionId 为空。 */
@@ -99,6 +102,8 @@ export type AgentEvent =
 export type ClientMessage =
   | { type: 'user_message'; text: string }
   | { type: 'approval_response'; requestId: string; approved: boolean }
+  | { type: 'question_response'; requestId: string; answers: UserAnswer[] }
+  | { type: 'question_cancel'; requestId: string }
   | { type: 'abort' };
 
 /** 极简强类型事件发射器（避免依赖 node:events，保证浏览器可运行） */

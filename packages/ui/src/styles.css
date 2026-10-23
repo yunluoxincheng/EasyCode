@@ -217,7 +217,7 @@ html.crt-off body::after {
   box-shadow: 0 0 6px var(--green);
   animation: pulse 1.2s infinite;
 }
-.session-status-dot.waiting {
+.session-status-dot.waiting, .session-status-dot.question {
   background: var(--amber);
   box-shadow: 0 0 6px var(--amber);
   animation: breathe 1.8s infinite ease-in-out;
@@ -4670,3 +4670,25 @@ select:focus-visible,
 .mcp-prompt-form { border: 1px solid var(--border); padding: 12px; margin-bottom: 10px; background: var(--panel); max-height: 35vh; overflow: auto; overscroll-behavior: contain; }
 .mcp-prompt-form .field { margin: 8px 0; }
 @media (max-width: 1000px) { .mcp-fields { grid-template-columns: 1fr; } }
+
+/* 会话内问答：独立于操作审批，沿用终端配色与原生键盘表单控件。 */
+.question-card { min-width: 0; border: 1px solid var(--amber); background: var(--panel); margin: 12px 0; }
+.question-card.answered { border-color: var(--green-dim); }
+.question-card.cancelled, .question-card.expired { border-color: var(--border); }
+.question-head { padding: 10px 12px; border-bottom: 1px solid var(--border); color: var(--amber); }
+.question-card.answered .question-head { color: var(--green); }
+.question-card.cancelled .question-head, .question-card.expired .question-head { color: var(--dim); }
+.question-field { min-inline-size: 0; margin: 14px 12px; padding: 0; border: 0; }
+.question-field legend { max-width: 100%; padding: 0 0 8px; color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; }
+.question-option { display: grid; grid-template-columns: 16px minmax(0, 1fr); gap: 8px; align-items: start; padding: 7px 0; cursor: pointer; overflow-wrap: anywhere; }
+.question-option input { margin: 3px 0 0; accent-color: var(--green); }
+.question-description { display: block; margin-top: 3px; color: var(--dim); white-space: pre-wrap; }
+.question-text-label { display: block; margin-top: 8px; color: var(--dim); font-size: 12px; }
+.question-text-label textarea { display: block; width: 100%; box-sizing: border-box; margin-top: 6px; min-height: 64px; max-height: 240px; padding: 8px 10px; resize: vertical; background: var(--bg); color: var(--text); border: 1px solid var(--border2); font: inherit; outline: none; }
+.question-text-label textarea:focus { border-color: var(--green); }
+.question-answer { max-height: 280px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--dim); }
+.question-answer strong { color: var(--green); }
+.question-answer p { margin: 4px 0; }
+.question-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; padding: 10px 12px; border-top: 1px solid var(--border); }
+.question-actions > span { flex: 1 1 220px; min-width: 0; color: var(--dim); font-size: 11px; }
+.question-actions .btn { flex-shrink: 0; }

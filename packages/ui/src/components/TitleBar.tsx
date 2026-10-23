@@ -53,7 +53,7 @@ export function TitleBar(): React.ReactElement {
       </div>
       <div className="titlebar-right" data-tauri-drag-region>
         <GitCapsule />
-        {store.running && <span className="titlebar-live">● AGENT RUNNING</span>}
+        {store.running && <span className="titlebar-live">{store.pendingQuestion ? '[ WAIT ] 等待回答' : '● AGENT RUNNING'}</span>}
       </div>
       <ExportButton />
       <HelpButton />

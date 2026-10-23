@@ -1,10 +1,12 @@
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { useStore, useStoreApi } from '../useStore.js';
+import { QuestionCard } from './QuestionCard.js';
 import { renderMarkdown } from '../markdown.js';
 import { renderAnsi } from '../ansi.js';
 import { diffLines, type TodoItem } from '@easycode/core';
 import type {
   ApprovalItem,
+  QuestionItem,
   AppStore,
   AssistantItem,
   ErrorItem,
@@ -434,7 +436,7 @@ function ItemView({
   item,
   streaming = false,
 }: {
-  item: AssistantItem | ToolItem | ApprovalItem | ErrorItem | TestRunItem;
+  item: AssistantItem | ToolItem | ApprovalItem | ErrorItem | TestRunItem | QuestionItem;
   streaming?: boolean;
 }) {
   switch (item.kind) {
@@ -453,6 +455,7 @@ function ItemView({
       );
     }
     case 'tool':
+      if (item.question) return null;
       if (item.name === 'todo_write') {
         // 独立视窗内移除重复的 TodoCard，仅保留顶部吸顶任务清单与回合折叠态汇总
         return null;
@@ -463,6 +466,8 @@ function ItemView({
       return <ToolCard item={item} />;
     case 'approval':
       return <ApprovalCard item={item} />;
+    case 'question':
+      return <QuestionCard item={item} />;
     case 'testrun':
       return <TestRunCard item={item} />;
     case 'error':
@@ -606,8 +611,9 @@ function LiveTicker() {
   const [elapsed, setElapsed] = useState('0.0');
   const activeTool = store.activeTool;
   const pendingApproval = store.pendingApproval;
+  const pendingQuestion = store.pendingQuestion;
   const preparingTool = store.preparingTool;
-  const startedAt = activeTool?.executionStartedAt;
+  const startedAt = pendingQuestion ? undefined : activeTool?.executionStartedAt;
 
   useEffect(() => {
     if (!startedAt) {
@@ -623,6 +629,13 @@ function LiveTicker() {
     return () => clearInterval(timer);
   }, [startedAt]);
 
+  if (pendingQuestion) {
+    return <div className="live-ticker waiting">
+      <span className="live-ticker-prefix">❯</span>
+      <span className="live-ticker-badge wait">[ WAIT ]</span>
+      <span className="live-ticker-text">等待用户回答问题...</span>
+    </div>;
+  }
   if (pendingApproval) {
     const label = toolLabel(pendingApproval.name);
     return (

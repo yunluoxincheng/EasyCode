@@ -19,6 +19,8 @@ import { searchFilesTool } from './search.js';
 import { runCommandTool } from './shell.js';
 import { readTaskLogsTool, stopTaskTool } from './tasks.js';
 import { todoWriteTool } from './todo.js';
+import { askUserTool } from './questions.js';
+import type { UserQuestionManager } from '../questions.js';
 import { createWebSearchTool, type WebSearchBackendConfig } from './websearch.js';
 import {
   gitStatusTool,
@@ -63,6 +65,7 @@ export interface FileChangeEvent {
 }
 
 export interface ToolContext {
+  questions?: UserQuestionManager;
   host: Host;
   workspace: string;
   signal: AbortSignal;
@@ -140,6 +143,7 @@ export function createBuiltinTools(options?: {
     .register(readTaskLogsTool)
     .register(stopTaskTool)
     .register(todoWriteTool)
+    .register(askUserTool)
     .register(gitStatusTool)
     .register(gitDiffTool);
   if (options?.webSearch) registry.register(createWebSearchTool(options.webSearch));
