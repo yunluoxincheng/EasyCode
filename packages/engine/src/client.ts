@@ -37,6 +37,11 @@ import type { McpServerStatus, McpCommand } from './mcp.js';
  * 定义在 engine 层，使各宿主实现无需反向依赖 UI。
  */
 export interface AgentClient {
+  openTerminal?(id: string): Promise<import('./terminals.js').TerminalSnapshot>;
+  readTerminal?(id: string, cursor?: number): Promise<import('./terminals.js').TerminalSnapshot | null>;
+  writeTerminal?(id: string, terminalId: string, data: string): Promise<void>;
+  resizeTerminal?(id: string, terminalId: string, cols: number, rows: number): Promise<void>;
+  closeTerminal?(id: string, terminalId: string): Promise<void>;
   getMcpServers?(): Promise<McpServerStatus[]>;
   retryMcpServer?(id: string): Promise<void>;
   getMcpCommands?(): Promise<McpCommand[]>;

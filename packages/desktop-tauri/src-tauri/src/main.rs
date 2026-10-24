@@ -18,6 +18,10 @@ use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 mod secrets;
 mod stdio;
+mod terminal;
+#[cfg(unix)]
+mod terminal_unix;
+use terminal::{terminal_open, terminal_read, terminal_write, terminal_resize, terminal_close, terminal_reset};
 #[cfg(windows)]
 #[path = "stdio_job.rs"]
 mod foreground_job;
@@ -1025,6 +1029,8 @@ mod process_lifecycle_tests {
         spawns.0.lock().unwrap().insert(info.id.clone(), info.clone());
         stop_registered_process(&pids, &spawns, &info.id, |_| panic!("no handle must not kill")).unwrap();
         assert!(spawns.0.lock().unwrap().is_empty(), "orphaned recovery metadata is discarded");
+        #[cfg(unix)]
+        crate::terminal::assert_natural_exit_cleanup();
     }
 }
 
@@ -1452,6 +1458,7 @@ fn main() {
         .manage(PidMap::default())
         .manage(ForegroundMap::default())
         .manage(stdio::StdioMap::default())
+        .manage(terminal::TerminalMap::default())
         .manage(SpawnMap::default())
         .manage(HttpAbortMap::default())
         .manage(CloseToTrayState(Mutex::new(true))) // 默认开启关闭最小化到托盘
@@ -1520,6 +1527,12 @@ fn main() {
             stdio_close,
             stdio_reset,
             stdio_ack,
+            terminal_open,
+            terminal_read,
+            terminal_write,
+            terminal_resize,
+            terminal_close,
+            terminal_reset,
             secret_status,
             secret_get,
             secret_set,
@@ -1559,6 +1572,7 @@ fn main() {
             ) {
                 kill_all_spawned(app_handle);
                 stdio::cleanup(app_handle);
+                terminal::cleanup(app_handle);
             }
         });
 }

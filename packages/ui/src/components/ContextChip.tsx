@@ -79,7 +79,7 @@ export function ContextChip({ compact = false }: { compact?: boolean }) {
             ? `上下文容量 ${fmtTk(used)} / ${fmtTk(windowTok)} tk（${pct.toFixed(1)}%）${
                 isDanger ? ' · 严重超限风险' : isWarn ? ' · 接近警戒线' : ''
               } · 悬停查看`
-            : '上下文容量'
+            : '上下文容量（本地估算）'
         }
         onClick={() => setOpen(!open)}
       >
@@ -111,7 +111,7 @@ export function ContextChip({ compact = false }: { compact?: boolean }) {
       </button>
       {open && (
         <div className="usage-pop ctx-pop">
-          <div className="ctx-title">上下文容量</div>
+          <div className="ctx-title">上下文容量（本地估算）</div>
           <div className="ctx-big">
             {fmtTk(used)} / {fmtTk(windowTok)}{' '}
             <span className={`ctx-pct ${isDanger ? 'danger' : isWarn ? 'warn' : ''}`}>
@@ -157,18 +157,17 @@ export function ContextChip({ compact = false }: { compact?: boolean }) {
           <div className="ctx-pop-foot">
             <button
               className="proj-foot-item ctx-compact-btn"
-              disabled={store.running || userTurns <= 1}
+              disabled={store.running || store.compacting || userTurns <= 1}
               title={
                 userTurns <= 1
                   ? '单轮对话无需压缩'
                   : '智能归档早期轮次并修剪旧工具长输出，释放 Token 空间'
               }
               onClick={() => {
-                setOpen(false);
                 void store.compressContext();
               }}
             >
-              ✄ 压缩上下文（归档早期历史）
+              {store.compacting ? '[ WAIT ] 正在压缩上下文' : '✄ 压缩上下文（归档早期历史）'}
             </button>
           </div>
         </div>

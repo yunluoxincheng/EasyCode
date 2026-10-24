@@ -14,7 +14,7 @@ export interface McpPromptInfo {
 type Pending = { resolve(value: unknown): void; reject(error: Error): void };
 const MAX_FRAME = 1_048_576;
 const VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'];
-export const MCP_LIMITS = { servers: 8, tools: 128, prompts: 64 } as const;
+export const MCP_LIMITS = { servers: 8, tools: 128, prompts: 64, refreshPasses: 8, refreshMs: 30000 } as const;
 
 /** 纯协议客户端：无平台 API、无第三方运行时；远端错误不进入诊断日志。 */
 export class McpClient {
@@ -164,10 +164,15 @@ export class McpClient {
   }
 
   refresh(): Promise<void> {
+    if (this.closed) return Promise.reject(new Error('MCP 连接已关闭，请手动重连'));
     this.refreshDirty = true;
     if (this.refreshing) return this.refreshing;
+    // 总预算覆盖所有分页和连续重读；单个 request 的超时不能约束持续通知。
+    const deadline = setTimeout(() => this.fail('MCP 目录刷新超时，请手动重连'), Math.min(this.timeoutMs, MCP_LIMITS.refreshMs));
     this.refreshing = (async () => {
+      let passes = 0;
       do {
+      if (++passes > MCP_LIMITS.refreshPasses) throw new Error('MCP 目录持续变化，刷新预算已耗尽，请手动重连');
       this.refreshDirty = false;
       const tools = this.capabilities.tools ? await this.list('tools/list', 'tools', MCP_LIMITS.tools) : [];
       const prompts = this.capabilities.prompts ? await this.list('prompts/list', 'prompts', MCP_LIMITS.prompts) : [];
@@ -204,9 +209,19 @@ export class McpClient {
         try { this.onCatalogChange(); } catch { /* 观察者不控制协议生命周期。 */ }
       }
       } while (this.refreshDirty);
-    })().catch((error) => { this.refreshDirty = false; throw error; }).finally(() => {
+    })().catch((error) => {
+      this.refreshDirty = false;
+      this.fail('MCP 目录刷新失败或预算已耗尽，请手动重连');
+      throw error;
+    }).finally(() => {
+      clearTimeout(deadline);
       this.refreshing = undefined;
-      if (this.refreshDirty && !this.closed) return this.refresh();
+      // 不在 finally 无限续接新预算，否则等待初始化/目录的调用仍可能永不返回。
+      if (this.refreshDirty && !this.closed) {
+        this.refreshDirty = false;
+        this.fail('MCP 目录持续变化，请手动重连');
+        throw new Error('MCP 目录在刷新收尾时再次变化，请手动重连');
+      }
     });
     return this.refreshing;
   }

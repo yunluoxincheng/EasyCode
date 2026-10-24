@@ -1,4 +1,5 @@
 export { AgentServer } from './server.js';
+export type { TerminalSnapshot } from './terminals.js';
 export type { McpServerConfig, McpServerStatus, McpCommand } from './mcp.js';
 export { validateMcpServers } from './mcp.js';
 export type {
