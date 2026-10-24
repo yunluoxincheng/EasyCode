@@ -889,9 +889,6 @@ export class AgentServer {
           ? this.workspaceLocks.getLock(workspaceIdentity)
           : undefined,
       });
-      if (loopResult.reason === 'error' && loopResult.errorMessage) {
-        this.events.emit({ sessionId: id, event: { type: 'error', message: loopResult.errorMessage } });
-      }
     } finally {
       await shadowPolicy?.drain();
       if (wireMessages && wireMessages !== rt.data.messages) {
