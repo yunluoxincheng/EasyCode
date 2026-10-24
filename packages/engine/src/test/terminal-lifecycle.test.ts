@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { execFile } from 'node:child_process';
+import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { NodeHost } from '@easycode/host-node';
 import { MemoryHost, type Host } from '@easycode/core';
 import { AgentServer } from '../server.js';
@@ -34,10 +34,15 @@ test('真实 PTY：Shell 自然退出后仍能清理 nohup/后台进程及监督
   let shellExited = false;
   let exitEvents = 0;
   let background: number | undefined;
+  let sentinel: ChildProcess | undefined;
   const terminal = await host.terminal.open({ cwd: directory, cols: 90, rows: 20 }, {
     output: () => {}, exit: () => { shellExited = true; exitEvents++; },
   });
   try {
+    // 与 PTY 分离的真实会话；防止清理选择器误选 runner 或其他用户作业。
+    const independent = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { detached: true, stdio: 'ignore', windowsHide: true });
+    sentinel = independent;
+    await new Promise<void>((resolve, reject) => { independent.once('spawn', resolve); independent.once('error', reject); });
     if (process.platform === 'win32') {
       const quote = (text: string) => "'" + text.replaceAll("'", "''") + "'";
       await terminal.write(`Start-Process -FilePath ${quote(process.execPath)} -ArgumentList ${quote(`"${program}" "${ready}"`)} -NoNewWindow\r`);
@@ -55,10 +60,12 @@ test('真实 PTY：Shell 自然退出后仍能清理 nohup/后台进程及监督
     if (terminal.supervisorPid) assert.equal(await running(terminal.supervisorPid), true, 'resource identity remains alive');
     await terminal.close();
     await waitFor(async () => !await running(background!));
+    assert.equal(await running(independent.pid!), true, 'unrelated session must survive terminal cleanup');
     if (terminal.supervisorPid) assert.equal(await running(terminal.supervisorPid), false);
     assert.equal(exitEvents, 1, 'resource cleanup must not report Shell exit twice');
     await terminal.close();
   } finally {
+    if (sentinel?.exitCode === null && sentinel.signalCode === null) sentinel.kill('SIGKILL');
     if (background && await running(background)) {
       // 基线对照失败时也只清理本用例启动的进程，不根据过期 PID 无条件终止。
       const line = process.platform === 'win32'

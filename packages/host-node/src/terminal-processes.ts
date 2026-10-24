@@ -1,27 +1,36 @@
 import { execFile } from 'node:child_process';
 
 const pause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
-interface Member { pid: number; group: number; session: string; state: string }
+interface Member { pid: number; group: number; state: string }
+
+async function probe(args: string[]): Promise<{ text: string; probePid: number | undefined }> {
+  return new Promise((resolve, reject) => {
+    const child = execFile('ps', args, { timeout: 3000, maxBuffer: 4 * 1024 * 1024,
+      env: { ...process.env, COLUMNS: '120', LINES: '40' } },
+      (error, stdout) => error ? reject(new Error('无法确认终端归属')) : resolve({ text: stdout, probePid: child.pid }));
+  });
+}
 
 /** 只由仍存活的 PTY 监督进程查询自己的会话；不保存退出后的 PID/TTY 作为身份。 */
 async function members(): Promise<Member[]> {
-  const output = await new Promise<{ text: string; probePid: number | undefined }>((resolve, reject) => {
-    const probe = execFile('ps', ['-ax', '-o', 'pid=,pgid=,sess=,stat='], { timeout: 3000, maxBuffer: 4 * 1024 * 1024,
-      env: { ...process.env, COLUMNS: '120', LINES: '40' } },
-      (error, stdout) => error ? reject(new Error('无法确认终端会话身份')) : resolve({ text: stdout, probePid: probe.pid }));
-  });
+  // macOS 的 sess 是内核会话表示，不能与 POSIX SID 等同，也不能用其脱敏值分组。
+  // 监督进程仍存活并持有控制终端，TTY 不会因用户 Shell 退出而释放/复用。
+  const tty = (await probe(['-p', String(process.pid), '-o', 'tty='])).text.trim();
+  if (!tty || tty.length > 128 || !/^[A-Za-z0-9_/]+$/.test(tty)) throw new Error('监督进程没有可确认的控制终端');
+  const output = await probe(['-t', tty, '-o', 'pid=,pgid=,stat=']);
   const rows = output.text.trim().split('\n').map((line) => {
-    const [pid, group, session, state] = line.trim().split(/\s+/);
-    return { pid: Number(pid), group: Number(group), session, state };
-  }).filter((row) => Number.isInteger(row.pid) && row.pid > 0 && Number.isInteger(row.group) && row.group > 0 && row.session && row.state);
+    const [pid, group, state] = line.trim().split(/\s+/);
+    return { pid: Number(pid), group: Number(group), state };
+  }).filter((row) => Number.isInteger(row.pid) && row.pid > 1 && Number.isInteger(row.group) && row.group > 1 && row.state);
   const anchor = rows.find((row) => row.pid === process.pid);
-  if (!anchor || anchor.group !== process.pid || (process.platform === 'linux' && anchor.session !== String(process.pid))) {
+  if (!anchor || anchor.group !== process.pid) {
     throw new Error('终端监督进程未持有独立会话，拒绝清理无关进程');
   }
-  return rows.filter((row) => row.session === anchor.session && row.pid !== process.pid && row.pid !== output.probePid && !row.state.startsWith('Z'));
+  return rows.filter((row) => row.pid !== process.pid && row.pid !== output.probePid && !row.state.startsWith('Z'));
 }
 
 function signal(pid: number, value: NodeJS.Signals): void {
+  if (!Number.isInteger(pid) || Math.abs(pid) <= 1) throw new Error('拒绝向系统或广播目标发送终端信号');
   try { process.kill(pid, value); }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw new Error('终端作业结束失败，可重试'); }
 }
