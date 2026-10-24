@@ -38,6 +38,7 @@ fn groups(pid: u32) -> Result<HashSet<i32>, String> {
 }
 
 fn signal(group: i32, value: i32) -> Result<(), String> {
+    if group <= 1 { return Err("拒绝向系统或广播目标发送终端信号".into()); }
     if unsafe { libc::kill(-group, value) } == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) { Ok(()) }
     else { Err("终端作业组结束失败，可重试".into()) }
 }
