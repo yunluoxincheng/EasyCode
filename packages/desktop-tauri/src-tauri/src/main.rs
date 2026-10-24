@@ -19,6 +19,8 @@ use tauri_plugin_dialog::DialogExt;
 mod secrets;
 mod stdio;
 mod terminal;
+#[cfg(unix)]
+mod terminal_unix;
 use terminal::{terminal_open, terminal_read, terminal_write, terminal_resize, terminal_close, terminal_reset};
 #[cfg(windows)]
 #[path = "stdio_job.rs"]
@@ -1027,6 +1029,8 @@ mod process_lifecycle_tests {
         spawns.0.lock().unwrap().insert(info.id.clone(), info.clone());
         stop_registered_process(&pids, &spawns, &info.id, |_| panic!("no handle must not kill")).unwrap();
         assert!(spawns.0.lock().unwrap().is_empty(), "orphaned recovery metadata is discarded");
+        #[cfg(unix)]
+        crate::terminal::assert_natural_exit_cleanup();
     }
 }
 

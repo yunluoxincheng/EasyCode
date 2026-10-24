@@ -412,7 +412,7 @@ export class AgentServer {
           rt.data.todos = structuredClone(latestTodos);
         }
         rt.data.meta.updatedAt = new Date().toISOString();
-        try { await this.persistSession(rt); }
+        try { await this.persistSession(rt, true); }
         catch (error) { rt.data = previous; throw error; }
       }
       return rt.data;
@@ -483,7 +483,10 @@ export class AgentServer {
   closeTerminal(id: string, terminalId: string) { return this.terminals.close(id, terminalId); }
 
   async deleteSession(id: string): Promise<void> {
-    await this.terminals.removeSession(id);
+    return this.terminals.removeSession(id, () => this.finishSessionDeletion(id));
+  }
+
+  private async finishSessionDeletion(id: string): Promise<void> {
     const rt = this.sessions.get(id);
     if (rt) {
       // 删除标记必须先于 abort 落下：会话删除后，任何仍在运行的异步流程

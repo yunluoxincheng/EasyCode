@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { MemoryHost, type ChatMessage, type SessionData } from '@easycode/core';
+import { MemoryHost, ApprovalManager, createBuiltinTools, runAgentLoop, compactHistoryMessages, pruneHistoricalToolResults,
+  type ChatMessage, type SessionData } from '@easycode/core';
 import { AgentServer } from '../server.js';
+import { estimateContextTokens } from '../context-capacity.js';
 
 /** 协议级持久化历史：长输出仅用于检验原文与上下文的不同存储契约。 */
 async function loadHistory(turns: number) {
@@ -56,10 +58,47 @@ test('短历史手动裁剪：保留原始工具输出，重载与重复压缩�
   const oneTurn = await unchanged.server.trimSessionHistory(unchanged.id);
   assert.deepEqual(oneTurn.messages, unchanged.original);
   assert.equal(oneTurn.history, undefined, '无变化时不创建重复归档');
+
+  const repeated: ChatMessage[] = [{ role: 'user', content: 'old' },
+    { role: 'assistant', blocks: [{ type: 'tool_call', id: 'c', name: 'read_file', input: { path: 'f' } }] },
+    { role: 'tool_result', toolCallId: 'c', toolName: 'read_file', approved: true, content: ' '.repeat(1300) },
+    { role: 'user', content: 'recent' }, { role: 'user', content: 'current' }];
+  const before = await estimateContextTokens(repeated);
+  const candidate = compactHistoryMessages(structuredClone(repeated), { keepRecentTurns: 2, pruneTools: false }).messages;
+  assert.ok(await estimateContextTokens(candidate) >= before, 'fixture must reject summary by real token count');
+  const fallback = structuredClone(repeated);
+  assert.equal(pruneHistoricalToolResults(fallback, { keepRecentTurns: 2 }).modified, true);
+  assert.ok(await estimateContextTokens(fallback) > before, 'fewer characters can require more tokens');
+  // 同一个压缩入口验证 Token 收益及保护轮数；不创建新的注册用例。
+  for (const [messages, keepRecentTurns] of [[repeated, 2], [(await loadHistory(3)).original, 3]] as const) {
+    const input = structuredClone(messages);
+    let archived = false;
+    let received: ChatMessage[] = [];
+    const result = await runAgentLoop({ host, workspace: '/ws', systemPrompt: 'capacity', tools: createBuiltinTools(),
+      messages: input, signal: new AbortController().signal, approval: new ApprovalManager(() => {}, 'yolo'),
+      emit: () => {}, contextWindow: 1, keepRecentTurns, countContextTokens: estimateContextTokens,
+      onBeforeCompaction: () => { archived = true; },
+      provider: { id: 'counted', async stream(request) { received = structuredClone(request.messages); return { blocks: [{ type: 'text', text: 'done' }] }; } },
+    });
+    assert.equal(result.reason, 'completed');
+    assert.deepEqual(received, messages, 'non-beneficial or protected context must reach Provider unchanged');
+    assert.equal(archived, false);
+  }
 });
 
 test('压缩历史分叉：保留模型边界与锚点前缀，编辑重生成后重载排除旧上下文', async () => {
   const { host, server, id, original } = await loadHistory(30);
+  const rename = host.fs.rename.bind(host.fs);
+  host.fs.rename = async (from, to) => {
+    if (to.endsWith(`/sessions/${id}.json`)) throw new Error('compaction persist once');
+    return rename(from, to);
+  };
+  try { await assert.rejects(server.trimSessionHistory(id), /compaction persist once/); }
+  finally { host.fs.rename = rename; }
+  assert.deepEqual((await server.getSession(id)).messages, original);
+  assert.equal((await server.getSession(id)).history, undefined);
+  const disk = JSON.parse(await host.fs.readFile(host.paths.join(host.env.dataDir(), 'sessions', id + '.json')));
+  assert.deepEqual(disk.messages, original, 'failed compaction must preserve persisted context');
   const parent = await server.trimSessionHistory(id, 2);
   const context = structuredClone(parent.messages);
   const whole = await server.forkSession(id);

@@ -24,10 +24,11 @@ export class TerminalManager {
   private entries = new Map<string, Entry>();
   private disposed = false;
   private removed = new Set<string>();
+  private deleting = new Map<string, Promise<void>>();
   constructor(private readonly host: Host) {}
 
   async open(sessionId: string, cwd: string): Promise<TerminalSnapshot> {
-    if (this.disposed || this.removed.has(sessionId) || !this.host.terminal) throw new Error('当前会话或宿主不支持交互终端');
+    if (this.disposed || this.removed.has(sessionId) || this.deleting.has(sessionId) || !this.host.terminal) throw new Error('当前会话或宿主不支持交互终端');
     let entry = this.entries.get(sessionId);
     if (!entry) {
       if (this.entries.size >= 8) throw new Error('最多同时保留 8 个终端，请先结束不再使用的终端');
@@ -108,8 +109,15 @@ export class TerminalManager {
     if (results.some((r) => r.status === 'rejected')) throw new Error('部分终端结束失败，请重试');
   }
 
-  async removeSession(sessionId: string): Promise<void> {
-    this.removed.add(sessionId);
-    await this.close(sessionId);
+  async removeSession(sessionId: string, remove: () => Promise<void> = async () => {}): Promise<void> {
+    const pending = this.deleting.get(sessionId);
+    if (pending) return pending;
+    const operation = (async () => {
+      await this.close(sessionId);
+      await remove();
+      this.removed.add(sessionId);
+    })().finally(() => { this.deleting.delete(sessionId); });
+    this.deleting.set(sessionId, operation);
+    return operation;
   }
 }
