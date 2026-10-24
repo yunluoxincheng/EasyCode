@@ -53,6 +53,8 @@ import {
   type TestCommandDetection,
 } from '@easycode/core';
 import { Settings, DEFAULT_SETTINGS, PROVIDER_PRESETS } from './settings.js';
+import { TerminalManager } from './terminals.js';
+import { estimateContextTokens } from './context-capacity.js';
 import type { ModelTestResult, ProviderEntry, ProviderModel, ProviderModelInfo } from './settings.js';
 import { loadModelDirectory, resolveModelMeta } from './model-catalog.js';
 import { buildSystemPrompt } from './prompts.js';
@@ -169,6 +171,7 @@ export interface SessionEventPayload {
  * 运行环境不可知 —— Electron 主进程、CLI、浏览器演示模式共用。
  */
 export class AgentServer {
+  private readonly terminals: TerminalManager;
   private sessions = new Map<string, SessionRuntime>();
   private readonly events = new Emitter<SessionEventPayload>();
   private readonly workspaceLocks = new WorkspaceLockManager();
@@ -205,6 +208,7 @@ export class AgentServer {
   private readonly workspaceIdentities = new Map<string, string>();
 
   constructor(private readonly host: Host) {
+    this.terminals = new TerminalManager(host);
     this.settingsSecrets = new SettingsSecrets(host);
     this.mcp = new McpManager(host, (id) => this.settingsLock.withLock(async () => {
       const config = this.settings.mcpServers?.[id];
@@ -378,6 +382,9 @@ export class AgentServer {
    */
   async trimSessionHistory(id: string, keepRecentTurns = 2): Promise<SessionData> {
     await this.ensureSettings();
+    if (!Number.isInteger(keepRecentTurns) || keepRecentTurns < 1 || keepRecentTurns > 100) {
+      throw new Error('保留回合数必须为 1–100 的整数');
+    }
     const rt = this.requireSession(id);
     // 压缩会改写历史消息（会话运行上下文），与测试循环互斥
     return this.withSessionOpLock(id, '会话正在运行中，请先等待完成或点击停止', async () => {
@@ -394,7 +401,10 @@ export class AgentServer {
         pruneTools: true,
       });
 
-      if (JSON.stringify(compRes.messages) !== JSON.stringify(rt.data.messages)) {
+      const beforeTokens = await estimateContextTokens(rt.data.messages);
+      const afterTokens = await estimateContextTokens(compRes.messages);
+      if (afterTokens < beforeTokens && JSON.stringify(compRes.messages) !== JSON.stringify(rt.data.messages)) {
+        const previous = structuredClone(rt.data);
         rt.data.history = history;
         rt.data.messages = compRes.messages;
         const latestTodos = extractLatestTodos(rt.data.messages);
@@ -402,7 +412,8 @@ export class AgentServer {
           rt.data.todos = structuredClone(latestTodos);
         }
         rt.data.meta.updatedAt = new Date().toISOString();
-        await this.persistSession(rt);
+        try { await this.persistSession(rt, true); }
+        catch (error) { rt.data = previous; throw error; }
       }
       return rt.data;
     });
@@ -460,7 +471,22 @@ export class AgentServer {
     }
   }
 
+  async openTerminal(id: string) {
+    const session = await this.getSession(id);
+    return this.terminals.open(id, session.meta.workspaceRoot || this.host.env.dataDir());
+  }
+  readTerminal(id: string, cursor?: number) { return this.terminals.read(id, cursor); }
+  writeTerminal(id: string, terminalId: string, data: string) { return this.terminals.write(id, terminalId, data); }
+  resizeTerminal(id: string, terminalId: string, cols: number, rows: number) {
+    return this.terminals.resize(id, terminalId, cols, rows);
+  }
+  closeTerminal(id: string, terminalId: string) { return this.terminals.close(id, terminalId); }
+
   async deleteSession(id: string): Promise<void> {
+    return this.terminals.removeSession(id, () => this.finishSessionDeletion(id));
+  }
+
+  private async finishSessionDeletion(id: string): Promise<void> {
     const rt = this.sessions.get(id);
     if (rt) {
       // 删除标记必须先于 abort 落下：会话删除后，任何仍在运行的异步流程
@@ -688,8 +714,10 @@ export class AgentServer {
       const caps = modelInfo?.capabilities ?? ['system'];
       const contextWindow = modelInfo?.contextWindow ?? entry?.contextWindow ?? 1_000_000;
       const compactionCfg = this.settings.contextCompaction;
+      const keepRecentTurns = compactionCfg?.keepRecentTurns;
       const autoCompact = compactionCfg?.autoCompact !== false;
-      const compactThreshold = compactionCfg?.threshold ?? 0.85;
+      const compactThreshold = typeof compactionCfg?.threshold === 'number' && Number.isFinite(compactionCfg.threshold)
+        && compactionCfg.threshold > 0 && compactionCfg.threshold <= 1 ? compactionCfg.threshold : 0.85;
       // 联网搜索分流：总开关关闭=全部不搜索；有原生工具的走原生，否则走内置 web_search()
       const searchOn = caps.includes('websearch') && this.settings.webSearch?.enabled === true;
       const useNativeSearch = searchOn && supportsNativeWebSearch(model, entry.kind);
@@ -854,6 +882,9 @@ export class AgentServer {
         maxSteps: this.settings.maxSteps ?? 200,
         contextWindow: autoCompact ? contextWindow : undefined,
         autoCompactThreshold: compactThreshold,
+        keepRecentTurns: typeof keepRecentTurns === 'number' && Number.isInteger(keepRecentTurns)
+          && keepRecentTurns >= 1 && keepRecentTurns <= 100 ? keepRecentTurns : 2,
+        countContextTokens: estimateContextTokens,
         workspaceLock: rt.data.meta.workspaceRoot
           ? this.workspaceLocks.getLock(workspaceIdentity)
           : undefined,
@@ -1198,7 +1229,7 @@ export class AgentServer {
   /** 终止所有会话的全部后台任务（应用退出时调用）。跨会话并行执行，总耗时以单任务为准 */
   async stopAllBackgroundTasks(): Promise<void> {
     await Promise.all(
-      [this.mcp.dispose(), ...[...this.bgManagers.values()].map((manager) =>
+      [this.mcp.dispose(), this.terminals.dispose(), ...[...this.bgManagers.values()].map((manager) =>
         manager.disposeAll().catch(() => {
           // 单会话清理失败不影响其余会话
         }),

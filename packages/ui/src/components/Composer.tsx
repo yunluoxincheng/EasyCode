@@ -19,8 +19,9 @@ const BAR_COMPACT_WIDTH = 640;
 
 const selectComposer = (s: AppStore) => [
   s.activeId, s.activeSession, s.activeSession?.workspaceRoot,
-    s.mode, s.running, s.stopping, s.composerInsertTick,
+    s.mode, s.running, s.stopping, s.compacting, s.composerInsertTick,
   s.mcpCatalogVersion,
+  s.terminalOpen,
 ];
 
 export function Composer() {
@@ -480,12 +481,7 @@ export function Composer() {
       }
       if (cmd.id === 'compact') {
         if (!session?.id) return;
-        try {
-          await store.client.trimSessionHistory(session.id);
-          store.showToast('已完成上下文压缩与阶段记忆归档');
-        } catch (err) {
-          store.showToast(err instanceof Error ? err.message : '压缩失败', 'err');
-        }
+        await store.compressContext();
         return;
       }
       if (cmd.id === 'fork') {
@@ -850,6 +846,8 @@ export function Composer() {
           </button>
         </div>
         {session && <ProjectSwitcher />}
+        {session && store.client.openTerminal && <button className="chip" aria-expanded={store.terminalOpen}
+          onClick={() => store.toggleTerminal()} title="打开当前会话终端">[ 终端 ]</button>}
         {session && <ModelEffortPicker />}
         {session && <RulesChip compact={compact} />}
         {session && <UsageChip compact={compact} />}
@@ -1010,7 +1008,7 @@ export function Composer() {
                 ? `输入 / 快捷指令，@ 引用文件，Enter 发送，Shift+Enter 换行`
                 : '直接对话即可；输入 / 快捷指令；操作文件请先点击上方「＋ 绑定项目」'
           }
-          disabled={!session || store.running}
+          disabled={!session || store.running || store.compacting}
           rows={2}
         />
         {dragOver && <div className="drop-hint">⊘ 松开插入文件路径</div>}
@@ -1022,7 +1020,7 @@ export function Composer() {
           <button
             className="btn primary send"
             onClick={submit}
-            disabled={!session || !text.trim()}
+            disabled={!session || store.compacting || !text.trim()}
           >
             发送
           </button>

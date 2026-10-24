@@ -15,6 +15,22 @@ unsafe impl Sync for Job {}
 impl Drop for Job { fn drop(&mut self) { unsafe { CloseHandle(self.0); } } }
 
 impl Job {
+    /// PTY 使用无 AutoRun 的 cmd 引导进程；登记 Job 后才允许启动用户 Shell。
+    pub fn attach(process: HANDLE) -> Result<Self, String> {
+        unsafe {
+            let handle = CreateJobObjectW(null_mut(), std::ptr::null());
+            if handle.is_null() { return Err("创建终端 Job 失败".into()); }
+            let job = Self(handle);
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = zeroed();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            if SetInformationJobObject(handle, JobObjectExtendedLimitInformation,
+                &info as *const _ as _, size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32) == 0 ||
+                AssignProcessToJobObject(handle, process) == 0 {
+                return Err("无法将终端引导进程加入 Job".into());
+            }
+            Ok(job)
+        }
+    }
     pub fn spawn(command: &mut Command) -> Result<(Child, Self), String> {
         unsafe {
             let handle = CreateJobObjectW(null_mut(), std::ptr::null());

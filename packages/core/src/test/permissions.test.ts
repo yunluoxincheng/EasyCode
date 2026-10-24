@@ -6,39 +6,25 @@ import {
   type PathApi, type PermissionRule
 } from '../permissions.js';
 
-test('matchCommandPattern 为前缀匹配且带词边界', () => {
-  assert.equal(matchCommandPattern('git status', 'git status -s'), true);
-  assert.equal(matchCommandPattern('git status', 'git status'), true);
-  assert.equal(matchCommandPattern('git status', 'git stash'), false);
-  // 词边界：rm 不得命中 rmdir
-  assert.equal(matchCommandPattern('rm', 'rm -rf build'), true);
-  assert.equal(matchCommandPattern('rm', 'rmdir build'), false);
-  // 通配符
-  assert.equal(matchCommandPattern('pnpm *', 'pnpm test --watch'), true);
-  assert.equal(matchCommandPattern('npm run test*', 'npm run test:unit'), true);
-  // 环境变量前缀不能绕过
-  assert.equal(matchCommandPattern('rm', 'FOO=1 rm -rf /'), true);
-  assert.equal(matchCommandPattern('rm', 'powershell -c "rm -rf /"'), true);
-  // P1：带空格的引号赋值曾使前缀剥离截断，必须保留 deny 裁决。
-  assert.equal(evaluatePermission([{ tool: 'run_command', pattern: 'rm', decision: 'deny' }],
-    'run_command', { command: 'A=1 FOO="hello world" rm -rf build' })?.decision, 'deny');
-});
-
-test('evaluatePermission：deny/ask 优先于 allow，顺序无关且保留工具级匹配', () => {
-  const cases = [
-    { decision: 'deny', pattern: 'git push', command: 'git push --force', allowed: 'git status', allowPattern: 'git *' },
-    { decision: 'ask', pattern: 'rm', command: 'rm -rf node_modules', allowed: 'ls', allowPattern: undefined },
-  ] as const;
-  for (const item of cases) {
-    const rules: PermissionRule[] = [
-      { tool: 'run_command', pattern: item.allowPattern, decision: 'allow' },
-      { tool: 'run_command', pattern: item.pattern, decision: item.decision },
-    ];
-    for (const ordered of [rules, [...rules].reverse()]) {
-      const result = evaluatePermission(ordered, 'run_command', { command: item.command });
-      assert.equal(result?.decision, item.decision);
-      assert.equal(result?.rule.pattern, item.pattern);
-      assert.equal(evaluatePermission(ordered, 'run_command', { command: item.allowed })?.decision, 'allow');
+test('命令权限：前缀/词边界/通配符匹配与 deny/ask 优先级使用同一规则表', () => {
+  const cases: Array<[string, string, boolean]> = [
+    ['git status', 'git status -s', true], ['git status', 'git status', true], ['git status', 'git stash', false],
+    ['git push', 'git push --force', true], ['git push', 'git status', false],
+    ['rm', 'rm -rf build', true], ['rm', 'rm -rf node_modules', true], ['rm', 'rmdir build', false], ['rm', 'ls', false],
+    ['pnpm *', 'pnpm test --watch', true], ['npm run test*', 'npm run test:unit', true],
+    ['rm', 'FOO=1 rm -rf /', true], ['rm', 'powershell -c "rm -rf /"', true],
+    ['rm', 'A=1 FOO="hello world" rm -rf build', true],
+  ];
+  for (const [pattern, command, matches] of cases) {
+    assert.equal(matchCommandPattern(pattern, command), matches);
+    for (const decision of ['deny', 'ask'] as const) {
+      const rules: PermissionRule[] = [{ tool: 'run_command', pattern: pattern.startsWith('git') ? 'git *' : undefined, decision: 'allow' },
+        { tool: 'run_command', pattern, decision }];
+      for (const ordered of [rules, [...rules].reverse()]) {
+        const result = evaluatePermission(ordered, 'run_command', { command });
+        assert.equal(result?.decision, matches ? decision : 'allow');
+        if (matches) assert.equal(result?.rule.pattern, pattern);
+      }
     }
   }
 });

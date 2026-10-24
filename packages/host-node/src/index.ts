@@ -5,6 +5,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
 import { createStdioHost } from './stdio.js';
+import { createTerminalHost } from './terminal.js';
 import { spawnWindowsJob } from './windows-job.js';
 import type {
   Host,
@@ -131,6 +132,7 @@ export class NodeHost implements Host {
   private readonly spawnEntries = new Map<string, SpawnEntry>();
   private readonly stdioEntries = new Map<string, SpawnEntry>();
   readonly stdio = createStdioHost(this.stdioEntries, (id) => killSpawned(this.stdioEntries, id));
+  readonly terminal = createTerminalHost();
 
   constructor(options: NodeHostOptions) {
     this.secrets = options.secrets;

@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@easycode/core": "workspace:*",
+    "@lydell/node-pty": "1.1.0",
     "cross-spawn": "7.0.6"
   },
   "devDependencies": {

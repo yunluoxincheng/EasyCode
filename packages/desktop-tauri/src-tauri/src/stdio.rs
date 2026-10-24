@@ -9,8 +9,7 @@ use std::sync::{atomic::{AtomicBool, Ordering}, Arc, Condvar, Mutex};
 use std::time::Duration;
 use tauri::{ipc::Channel, AppHandle, Manager};
 #[cfg(windows)]
-#[path = "stdio_job.rs"]
-mod windows_job;
+use crate::foreground_job as windows_job;
 
 struct Entry {
     #[cfg(unix)]
