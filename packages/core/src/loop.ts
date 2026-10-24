@@ -446,13 +446,19 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
         inputTokens >= contextWindow * autoCompactThreshold
       ) {
         const beforeTokens = inputTokens;
+        const countedBefore = countContextTokens
+          ? await countContextTokens({ messages, system: systemPrompt, tools: tools.listSpecs() }) : undefined;
+        const savesTokens = async (candidate: ChatMessage[]) => {
+          if (JSON.stringify(candidate) === JSON.stringify(messages)) return false;
+          return !countContextTokens || await countContextTokens({ messages: candidate, system: systemPrompt, tools: tools.listSpecs() }) < countedBefore!;
+        };
         const candidate = structuredClone(messages);
-        const compactRes = compactHistoryMessages(candidate, { keepRecentTurns, pruneTools: true });
-        const savesTokens = !countContextTokens || await countContextTokens({ messages: compactRes.messages, system: systemPrompt, tools: tools.listSpecs() })
-          < await countContextTokens({ messages, system: systemPrompt, tools: tools.listSpecs() });
+        // 自动压缩保留配置轮数内的完整消息；工具裁剪同样只能发生在保护范围之外。
+        const compactRes = compactHistoryMessages(candidate, { keepRecentTurns, pruneTools: false });
+        const compactSaves = await savesTokens(compactRes.messages);
         if (signal.aborted) return;
         // compacted=false 时也可能已裁剪工具输出，按实际内容提交并保留原文。
-        if (savesTokens && JSON.stringify(compactRes.messages) !== JSON.stringify(messages)) {
+        if (compactSaves) {
           onBeforeCompaction?.();
           contextAction = compactRes.compacted ? 'compact_all' : 'prune_tools';
           messages.splice(0, messages.length, ...compactRes.messages);
@@ -463,15 +469,15 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
           });
         } else {
           const fallback = structuredClone(messages);
-          const pruneRes = pruneHistoricalToolResults(fallback, { keepRecentTurns: 1 });
-          if (pruneRes.modified) {
+          const pruneRes = pruneHistoricalToolResults(fallback, { keepRecentTurns });
+          if (pruneRes.modified && await savesTokens(fallback) && !signal.aborted) {
             onBeforeCompaction?.();
             messages.splice(0, messages.length, ...fallback);
             contextAction = 'prune_tools';
             emit({
               type: 'context_compacted',
               beforeTokens,
-              summary: `上下文用量已达 ${Math.round((beforeTokens / contextWindow) * 100)}%，已压缩历史工具长输出（节省约 ${Math.round(pruneRes.savedChars / 4)} tokens）。`,
+              summary: `上下文用量已达 ${Math.round((beforeTokens / contextWindow) * 100)}%，已压缩保护轮数以外的历史工具长输出。`,
             });
           }
         }

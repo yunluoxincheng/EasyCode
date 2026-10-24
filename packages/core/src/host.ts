@@ -82,6 +82,8 @@ export interface StdioHost {
 /** 用户直接操作的交互终端；不注册为模型工具，也不写入模型历史。 */
 export interface TerminalHandle {
   shell: string;
+  /** 仍持有终端资源的宿主监督进程，供资源核对；与用户 Shell 的退出事件分开。 */
+  supervisorPid?: number;
   write(data: string): Promise<void>;
   resize(cols: number, rows: number): Promise<void>;
   /** 结束整个终端进程组/控制台；失败保留可重试句柄。 */

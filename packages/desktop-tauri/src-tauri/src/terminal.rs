@@ -3,6 +3,8 @@ use std::{collections::HashMap, io::{Read, Write}, sync::{Arc, Mutex, Condvar}, 
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
+#[cfg(unix)]
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Default)]
 pub struct TerminalMap(Mutex<HashMap<String, Arc<Entry>>>);
@@ -15,6 +17,14 @@ struct Entry {
     closing: Mutex<()>,
     #[cfg(windows)]
     job: crate::foreground_job::Job,
+    #[cfg(unix)]
+    child: Mutex<Option<Box<dyn portable_pty::Child + Send + Sync>>>,
+    #[cfg(unix)]
+    pid: u32,
+    #[cfg(unix)]
+    identity_valid: AtomicBool,
+    #[cfg(unix)]
+    reaping: AtomicBool,
 }
 #[derive(Deserialize)]
 pub struct Options { cwd: String, cols: u16, rows: u16 }
@@ -163,11 +173,17 @@ pub async fn terminal_open(app: AppHandle, options: Options) -> Result<Opened, S
             }
         }
         drop(pair.slave);
+        #[cfg(unix)]
+        let pid = child.process_id().ok_or("终端 PID 不可用")?;
         let entry = Arc::new(Entry {
             master: Mutex::new(Some(pair.master)), writer: Mutex::new(Some(writer)),
             output: Mutex::new(Output { text: String::new(), end: 0, exited: false, process_exited: false, reader_done: false, code: None }),
             exited: (Mutex::new(false), Condvar::new()), closing: Mutex::new(()),
             #[cfg(windows)] job,
+            #[cfg(unix)] pid,
+            #[cfg(unix)] child: Mutex::new(Some(child)),
+            #[cfg(unix)] identity_valid: AtomicBool::new(true),
+            #[cfg(unix)] reaping: AtomicBool::new(false),
         });
         let id = format!("pty-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|_| "系统时间无效")?.as_nanos());
         entries.insert(id.clone(), entry.clone());
@@ -196,7 +212,13 @@ pub async fn terminal_open(app: AppHandle, options: Options) -> Result<Opened, S
         });
         let wait = entry.clone();
         std::thread::spawn(move || {
+            #[cfg(windows)]
             let status = child.wait().ok().map(|s| s.exit_code());
+            #[cfg(unix)]
+            let status = match crate::terminal_unix::observe_exit(pid) {
+                Ok(status) => status,
+                Err(_) => { if !wait.reaping.load(Ordering::SeqCst) { wait.identity_valid.store(false, Ordering::SeqCst); } None }
+            };
             #[cfg(windows)]
             let _ = wait.job.terminate();
             if let Ok(mut output) = wait.output.lock() { output.process_exited = true; output.exited = output.reader_done; output.code = status; }
@@ -235,39 +257,21 @@ pub fn terminal_resize(app: AppHandle, id: String, cols: u16, rows: u16) -> Resu
     master.as_ref().ok_or("终端已关闭")?.resize(size).map_err(|_| "终端尺寸更新失败".into())
 }
 
-#[cfg(unix)]
-fn signal_group(pid: u32, signal: i32) -> Result<bool, String> {
-    extern "C" { fn kill(pid: i32, signal: i32) -> i32; }
-    if unsafe { kill(-(pid as i32), signal) } == 0 { return Ok(true); }
-    if std::io::Error::last_os_error().raw_os_error() == Some(3) { Ok(false) }
-    else { Err("终端进程组操作失败".into()) }
-}
-
 fn close_entry(entry: &Entry) -> Result<(), String> {
     let _guard = entry.closing.lock().map_err(|_| "终端清理锁失败")?;
     #[cfg(windows)]
     entry.job.terminate()?;
     #[cfg(unix)]
     {
-        // 查询该控制终端的全部作业组，包括后台作业；不对已退出且可能被复用的旧 PID 发信号。
-        let tty = entry.master.lock().map_err(|_| "终端状态锁失败")?.as_ref().and_then(|m| m.tty_name());
-        let groups = if let Some(tty) = tty {
-            let output = std::process::Command::new("ps").arg("-t").arg(tty).args(["-o", "pgid="]).output().map_err(|_| "查询终端作业组失败")?;
-            if !output.status.success() && !(output.status.code() == Some(1) && output.stderr.is_empty()) { return Err("查询终端作业组失败，可重试".into()); }
-            let mut groups: Vec<u32> = String::from_utf8_lossy(&output.stdout).split_whitespace().filter_map(|s| s.parse::<u32>().ok()).filter(|pid| *pid > 0).collect();
-            groups.sort_unstable(); groups.dedup(); groups
-        } else { Vec::new() };
-        for pid in &groups { signal_group(*pid, 15)?; }
-        for _ in 0..30 {
-            if groups.iter().all(|pid| matches!(signal_group(*pid, 0), Ok(false))) { break; }
-            std::thread::sleep(Duration::from_millis(100));
+        let mut child = entry.child.lock().map_err(|_| "终端子进程锁失败")?;
+        // 清理失败保留未回收 Child，重试仍持有原始会话身份。
+        if let Some(owned) = child.as_mut() {
+            if !entry.identity_valid.load(Ordering::SeqCst) { return Err("终端进程身份已失效，拒绝使用过期 PID".into()); }
+            crate::terminal_unix::close_session(entry.pid)?;
+            entry.reaping.store(true, Ordering::SeqCst);
+            owned.wait().map_err(|_| "终端子进程回收失败")?;
+            child.take();
         }
-        for pid in &groups { if signal_group(*pid, 0)? { signal_group(*pid, 9)?; } }
-        for _ in 0..30 {
-            if groups.iter().all(|pid| matches!(signal_group(*pid, 0), Ok(false))) { break; }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        for pid in groups { if signal_group(pid, 0)? { return Err("终端进程组尚未退出，可重试".into()); } }
     }
     let exited = entry.exited.0.lock().map_err(|_| "终端退出锁失败")?;
     let (exited, _) = entry.exited.1.wait_timeout_while(exited, Duration::from_secs(5), |v| !*v).map_err(|_| "终端退出等待失败")?;
@@ -294,6 +298,37 @@ pub fn cleanup(app: &AppHandle) {
     for (id, entry) in entries {
         if close_entry(&entry).is_ok() { if let Ok(mut map) = app.state::<TerminalMap>().0.lock() { map.remove(&id); } }
     }
+}
+
+#[cfg(all(test, unix))]
+pub fn assert_natural_exit_cleanup() {
+    fn quote(text: &str) -> String { format!("'{}'", text.replace('\'', "'\\''")) }
+    let file = std::env::temp_dir().join(format!("easycode-pty-{}-{}.pid", std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    let path = quote(&file.to_string_lossy());
+    let script = format!("printf '%s' \"$$\" > {}; exec sleep 300", path);
+    let mut command = CommandBuilder::new("/bin/sh");
+    command.args(["-c", &format!("nohup sh -c {} >/dev/null 2>&1 & i=0; while [ ! -s {} ] && [ \"$i\" -lt 500 ]; do i=$((i+1)); sleep 0.01; done; test -s {}", quote(&script), path, path)]);
+    let pair = native_pty_system().openpty(PtySize { cols: 90, rows: 20, pixel_width: 0, pixel_height: 0 }).unwrap();
+    let child = pair.slave.spawn_command(command).unwrap();
+    let pid = child.process_id().unwrap();
+    drop(pair.slave);
+    let writer = pair.master.take_writer().unwrap();
+    let entry = Entry { master: Mutex::new(Some(pair.master)), writer: Mutex::new(Some(writer)),
+        output: Mutex::new(Output { text: String::new(), end: 0, exited: true, process_exited: true, reader_done: true, code: Some(0) }),
+        exited: (Mutex::new(true), Condvar::new()), closing: Mutex::new(()), pid,
+        child: Mutex::new(Some(child)), identity_valid: AtomicBool::new(true), reaping: AtomicBool::new(false) };
+    struct Guard<'a>(&'a Entry, &'a std::path::Path);
+    impl Drop for Guard<'_> { fn drop(&mut self) { let _ = close_entry(self.0); let _ = std::fs::remove_file(self.1); } }
+    let _guard = Guard(&entry, &file);
+    assert_eq!(crate::terminal_unix::observe_exit(pid).unwrap(), Some(0));
+    assert_eq!(unsafe { libc::kill(pid as i32, 0) }, 0, "unreaped Shell PID must remain reserved");
+    let background: i32 = std::fs::read_to_string(&file).unwrap().parse().unwrap();
+    assert_eq!(unsafe { libc::getsid(background) }, pid as i32, "nohup child remains in the owned session");
+    close_entry(&entry).unwrap();
+    assert!(entry.child.lock().unwrap().is_none());
+    let status = std::process::Command::new("ps").args(["-p", &background.to_string(), "-o", "stat="]).output().unwrap();
+    assert!(!status.status.success() || String::from_utf8_lossy(&status.stdout).trim().starts_with('Z'), "nohup process must no longer run");
 }
 #[tauri::command]
 pub async fn terminal_reset(app: AppHandle) -> Result<(), String> {

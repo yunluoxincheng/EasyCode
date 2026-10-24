@@ -129,7 +129,8 @@ export default function TerminalPanel({ sessionId }: { sessionId: string }) {
   return <section className="interactive-terminal" aria-label="会话终端" onContextMenu={(event) => event.stopPropagation()}>
     <div className="interactive-terminal-head">
       <span title={snapshot?.shell}>{busy ? '[ WAIT ] 正在处理' : snapshot?.running ? '[ OK ] 终端运行中'
-        : snapshot?.exitCode != null && snapshot.exitCode !== 0 ? `[ ERR ] 终端已退出 (${snapshot.exitCode})` : '[ OK ] 终端已退出'}</span>
+        : snapshot?.exitCode != null && snapshot.exitCode !== 0 ? `[ ERR ] Shell 已退出 (${snapshot.exitCode})`
+        : snapshot ? '[ WAIT ] Shell 已退出，待清理终端' : '[ OK ] 终端已结束'}</span>
       <span className="interactive-terminal-cwd" title={snapshot?.cwd}>{snapshot?.cwd}</span>
       <button className="btn" disabled={busy || !snapshot?.running} onClick={() => {
         void store.client.writeTerminal!(sessionId, snapshot!.id, '\x03').catch((reason) => setError(String(reason)));

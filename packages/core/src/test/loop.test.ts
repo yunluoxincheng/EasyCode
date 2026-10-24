@@ -207,58 +207,29 @@ test('审批：拒绝时工具不执行，模型收到拒绝说明', async () =>
   assert.equal(env.host.snapshot()['/ws/new.txt'], undefined);
 });
 
-test('循环：maxSteps 步数上限生效', async () => {
-  const env = makeEnv('yolo');
-  const infiniteCall: ToolCallBlock = {
-    type: 'tool_call',
-    id: 'c1',
-    name: 'read_file',
-    input: { path: 'hello.txt' },
-  };
-  let count = 0;
-  const infiniteProvider: Provider = {
-    id: 'infinite',
-    async stream() {
+test('循环终止边界：步数耗尽与 Provider 进行中取消', async () => {
+  for (const abort of [false, true]) {
+    const env = makeEnv('yolo');
+    const controller = new AbortController();
+    let count = 0;
+    const provider: Provider = { id: 'termination', async stream(_request, ctx) {
       count++;
-      return { blocks: [infiniteCall] };
-    },
-  };
-  const result = await runAgentLoop({
-    ...env,
-    provider: infiniteProvider,
-    tools: toolsFor(),
-    workspace: '/ws',
-    systemPrompt: 's',
-    maxSteps: 3,
-  });
-  assert.equal(result.reason, 'error');
-  assert.match(result.errorMessage ?? '', /已达单次任务最大步数（3）/);
-  assert.equal(count, 3);
-});
-
-
-test('中止：abort 后循环以 aborted 结束', async () => {
-  const env = makeEnv();
-  const controller = new AbortController();
-  const provider: Provider = {
-    id: 'slow',
-    async stream(_req, ctx) {
-      await new Promise((r) => setTimeout(r, 50));
-      if (ctx.signal.aborted) throw new DOMException('Aborted', 'AbortError');
-      return { blocks: [{ type: 'text', text: 'never' }] };
-    },
-  };
-  const loop = runAgentLoop({
-    ...env,
-    provider,
-    tools: toolsFor(),
-    workspace: '/ws',
-    systemPrompt: 's',
-    signal: controller.signal,
-  });
-  setTimeout(() => controller.abort(), 10);
-  const result = await loop;
-  assert.equal(result.reason, 'aborted');
+      if (abort) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        if (ctx.signal.aborted) throw new DOMException('Aborted', 'AbortError');
+      }
+      return { blocks: [{ type: 'tool_call', id: `call_${count}`, name: 'read_file', input: { path: 'hello.txt' } }] };
+    } };
+    const loop = runAgentLoop({ ...env, provider, tools: toolsFor(), workspace: '/ws', systemPrompt: 's',
+      signal: controller.signal, maxSteps: 3 });
+    if (abort) setTimeout(() => controller.abort(), 10);
+    const result = await loop;
+    assert.equal(result.reason, abort ? 'aborted' : 'error');
+    if (!abort) {
+      assert.match(result.errorMessage ?? '', /已达单次任务最大步数（3）/);
+      assert.equal(count, 3);
+    }
+  }
 });
 
 test('toOpenAIWireMessages: 过滤孤儿 tool_result 并自动补齐断尾未履行 tool_calls', () => {
