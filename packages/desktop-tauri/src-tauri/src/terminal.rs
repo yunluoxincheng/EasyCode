@@ -148,7 +148,11 @@ pub async fn terminal_open(app: AppHandle, options: Options) -> Result<Opened, S
         #[cfg(windows)]
         let mut command = {
             let mut c = CommandBuilder::new(std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into()));
-            c.args(["/d", "/q"]);
+            let args = if shell.to_lowercase().ends_with("cmd.exe") { "/d" } else if shell.to_lowercase().contains("powershell") || shell.to_lowercase().contains("pwsh") { "-NoLogo" } else { "-l" };
+            // 非交互式启动器先等待放行；命令不经 PTY 输入，因此不会回显启动首行。
+            // 环境展开避免 cmd 参数二次转义带空格的 Shell 路径；启动用户 Shell 前清除临时值。
+            c.args(["/d", "/q", "/c", "%EASYCODE_TERMINAL_START%"]);
+            c.env("EASYCODE_TERMINAL_START", format!("pause >nul & set EASYCODE_TERMINAL_START=& \"{}\" {} & exit", shell, args));
             c
         };
         #[cfg(unix)]
@@ -166,9 +170,9 @@ pub async fn terminal_open(app: AppHandle, options: Options) -> Result<Opened, S
         };
         #[cfg(windows)]
         {
-            // /d 禁用 cmd AutoRun；只有 Job 已登记后才启动用户配置的 Shell。
-            let args = if shell.to_lowercase().ends_with("cmd.exe") { "/d" } else if shell.to_lowercase().contains("powershell") || shell.to_lowercase().contains("pwsh") { "-NoLogo" } else { "-l" };
-            if writer.write_all(format!("@\"{}\" {} & exit\r", shell, args).as_bytes()).and_then(|_| writer.flush()).is_err() {
+            // 新终端从左上角开始；先回应 ConPTY 的继承光标查询，再以 Enter 放行启动器。
+            // Job 已登记，且启动命令始终不经终端输入。
+            if writer.write_all(b"\x1b[1;1R\r").and_then(|_| writer.flush()).is_err() {
                 let _ = job.terminate(); let _ = child.wait(); return Err("终端 Shell 启动失败".into());
             }
         }
