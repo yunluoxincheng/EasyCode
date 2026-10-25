@@ -414,7 +414,6 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
     }
     if (signal.aborted && !(err instanceof Error && err.name === 'ProcessStopError')) return finish('aborted');
     const message = err instanceof Error ? err.message : String(err);
-    emit({ type: 'error', message });
     return finish('error', message);
   }
 
@@ -501,6 +500,8 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
       pending.observation.outcome({ status: 'unknown', evidence: 'Agent turn ended before recovery' });
     }
     pendingRecoveries = [];
+    // 所有循环错误统一在收尾时派发，包括未抛异常的步数耗尽；宿主只转发该事件。
+    if (reason === 'error' && errorMessage !== undefined) emit({ type: 'error', message: errorMessage });
     emit({ type: 'done', reason });
     return errorMessage === undefined ? { reason } : { reason, errorMessage };
   }

@@ -1002,7 +1002,7 @@ html.crt-off body::after {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   overflow: auto;
-  scrollbar-width: thin;
+  /* 与全局 ::-webkit-scrollbar 保持一致，避免非 auto 宽度覆盖自绘样式。 */
 }
 .term-exit-badge {
   font-size: 10.5px;
