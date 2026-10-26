@@ -1,0 +1,17 @@
+.delegated-task-card { margin: 8px 0; border: 1px solid var(--border2); border-radius: var(--radius); background: var(--panel2); font-size: 12px; overflow-wrap: anywhere; }
+.delegated-task-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 9px 12px; color: var(--cyan); border-bottom: 1px solid var(--border); }
+.delegated-task-status { color: var(--amber); }
+.delegated-task-card.status-completed .delegated-task-status { color: var(--green); }
+.delegated-task-card.status-error .delegated-task-status, .delegated-task-card.status-denied .delegated-task-status { color: var(--red); }
+.delegated-task-duration { margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; }
+.delegated-task-description { padding: 10px 12px 4px; color: var(--text-bright); white-space: pre-wrap; max-height: 120px; overflow: auto; }
+.delegated-task-usage, .delegated-task-empty { padding: 4px 12px 10px; color: var(--muted); }
+.delegated-task-card pre { margin: 0; padding: 10px 12px; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; line-height: 1.6; }
+.delegated-task-summary { max-height: 260px; overflow: auto; color: var(--text); }
+.delegated-task-error { color: var(--red); max-height: 160px; overflow: auto; }
+.delegated-task-process > summary { padding: 8px 12px; cursor: pointer; color: var(--cyan); border-top: 1px solid var(--border); }
+.delegated-task-trace { max-height: 300px; overflow: auto; padding: 4px 0; }
+.delegated-task-trace:focus-visible, .delegated-task-process > summary:focus-visible { outline: 1px solid var(--green-dim); outline-offset: -1px; }
+.delegated-task-entry { border-bottom: 1px solid var(--border); }
+.delegated-task-entry:last-child { border-bottom: none; }
+.delegated-task-entry-kind { display: block; padding: 6px 12px 0; color: var(--muted); }

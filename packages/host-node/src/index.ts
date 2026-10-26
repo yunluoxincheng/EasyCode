@@ -187,6 +187,17 @@ function runShell(
     }]]);
     let stdout = '';
     let stderr = '';
+    let truncated = false;
+    let timedOut = false;
+    let outputError = false;
+    const capture = (stream: 'stdout' | 'stderr', chunk: string) => {
+      const current = stream === 'stdout' ? stdout : stderr;
+      const remaining = Math.max(0, 200_000 - current.length);
+      if (chunk.length > remaining) truncated = true;
+      if (stream === 'stdout') stdout += chunk.slice(0, remaining);
+      else stderr += chunk.slice(0, remaining);
+    };
+    const flags = () => ({ ...(truncated ? { truncated: true } : {}), ...(timedOut ? { timedOut: true } : {}), ...(outputError ? { outputError: true } : {}) });
     let settled = false;
     let stopping: Promise<void> | undefined;
 
@@ -213,24 +224,28 @@ function runShell(
     opts.signal?.addEventListener('abort', onAbort, { once: true });
 
     const timer = setTimeout(() => {
-      stderr += `\n[EasyCode] 命令超时（${Math.round(timeoutMs / 1000)}s），请求终止进程树。`;
+      timedOut = true;
+      capture('stderr', `\n[EasyCode] 命令超时（${Math.round(timeoutMs / 1000)}s），请求终止进程树。`);
       void stop().catch(failedStop);
     }, timeoutMs);
 
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
     child.stdout.on('data', (chunk: string) => {
-      if (stdout.length < 200_000) stdout += chunk;
+      capture('stdout', chunk);
     });
     child.stderr.on('data', (chunk: string) => {
-      if (stderr.length < 200_000) stderr += chunk;
+      capture('stderr', chunk);
     });
+    child.stdout.on('error', () => { outputError = true; });
+    child.stderr.on('error', () => { outputError = true; });
     child.on('error', (err) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       opts.signal?.removeEventListener('abort', onAbort);
-      resolve({ code: null, stdout, stderr: stderr + String(err) });
+      capture('stderr', String(err));
+      resolve({ code: null, stdout, stderr, ...flags() });
     });
     child.on('close', async (code) => {
       if (settled) return;
@@ -239,7 +254,7 @@ function runShell(
       settled = true;
       clearTimeout(timer);
       opts.signal?.removeEventListener('abort', onAbort);
-      resolve({ code, stdout, stderr });
+      resolve({ code, stdout, stderr, ...flags() });
     });
   });
 }

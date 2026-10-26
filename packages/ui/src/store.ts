@@ -11,6 +11,7 @@ import type {
   UserAnswer,
   UserQuestionRequest,
   UserQuestion,
+  DelegatedTaskRecord,
 } from '@easycode/core';
 import { parseUserQuestions, parseUserAnswers, extractLatestTodos } from '@easycode/core';
 import {
@@ -37,6 +38,7 @@ export type SettingsSection =
 export type UserItem = { kind: 'user'; id: string; text: string; ts?: number; msgId?: string };
 export type AssistantItem = { kind: 'assistant'; id: string; blocks: ViewBlock[] };
 export type ToolItem = {
+  delegatedTask?: DelegatedTaskRecord;
   kind: 'tool';
   id: string;
   callId: string;
@@ -115,6 +117,7 @@ export type SessionRunStatus = 'idle' | 'running' | 'waiting' | 'question' | 'er
 
 /** 会话视图状态池化项（TODOS #29）：隔离存储每个会话的时间线、运行态与任务清单 */
 export interface SessionViewState {
+  delegatedTaskIds?: string[];
   /** 模型上下文视图与可编辑原始时间线分开，避免归档历史计入容量。 */
   contextItems?: TranscriptItem[];
   compacting?: boolean;
@@ -527,6 +530,7 @@ export class AppStore {
       // 若之前没有池化状态，从客户端载入历史初始化
       if (!state) {
         state = {
+          delegatedTaskIds: data.delegatedTasks?.map((task) => task.id),
           items: this.itemsFromSession(data),
           currentTurn: null,
           currentAssistant: null,
@@ -551,7 +555,7 @@ export class AppStore {
       }
 
       if (!state.running && data.history) {
-        state.contextItems = this.itemsFromSession({ ...data, history: undefined });
+        state.contextItems = this.itemsFromSession({ ...data, history: undefined, delegatedTasks: undefined });
       }
       this.activeId = id;
       this.syncActiveState(state);
@@ -622,7 +626,7 @@ export class AppStore {
       const before = JSON.stringify((await this.client.getSession(id)).messages);
       const data = await this.client.trimSessionHistory(id, keepRecentTurns);
       if (this.sessionStates.get(id) !== state || (state.operation ?? 0) !== operation || state.running) return;
-      state.contextItems = this.itemsFromSession({ ...data, history: undefined });
+      state.contextItems = this.itemsFromSession({ ...data, history: undefined, delegatedTasks: undefined });
       if (this.activeId === id) {
         this.notify(true);
         this.showToast(before === JSON.stringify(data.messages)
@@ -924,6 +928,7 @@ export class AppStore {
               name: block.name,
               input: block.input,
               status: 'running',
+              delegatedTask: block.name === 'task' ? data.delegatedTasks?.find((task) => task.parentMessageId === msg.id && task.parentCallId === block.id) : undefined,
             };
             toolById.set(block.id, item);
             toolItems.push(item);
@@ -1704,7 +1709,8 @@ export class AppStore {
         state.pendingQuestion = undefined;
         if (isActive) this.flushPendingNotify();
         // 使用引擎已提交的原始历史，旧回复、审批、用量采样和待办不能流入新回合。
-        state.items = this.itemsFromSession({ messages: event.messages } as SessionData);
+        state.items = this.itemsFromSession({ messages: event.messages, delegatedTasks: event.delegatedTasks } as SessionData);
+        state.delegatedTaskIds = event.delegatedTasks?.map((task) => task.id);
         state.currentAssistant = null;
         state.preparingTool = undefined;
         state.turnItemSet = new WeakSet();
@@ -1773,6 +1779,28 @@ export class AppStore {
           tool.executionStartedAt = Date.now();
           if (isActive) this.notify(false);
         }
+        break;
+      }
+
+      case 'delegated_task': {
+        if (!state.running || !state.currentTurn) break;
+        const tool = [...state.currentTurn.items].reverse().find((item): item is ToolItem => item.kind === 'tool' && item.name === 'task' && item.callId === event.task.parentCallId && item.status === 'running');
+        if (!tool) break;
+        const structural = tool.delegatedTask?.id !== event.task.id || tool.delegatedTask?.status !== event.task.status;
+        const ids = state.delegatedTaskIds ??= [];
+        if (!ids.includes(event.task.id)) {
+          ids.push(event.task.id);
+          const removed = new Set(ids.splice(0, Math.max(0, ids.length - 32)));
+          if (removed.size) for (const item of state.items) {
+            for (const entry of item.kind === 'turn' ? item.items : [item]) {
+              if (entry.kind === 'tool' && entry.delegatedTask && removed.has(entry.delegatedTask.id)) delete entry.delegatedTask;
+            }
+          }
+        }
+        tool.delegatedTask = event.task;
+        if (event.sessionUsage) state.sessionUsage = event.sessionUsage;
+        if (isActive) this.syncActiveState(state);
+        this.notify(structural);
         break;
       }
 

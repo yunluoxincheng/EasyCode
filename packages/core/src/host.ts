@@ -9,6 +9,10 @@ export interface ProcessResult {
   code: number | null;
   stdout: string;
   stderr: string;
+  /** 管道继续排空，但仅保留有界前缀；调用方不能把前缀当作完整证据。 */
+  truncated?: boolean;
+  timedOut?: boolean;
+  outputError?: boolean;
 }
 
 export interface ProcessRunOptions {

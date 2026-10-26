@@ -83,15 +83,16 @@ export async function listFilesRecursively(
   return results;
 }
 
-export const searchFilesTool: Tool = {
+const createSearchFilesTool = (literalOnly: boolean): Tool => ({
   spec: {
     name: 'search_files',
-    description:
-      '在工作区内按正则表达式搜索文本文件（自动跳过 .git/node_modules 等），返回 "文件:行号: 内容" 列表。',
+    description: literalOnly
+      ? '在工作区内按字面量文本搜索，不解析正则；自动跳过构建目录，返回文件、行号和内容。'
+      : '在工作区内按正则表达式搜索文本文件（自动跳过 .git/node_modules 等），返回 "文件:行号: 内容" 列表。',
     parameters: {
       type: 'object',
       properties: {
-        pattern: { type: 'string', description: '正则表达式' },
+        pattern: { type: 'string', description: literalOnly ? '字面量文本，1–1024 字符，不解析正则' : '正则表达式' },
         path: { type: 'string', description: '搜索起始目录，默认工作区根' },
         glob: { type: 'string', description: '文件名过滤，如 *.ts（简单的后缀/包含匹配）' },
         max_results: { type: 'number', description: '最多返回条数，默认 50，上限 200' },
@@ -106,12 +107,37 @@ export const searchFilesTool: Tool = {
       glob?: string;
       max_results?: number;
     };
-    let regex: RegExp;
-    try {
-      regex = new RegExp(pattern);
-    } catch (err) {
-      throw new Error(`正则表达式非法: ${err instanceof Error ? err.message : pattern}`);
+    let regex: RegExp | undefined;
+    if (literalOnly) {
+      signal.throwIfAborted();
+      if (!pattern.length || pattern.length > 1024 || rel.length > 4096 || (glob?.length ?? 0) > 256) throw new Error('子任务字面量查询须为 1–1024 字符，路径/过滤条件超过上限');
+    } else {
+      try { regex = new RegExp(pattern); }
+      catch (err) { throw new Error(`正则表达式非法: ${err instanceof Error ? err.message : pattern}`); }
     }
+    // KMP 无回溯；同时按字符/行工作量让出事件循环，截止与取消不会被扫描饿死。
+    const prefix = literalOnly ? new Uint16Array(pattern.length) : undefined;
+    if (prefix) for (let i = 1, matched = 0; i < pattern.length; i++) {
+      while (matched && pattern[i] !== pattern[matched]) matched = prefix[matched - 1];
+      if (pattern[i] === pattern[matched]) matched++;
+      prefix[i] = matched;
+    }
+    let work = 0;
+    const yieldScan = async () => {
+      work = 0;
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      signal.throwIfAborted();
+    };
+    const containsLiteral = async (line: string): Promise<boolean> => {
+      let matched = 0;
+      for (let i = 0; i < line.length; i++) {
+        if (++work >= 32768) await yieldScan();
+        while (matched && line[i] !== pattern[matched]) matched = prefix![matched - 1];
+        if (line[i] === pattern[matched]) matched++;
+        if (matched === pattern.length) return true;
+      }
+      return false;
+    };
     const limit = Math.min(Math.max(1, max_results), MAX_MATCHES);
     const base = resolveWorkspacePath(workspace, rel, host);
     const results: string[] = [];
@@ -152,7 +178,8 @@ export const searchFilesTool: Tool = {
         : filePath;
       const lines = content.split('\n');
       for (const [i, line] of lines.entries()) {
-        if (regex.test(line)) {
+        if (literalOnly && ++work >= 32768) await yieldScan();
+        if (literalOnly ? await containsLiteral(line) : regex!.test(line)) {
           results.push(`${displayPath}:${i + 1}: ${line.trim().slice(0, 200)}`);
           if (results.length >= limit) {
             truncated = true;
@@ -162,6 +189,7 @@ export const searchFilesTool: Tool = {
       }
       return true;
     });
+    if (literalOnly) signal.throwIfAborted();
 
     // 越界跳过必须向用户报告：静默跳过会让人误以为「工作区里确实没有」
     const skipNote =
@@ -172,4 +200,7 @@ export const searchFilesTool: Tool = {
     const header = `共 ${results.length}${truncated ? '+（已截断）' : ''} 条匹配：`;
     return `${header}\n${results.join('\n')}${skipNote}`;
   },
-};
+});
+
+export const searchFilesTool = createSearchFilesTool(false);
+export const literalSearchFilesTool = createSearchFilesTool(true);

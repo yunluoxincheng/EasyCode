@@ -21,6 +21,8 @@ import { readTaskLogsTool, stopTaskTool } from './tasks.js';
 import { todoWriteTool } from './todo.js';
 import { askUserTool } from './questions.js';
 import type { UserQuestionManager } from '../questions.js';
+import type { DelegatedTaskRunner } from '../delegation.js';
+import { delegateTaskTool } from './delegate.js';
 import { createWebSearchTool, type WebSearchBackendConfig } from './websearch.js';
 import {
   gitStatusTool,
@@ -65,6 +67,7 @@ export interface FileChangeEvent {
 }
 
 export interface ToolContext {
+  delegatedTasks?: DelegatedTaskRunner;
   questions?: UserQuestionManager;
   host: Host;
   workspace: string;
@@ -81,6 +84,8 @@ export interface ToolContext {
   backgroundTasks?: BackgroundTaskManager;
   /** 当前工具调用 ID（用于关联回合快照，TODOS #36） */
   callId?: string;
+  /** 产生本次调用的助手消息身份，避免历史调用 ID 复用时错配过程记录。 */
+  messageId?: string;
   /** 文件写操作完成后的快照回调（TODOS #36）：携带写前原始内容与写后新内容 */
   onFileChange?: (change: FileChangeEvent) => Promise<void> | void;
   /** 权限规则（TODOS #47）：全局 + 项目级规则的并集，命中即优先于审批模式生效 */
@@ -146,6 +151,7 @@ export function createBuiltinTools(options?: {
     .register(stopTaskTool)
     .register(todoWriteTool)
     .register(askUserTool)
+    .register(delegateTaskTool)
     .register(gitStatusTool)
     .register(gitDiffTool);
   if (options?.webSearch) registry.register(createWebSearchTool(options.webSearch));

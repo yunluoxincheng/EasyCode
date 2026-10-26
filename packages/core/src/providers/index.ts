@@ -26,6 +26,8 @@ export interface TurnResult {
 
 export interface StreamContext {
   signal: AbortSignal;
+  /** 可选的单次响应字节预算；子任务用它限制工具参数等尚未产出事件的缓冲。 */
+  maxResponseBytes?: number;
   emit(event: ProviderEvent): void;
 }
 
