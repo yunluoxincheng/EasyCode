@@ -46,43 +46,38 @@ function toolsFor(): ReturnType<typeof createBuiltinTools> {
   return createBuiltinTools();
 }
 
-test('【P2 拒绝态】权限规则拒绝时 tool_result 事件显式携带 approved=false', async () => {
-  const env = makeEnv('yolo');
-  const call: ToolCallBlock = {
-    type: 'tool_call',
-    id: 'c_deny',
-    name: 'run_command',
-    input: { command: 'rm -rf build' },
-  };
-  const provider = scriptedProvider([
-    { blocks: [call] },
-    { blocks: [{ type: 'text', text: '无法执行，已改用其他方案' }] },
-  ]);
-  const result = await runAgentLoop({
-    ...env,
-    provider,
-    tools: toolsFor(),
-    workspace: '/ws',
-    systemPrompt: 's',
-    permissionRules: [
-      { tool: 'run_command', pattern: 'rm', decision: 'deny', source: 'global' },
-    ],
-  });
-  assert.equal(result.reason, 'completed');
-  const event = env.events.find(
-    (e): e is Extract<AgentEvent, { type: 'tool_result' }> => e.type === 'tool_result',
-  );
-  assert.ok(event, '缺少 tool_result 事件');
-  // UI 依据结构化字段渲染「拒绝」，不再匹配中文提示文本
-  assert.equal(event.approved, false);
-  assert.equal(event.isError, false);
-  assert.match(event.content, /权限规则拒绝执行/);
-  assert.deepEqual(event.timing, { approvalMs: 0 });
-  assert.equal(event.timing.executionMs, undefined);
-  const persisted = env.messages.find((message) => message.role === 'tool_result');
-  assert.ok(persisted?.role === 'tool_result');
-  assert.equal(persisted.approved, false);
-  assert.equal(persisted.isError, false);
+test('拒绝路径：权限 deny 与用户拒绝均不执行，结果和持久化标记一致', async () => {
+  for (const mode of ['yolo', 'ask'] as const) {
+    const env = makeEnv(mode);
+    env.host.process.run = async () => assert.fail('拒绝后不得运行命令');
+    env.approval = new ApprovalManager((event) => {
+      env.events.push(event);
+      if (event.type === 'approval_request') env.approval.resolve(event.requestId, false);
+    }, mode);
+    const provider = scriptedProvider([
+      { blocks: [{ type: 'tool_call', id: 'denied', name: 'run_command', input: { command: 'rm -rf build' } }] },
+      { blocks: [{ type: 'text', text: '无法执行，已改用其他方案' }] },
+    ]);
+    const result = await runAgentLoop({ ...env, provider, tools: toolsFor(), workspace: '/ws', systemPrompt: 's',
+      permissionRules: mode === 'yolo' ? [{ tool: 'run_command', pattern: 'rm', decision: 'deny', source: 'global' }] : [],
+    });
+    assert.equal(result.reason, 'completed');
+    const event = env.events.find((event) => event.type === 'tool_result');
+    assert.ok(event?.type === 'tool_result');
+    assert.equal(event.approved, false);
+    assert.equal(event.isError, false);
+    assert.match(event.content, mode === 'yolo' ? /权限规则拒绝执行/ : /拒绝/);
+    if (mode === 'yolo') assert.deepEqual(event.timing, { approvalMs: 0 });
+    assert.equal(event.timing?.executionMs, undefined);
+    assert.equal(env.events.some((event) => event.type === 'approval_request'), mode === 'ask');
+    assert.equal(env.events.some((event) => event.type === 'tool_execution_start'), false);
+    const persisted = env.messages.find((message) => message.role === 'tool_result');
+    assert.ok(persisted?.role === 'tool_result');
+    assert.match(persisted.content, /拒绝/);
+    assert.equal(persisted.approved, false);
+    assert.equal(persisted.isError, false);
+    assert.equal(env.host.snapshot()['/ws/new.txt'], undefined);
+  }
 });
 
 test('交互批次：答案重规划前不执行旧参数，停止也补齐全部协议结果', async (t) => {
@@ -176,37 +171,6 @@ test('交互批次：答案重规划前不执行旧参数，停止也补齐全�
   }
 });
 
-test('审批：拒绝时工具不执行，模型收到拒绝说明', async () => {
-  const env = makeEnv('ask');
-  const call: ToolCallBlock = {
-    type: 'tool_call',
-    id: 'c1',
-    name: 'run_command',
-    input: { command: 'rm -rf /' },
-  };
-  const provider = scriptedProvider([
-    { blocks: [call] },
-    { blocks: [{ type: 'text', text: '好的，不执行了' }] },
-  ]);
-  const loop = runAgentLoop({ ...env, provider, tools: toolsFor(), workspace: '/ws', systemPrompt: 's' });
-  await new Promise<void>((resolve) => {
-    const timer = setInterval(() => {
-      if (env.events.some((e) => e.type === 'approval_request')) {
-        clearInterval(timer);
-        resolve();
-      }
-    }, 5);
-  });
-  const request = env.events.find((e) => e.type === 'approval_request');
-  if (request && request.type === 'approval_request') env.approval.resolve(request.requestId, false);
-  await loop;
-  const toolResult = env.messages.find((m) => m.role === 'tool_result');
-  assert.ok(toolResult, '缺少 tool_result 消息');
-  assert.equal(toolResult.role, 'tool_result');
-  assert.match(toolResult.content, /拒绝/);
-  assert.equal(env.host.snapshot()['/ws/new.txt'], undefined);
-});
-
 test('循环终止边界：步数耗尽与 Provider 进行中取消', async () => {
   for (const abort of [false, true]) {
     const env = makeEnv('yolo');
@@ -232,7 +196,7 @@ test('循环终止边界：步数耗尽与 Provider 进行中取消', async () =
   }
 });
 
-test('toOpenAIWireMessages: 过滤孤儿 tool_result 并自动补齐断尾未履行 tool_calls', () => {
+test('消息转换：孤儿/断尾工具结果处理与未签名 thinking 过滤', () => {
   const msgs: ChatMessage[] = [
     { role: 'user', content: '测试孤儿与断尾' },
     // 孤儿 tool_result：前置无 tool_calls，应被过滤
@@ -241,6 +205,8 @@ test('toOpenAIWireMessages: 过滤孤儿 tool_result 并自动补齐断尾未履
     {
       role: 'assistant',
       blocks: [
+        { type: 'thinking', text: '无签名的思考过程' },
+        { type: 'text', text: '这是回答正文' },
         { type: 'tool_call', id: 'call_1', name: 'read_file', input: { path: 'a.txt' } },
         { type: 'tool_call', id: 'call_2', name: 'read_file', input: { path: 'b.txt' } },
       ],
@@ -261,31 +227,15 @@ test('toOpenAIWireMessages: 过滤孤儿 tool_result 并自动补齐断尾未履
   assert.equal(wire.length, 5);
   assert.equal(wire[0].role, 'user');
   assert.equal(wire[1].role, 'assistant');
+  assert.equal(wire[1].content, '这是回答正文');
   assert.equal(wire[2].role, 'tool');
   assert.equal((wire[2] as { tool_call_id: string }).tool_call_id, 'call_1');
   assert.equal(wire[3].role, 'tool');
   assert.equal((wire[3] as { tool_call_id: string }).tool_call_id, 'call_2');
   assert.match(String((wire[3] as { content: string }).content), /中断或取消/);
   assert.equal(wire[4].role, 'user');
-});
-
-test('toAnthropicWireMessages: 过滤未签名的 thinking 块并合并相邻 tool_result', () => {
-  const msgs: ChatMessage[] = [
-    { role: 'user', content: 'hello' },
-    {
-      role: 'assistant',
-      blocks: [
-        { type: 'thinking', text: '无签名的思考过程' },
-        { type: 'text', text: '这是回答正文' },
-      ],
-    },
-  ];
-
-  const wire = toAnthropicWireMessages(msgs);
-  assert.equal(wire.length, 2);
-  const assistantContent = (wire[1] as { content: Array<{ type: string; text?: string }> }).content;
-  // 无签名的 thinking 块已被过滤，保留 text
-  assert.equal(assistantContent.length, 1);
-  assert.equal(assistantContent[0].type, 'text');
-  assert.equal(assistantContent[0].text, '这是回答正文');
+  const anthropic = toAnthropicWireMessages(msgs);
+  const assistantContent = anthropic.find((message) => message.role === 'assistant')!.content as Array<{ type: string; text?: string }>;
+  assert.equal(assistantContent.some((block) => block.type === 'thinking'), false);
+  assert.deepEqual(assistantContent.filter((block) => block.type === 'text').map((block) => block.text), ['这是回答正文']);
 });

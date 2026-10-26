@@ -199,13 +199,14 @@ export class ResponsesProvider implements Provider {
           toolCalls = evt.response.output
             .filter((item) => item.type === 'function_call' && item.name)
             .map((item) => {
-              let input: unknown = {};
-              if (item.arguments && item.arguments.trim()) {
-                try {
-                  input = JSON.parse(item.arguments);
-                } catch {
-                  throw new Error('模型返回的工具参数不是完整 JSON，未执行工具调用。');
-                }
+              if (typeof item.arguments !== 'string' || !item.arguments.trim()) {
+                throw new Error('模型返回的工具参数必须是非空 JSON 字符串，未执行工具调用。');
+              }
+              let input: unknown;
+              try {
+                input = JSON.parse(item.arguments);
+              } catch {
+                throw new Error('模型返回的工具参数不是完整 JSON，未执行工具调用。');
               }
               return {
                 type: 'tool_call',
