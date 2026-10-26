@@ -110,6 +110,11 @@ function printEvent(event: AgentEvent, askConfirm: (q: string) => Promise<boolea
     case 'error':
       process.stdout.write(`\n${red(`错误: ${event.message}`)}\n`);
       break;
+    case 'delegated_task':
+      if (event.task.status !== 'running') {
+        process.stdout.write(`\n[ ${event.task.status === 'completed' ? 'OK' : event.task.status === 'aborted' ? 'WAIT' : 'ERR'} ] 子任务：${event.task.description}\n${event.task.summary ?? event.task.error ?? ''}\n`);
+      }
+      break;
     default:
       break;
   }

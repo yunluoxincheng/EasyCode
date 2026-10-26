@@ -10,6 +10,7 @@ export * from './tasks.js';
 // 审批
 export * from './approval.js';
 export * from './questions.js';
+export * from './delegation.js';
 // 权限规则引擎（TODOS #47）
 export * from './permissions.js';
 // 真实路径守卫：符号链接消解与工作区边界校验（TODOS #47 第三轮复审）

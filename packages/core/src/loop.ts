@@ -10,8 +10,10 @@ import { startDecisionObservation, type DecisionPolicy, type DecisionObservation
 import type { PermissionRule } from './permissions.js';
 import type { BackgroundTaskManager } from './tasks.js';
 import type { UserQuestionManager } from './questions.js';
+import type { DelegatedTaskRunner } from './delegation.js';
 
 export interface LoopOptions {
+  delegatedTasks?: DelegatedTaskRunner;
   questions?: UserQuestionManager;
   provider: Provider;
   tools: ToolRegistry;
@@ -139,6 +141,7 @@ export function extractStructuredErrorFact(
  */
 export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
   const {
+    delegatedTasks,
     provider,
     tools,
     host,
@@ -348,6 +351,7 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
           continue;
         }
         const execution = await executeTool(tools, call.name, call.input, {
+          delegatedTasks,
           questions,
           host,
           workspace,
@@ -359,10 +363,16 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
           policy,
           backgroundTasks,
           callId: call.id,
+          messageId: assistantMessage.id,
           onFileChange,
           permissionRules,
           onExecutionStart: () => emit({ type: 'tool_execution_start', callId: call.id }),
         });
+        if (signal.aborted) {
+          // 保留实际执行许可与计时，但停止后的迟到结果不能进入后续模型上下文。
+          recordToolResult(call, { ...execution, isError: true, content: '当前回合已停止，本调用的迟到结果未提交。' });
+          return finish('aborted');
+        }
         const toolOutcome = getToolExecutionOutcome(call.name, execution);
         if (toolRoutingFollowup && call === calls[0]) {
           toolRoutingFollowup.outcome(toolOutcome);

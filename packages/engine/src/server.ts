@@ -55,6 +55,7 @@ import {
 import { Settings, DEFAULT_SETTINGS, PROVIDER_PRESETS } from './settings.js';
 import { TerminalManager } from './terminals.js';
 import { estimateContextTokens } from './context-capacity.js';
+import { DelegatedTaskManager, retainDelegatedTasks, restoreDelegatedTasks } from './delegation.js';
 import type { ModelTestResult, ProviderEntry, ProviderModel, ProviderModelInfo } from './settings.js';
 import { loadModelDirectory, resolveModelMeta } from './model-catalog.js';
 import { buildSystemPrompt } from './prompts.js';
@@ -171,6 +172,7 @@ export interface SessionEventPayload {
  * 运行环境不可知 —— Electron 主进程、CLI、浏览器演示模式共用。
  */
 export class AgentServer {
+  private readonly delegatedTasks: DelegatedTaskManager;
   private readonly terminals: TerminalManager;
   private sessions = new Map<string, SessionRuntime>();
   private readonly events = new Emitter<SessionEventPayload>();
@@ -208,6 +210,7 @@ export class AgentServer {
   private readonly workspaceIdentities = new Map<string, string>();
 
   constructor(private readonly host: Host) {
+    this.delegatedTasks = new DelegatedTaskManager(host);
     this.terminals = new TerminalManager(host);
     this.settingsSecrets = new SettingsSecrets(host);
     this.mcp = new McpManager(host, (id) => this.settingsLock.withLock(async () => {
@@ -365,6 +368,7 @@ export class AgentServer {
         messages: forkContext,
         history: rt.data.history ? clonedMessages : undefined,
         todos: latestTodos ? structuredClone(latestTodos) : undefined,
+        delegatedTasks: retainDelegatedTasks(rt.data.delegatedTasks, clonedMessages),
       },
       approval: new ApprovalManager(this.emitterFor(meta.id), this.settings.defaultApprovalMode),
       running: false,
@@ -436,6 +440,7 @@ export class AgentServer {
           const raw = await this.host.fs.readFile(this.host.paths.join(dir, entry.name));
           const data = JSON.parse(raw) as SessionData;
           if (data?.meta?.id) {
+            data.delegatedTasks = restoreDelegatedTasks(data.delegatedTasks);
             this.sessions.set(data.meta.id, {
               data,
               approval: new ApprovalManager(
@@ -496,7 +501,8 @@ export class AgentServer {
     }
     // abort 会中止 controller；测试循环启动早期就已挂上 controller，
     // 因此「探测命令 / 审批」阶段被删除同样能收到中止信号。
-    this.abort(id);
+    await this.abort(id);
+    await this.delegatedTasks.cancelSession(id);
     this.sessions.delete(id);
     if (rt?.persisting) {
       // 等**所有**在途落盘落定（不能只等最后一个：串行链上较早的任务完成时
@@ -602,6 +608,7 @@ export class AgentServer {
       const previous = rt.data;
       const next: SessionData = {
         ...previous,
+        delegatedTasks: retainDelegatedTasks(previous.delegatedTasks, messages),
         meta: { ...previous.meta, updatedAt: new Date().toISOString() },
         history: previous.history ? structuredClone(messages) : undefined,
         messages: previous.history
@@ -621,7 +628,7 @@ export class AgentServer {
       });
       rt.approval.denyAll();
       rt.questions?.cancelAll();
-      this.emitterFor(id)({ type: 'history_replaced', messages, contextMessages: rt.data.messages, todos: rt.data.todos ?? [] });
+      this.emitterFor(id)({ type: 'history_replaced', messages, contextMessages: rt.data.messages, todos: rt.data.todos ?? [], delegatedTasks: rt.data.delegatedTasks });
       signal.throwIfAborted();
     });
   }
@@ -721,7 +728,9 @@ export class AgentServer {
       // 联网搜索分流：总开关关闭=全部不搜索；有原生工具的走原生，否则走内置 web_search()
       const searchOn = caps.includes('websearch') && this.settings.webSearch?.enabled === true;
       const useNativeSearch = searchOn && supportsNativeWebSearch(model, entry.kind);
-      const provider = await this.createProvider(rt.data.meta.providerId, model, useNativeSearch);
+      const providerId = rt.data.meta.providerId;
+      const providerSnapshot = structuredClone(await this.providerEntry(providerId));
+      const provider = this.providerFromEntry(providerId, providerSnapshot, model, useNativeSearch);
       const webSearchCfg = searchOn && !useNativeSearch
         ? await this.settingsLock.withLock(() => this.settingsSecrets.webSearch(this.settings.webSearch))
         : undefined;
@@ -822,7 +831,34 @@ export class AgentServer {
           ))
         : undefined;
 
+      let delegationCount = 0;
       loopResult = await runAgentLoop({
+        delegatedTasks: { run: async (call, input, signal) => {
+          if (++delegationCount > 4) throw new Error('每个主回合最多委派 4 次只读任务');
+          if (!lastUserMessage?.id) throw new Error('子任务缺少所属用户回合');
+          return this.delegatedTasks.run({
+            sessionId: id, userMessageId: lastUserMessage.id,
+            workspace: rt.data.meta.workspaceRoot, systemPrompt, systemSupported: caps.includes('system'), contextWindow,
+            reasoningEffort: rt.data.meta.reasoningEffort ?? '', permissionRules: structuredClone(permissionRules ?? []),
+            createProvider: async () => this.providerFromEntry(providerId, providerSnapshot, model, false),
+            records: () => rt.data.delegatedTasks ??= [],
+            update: (task, publish = true) => {
+              if (rt.deleted || this.sessions.get(id) !== rt || rt.controller !== turnController) return;
+              const records = rt.data.delegatedTasks ??= [];
+              const index = records.findIndex((record) => record.id === task.id);
+              if (index >= 0) records[index] = task;
+              if (publish) this.emitterFor(id)({ type: 'delegated_task', task, sessionUsage: rt.data.usage ? { ...rt.data.usage, cached: rt.data.usage.cached ?? 0 } : undefined });
+            },
+            persist: () => this.persistSession(rt),
+            usage: (usage) => {
+              if (rt.deleted || rt.controller !== turnController) return;
+              const total = rt.data.usage ??= { input: 0, output: 0, steps: 0 };
+              const count = (value: number | undefined) => typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.min(1e9, Math.floor(value)) : 0;
+              total.input += count(usage?.inputTokens); total.output += count(usage?.outputTokens);
+              total.cached = (total.cached ?? 0) + count(usage?.cachedTokens); total.steps++;
+            },
+          }, call, input, signal);
+        } },
         provider,
         tools: builtinTools,
         host: this.host,
@@ -1226,7 +1262,7 @@ export class AgentServer {
   /** 终止所有会话的全部后台任务（应用退出时调用）。跨会话并行执行，总耗时以单任务为准 */
   async stopAllBackgroundTasks(): Promise<void> {
     await Promise.all(
-      [this.mcp.dispose(), this.terminals.dispose(), ...[...this.bgManagers.values()].map((manager) =>
+      [...[...this.sessions.keys()].map((id) => this.abort(id)), this.delegatedTasks.dispose(), this.mcp.dispose(), this.terminals.dispose(), ...[...this.bgManagers.values()].map((manager) =>
         manager.disposeAll().catch(() => {
           // 单会话清理失败不影响其余会话
         }),
@@ -1237,6 +1273,10 @@ export class AgentServer {
   private async createProvider(providerId: string, model: string, nativeWebSearch: boolean): Promise<Provider> {
     const entry = await this.providerEntry(providerId);
     if (!entry) throw new Error(`未配置的 Provider: ${providerId}，请在设置中检查`);
+    return this.providerFromEntry(providerId, entry, model, nativeWebSearch);
+  }
+
+  private providerFromEntry(providerId: string, entry: ProviderEntry, model: string, nativeWebSearch: boolean): Provider {
     switch (entry.kind) {
       case 'mock':
         return new MockProvider(providerId);

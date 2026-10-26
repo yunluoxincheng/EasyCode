@@ -18,6 +18,7 @@ import type {
   ViewBlock,
 } from '../store.js';
 import { TestRunCard } from './TestRunCard.js';
+import { TaskCard } from './TaskCard.js';
 
 /** Markdown 渲染（含代码块样式钩子 + React.memo 浅比对优化）；streaming 时未闭合代码块跳过高亮分词（TODOS #45） */
 const Md = memo(function Md({ text, streaming = false }: { text: string; streaming?: boolean }) {
@@ -456,6 +457,7 @@ function ItemView({
     }
     case 'tool':
       if (item.question) return null;
+      if (item.name === 'task') return <TaskCard item={item} />;
       if (item.name === 'todo_write' && item.status !== 'denied' && item.status !== 'error') {
         // 成功清单避免重复展示；拒绝/失败保留工具卡片，不能当作已更新清单。
         return null;

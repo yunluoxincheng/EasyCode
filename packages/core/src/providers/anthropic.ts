@@ -99,7 +99,7 @@ export class AnthropicProvider implements Provider {
       body: JSON.stringify(body),
       signal: ctx.signal,
     });
-    if (!res.ok) throw new Error(`Provider 请求失败: ${await readHttpError(res)}`);
+    if (!res.ok) throw new Error(`Provider 请求失败: ${await readHttpError(res, ctx.maxResponseBytes)}`);
 
     const textParts: string[] = [];
     const thinkingParts: string[] = [];
@@ -123,7 +123,7 @@ export class AnthropicProvider implements Provider {
       usage?: { output_tokens?: number };
     };
 
-    for await (const payload of sseData(res, ctx.signal)) {
+    for await (const payload of sseData(res, ctx.signal, ctx.maxResponseBytes)) {
       let evt: WireEvent;
       try {
         evt = JSON.parse(payload);

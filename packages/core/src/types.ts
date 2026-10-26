@@ -1,4 +1,5 @@
 /** 消息与内容的统一内部格式。各 Provider 适配器负责与协议线格式互转。 */
+import type { DelegatedTaskRecord } from './delegation.js';
 
 export interface TextBlock {
   type: 'text';
@@ -76,6 +77,8 @@ export interface TodoItem {
 }
 
 export interface SessionData {
+  /** 有界的子任务过程，仅供回看，不进入 Provider 消息。 */
+  delegatedTasks?: DelegatedTaskRecord[];
   meta: SessionMeta;
   messages: ChatMessage[];
   /** 压缩前的原始时间线，仅供展示/编辑；模型请求始终使用 messages。旧版本丢弃的历史无法恢复。 */
