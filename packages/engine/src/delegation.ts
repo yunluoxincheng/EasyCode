@@ -1,6 +1,6 @@
 import {
   ApprovalManager, createBuiltinTools, parseDelegatedTask, resolveRealPathInWorkspace,
-  runAgentLoop, ToolRegistry, validateToolInput,
+  runAgentLoop, ToolRegistry, validateToolInput, literalSearchFilesTool,
   type AgentEvent, type ChatMessage, type DelegatedTaskInput, type DelegatedTaskRecord,
   type Host, type PermissionRule, type Provider, type Usage,
 } from '@easycode/core';
@@ -92,6 +92,7 @@ function readOnlyTools(host: Host, workspace: string, signal: AbortSignal, track
     gitCommands[`git ${suffix}`] = `git --no-optional-locks -c core.fsmonitor=false ${safeSuffix}`;
   }
   const denied = async (): Promise<never> => { throw new Error('只读子任务禁止修改文件或启动进程'); };
+  let gitFailure: Error | undefined;
   const capability: Host = {
     paths: host.paths, env: host.env,
     fs: {
@@ -109,14 +110,22 @@ function readOnlyTools(host: Host, workspace: string, signal: AbortSignal, track
     process: { run: async (command, options) => {
       check();
       const safe = gitCommands[command.trim().replace(/\s+/g, ' ')];
-      if (!safe || host.paths.resolve(options.cwd ?? '') !== host.paths.resolve(workspace)) return denied();
-      return track(host.process.run(safe, { ...options, cwd: workspace, timeoutMs: Math.min(options.timeoutMs ?? 15000, 15000), signal }));
+      if (!safe || host.paths.resolve(options.cwd ?? '') !== host.paths.resolve(workspace)) {
+        gitFailure = new Error('只读子任务拒绝该 Git 命令或工作目录'); throw gitFailure;
+      }
+      const result = await track(host.process.run(safe, { ...options, cwd: workspace, timeoutMs: Math.min(options.timeoutMs ?? 15000, 15000), signal }));
+      if (result.timedOut || result.truncated || result.outputError || result.code !== 0) {
+        gitFailure = new Error(result.timedOut ? 'Git 查询超时，结果不完整' : result.truncated ? 'Git 输出已截断，不能作为完整证据'
+          : result.outputError ? 'Git 输出读取失败，结果不完整' : `Git 查询失败（退出码 ${result.code ?? 'signal'}）`);
+        throw gitFailure;
+      }
+      return result;
     } },
   };
   const tools = new ToolRegistry();
   const builtins = createBuiltinTools();
   for (const name of ['read_file', 'list_dir', 'search_files', 'git_status', 'git_diff']) {
-    const tool = builtins.get(name)!;
+    const tool = name === 'search_files' ? literalSearchFilesTool : builtins.get(name)!;
     const spec = name === 'git_diff' ? { ...tool.spec, description: '只读查看整个工作区或暂存区差异，不接受文件路径参数。', parameters: { type: 'object' as const, properties: { staged: { type: 'boolean' as const } } } } : tool.spec;
     tools.register({ ...tool, spec, validateInput: (input) => {
       if (name === 'git_diff') {
@@ -128,12 +137,17 @@ function readOnlyTools(host: Host, workspace: string, signal: AbortSignal, track
     }, execute: async (input, context) => {
       check();
       if (name === 'git_status' || name === 'git_diff') {
+        gitFailure = undefined;
         // Git 状态/差异也可能运行 clean/process 过滤器；只读子任务对此保守拒绝。
         const config = await untilAborted(track(host.process.run('git --no-optional-locks -c core.fsmonitor=false config --name-only --get-regexp filter', { cwd: workspace, timeoutMs: 15000, signal })), signal);
-        if ((config.code !== 0 && config.code !== 1) || config.stdout.length >= 190000) throw new Error('无法完整核对子任务 Git 过滤器配置，请由主会话查询');
+        if (config.truncated || config.timedOut || config.outputError || (config.code !== 0 && config.code !== 1) || config.stdout.length >= 190000) throw new Error('无法完整核对子任务 Git 过滤器配置，请由主会话查询');
         if (config.stdout.split(/\r?\n/).some((key) => /^filter\..+\.(clean|smudge|process)$/i.test(key.trim()))) throw new Error('Git 配置包含外部过滤器，只读子任务拒绝查询，请改用文件读取或由主会话处理');
       }
-      return clip(await untilAborted(track(tool.execute(input, { ...context, host: capability })), signal), 8192);
+      const content = await untilAborted(track(tool.execute(input, { ...context, host: capability })), signal);
+      // 状态解析器的容错不能吞掉宿主完整性失败，返回伪造的“干净/非仓库”。
+      if ((name === 'git_status' || name === 'git_diff') && gitFailure) throw gitFailure;
+      if ((name === 'git_status' || name === 'git_diff') && content.length > 8192) throw new Error('Git 结果超过子任务 8192 字符预算，不能作为完整证据');
+      return clip(content, 8192);
     } });
   }
   return tools;
@@ -174,7 +188,28 @@ export class DelegatedTaskManager {
     let closed = false;
     let notification: ReturnType<typeof setTimeout> | undefined;
     const update = () => { if (!closed) context.update(structuredClone(record)); };
-    const schedule = () => { notification ??= setTimeout(() => { notification = undefined; update(); }, 100); };
+    let checkpointTimer: ReturnType<typeof setTimeout> | undefined;
+    let checkpointFlight: Promise<void> | undefined;
+    let checkpointDirty = false;
+    let checkpointError: Error | undefined;
+    const checkpoint = () => {
+      if (closed || !checkpointDirty || checkpointTimer !== undefined || checkpointFlight) return;
+      checkpointTimer = setTimeout(() => {
+        checkpointTimer = undefined;
+        if (closed || !checkpointDirty) return;
+        checkpointDirty = false;
+        update();
+        checkpointFlight = Promise.resolve().then(() => context.persist()).catch(() => {
+          checkpointError = new Error('子任务过程检查点保存失败，已停止探索');
+          controller.abort(checkpointError);
+        }).finally(() => { checkpointFlight = undefined; checkpoint(); });
+      }, 2000);
+    };
+    const schedule = () => {
+      notification ??= setTimeout(() => { notification = undefined; update(); }, 100);
+      checkpointDirty = true;
+      checkpoint();
+    };
     const trace = (kind: DelegatedTaskRecord['trace'][number]['kind'], content: string, tool?: string) => {
       if (closed || controller.signal.aborted) return;
       const text = clip(content, 2048);
@@ -255,8 +290,16 @@ export class DelegatedTaskManager {
           ? (controller.signal.aborted ? controller.signal.reason : error).message : error), 1000);
       } finally {
         clearTimeout(deadline); if (notification !== undefined) clearTimeout(notification);
+        if (checkpointTimer !== undefined) clearTimeout(checkpointTimer);
         parentSignal.removeEventListener('abort', abort);
-        closed = true; controller.abort(); record.finishedAt = Date.now();
+        closed = true;
+        await checkpointFlight;
+        if (checkpointError || (controller.signal.aborted && record.status === 'completed')) {
+          record.status = checkpointError || controller.signal.reason?.name !== 'AbortError' ? 'error' : 'aborted';
+          delete record.summary;
+          record.error = checkpointError?.message ?? String(controller.signal.reason?.message ?? '子任务已中止');
+        }
+        controller.abort(); record.finishedAt = Date.now();
         context.update(structuredClone(record), false);
       }
       try { await context.persist(); }

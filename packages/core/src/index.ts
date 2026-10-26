@@ -31,7 +31,7 @@ export {
 } from './tools/fs.js';
 export type { CodeRangeMention, CodeRangeSnippet } from './tools/fs.js';
 
-export { searchFilesTool, listFilesRecursively } from './tools/search.js';
+export { searchFilesTool, literalSearchFilesTool, listFilesRecursively } from './tools/search.js';
 export { runCommandTool } from './tools/shell.js';
 export { todoWriteTool } from './tools/todo.js';
 export {

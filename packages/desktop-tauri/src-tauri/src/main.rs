@@ -363,6 +363,25 @@ fn truncate(s: &str) -> String {
     }
 }
 
+/// 持续排空管道，只保存前缀；达到内存上限也不能让子进程卡在 write。
+fn drain_capped_pipe(mut pipe: impl Read) -> (Vec<u8>, bool, bool) {
+    let mut saved = Vec::new();
+    let mut truncated = false;
+    let mut chunk = [0u8; 8192];
+    loop {
+        match pipe.read(&mut chunk) {
+            Ok(0) => return (saved, truncated, false),
+            Ok(count) => {
+                let keep = count.min((MAX_PIPE as usize).saturating_sub(saved.len()));
+                saved.extend_from_slice(&chunk[..keep]);
+                truncated |= keep < count;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return (saved, truncated, true),
+        }
+    }
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Dirent {
@@ -890,21 +909,13 @@ async fn proc_run(
         return Err("终端接收方已关闭，命令已取消".into());
     }
 
-    let mut stdout_pipe = child.stdout.take();
-    let mut stderr_pipe = child.stderr.take();
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
     let out_handle = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(p) = stdout_pipe.as_mut() {
-            let _ = p.take(MAX_PIPE).read_to_end(&mut buf);
-        }
-        buf
+        stdout_pipe.map(drain_capped_pipe).unwrap_or_default()
     });
     let err_handle = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(p) = stderr_pipe.as_mut() {
-            let _ = p.take(MAX_PIPE).read_to_end(&mut buf);
-        }
-        buf
+        stderr_pipe.map(drain_capped_pipe).unwrap_or_default()
     });
 
     let deadline = Instant::now() + timeout;
@@ -938,19 +949,26 @@ async fn proc_run(
     state.0.lock().unwrap().remove(&id);
     foreground.0.lock().unwrap().remove(&id);
 
-    let stdout = decode_output(&out_handle.join().unwrap_or_default());
-    let mut stderr = decode_output(&err_handle.join().unwrap_or_default());
+    let (out_bytes, out_cut, out_error) = out_handle.join().unwrap_or_else(|_| (Vec::new(), false, true));
+    let (err_bytes, err_cut, err_error) = err_handle.join().unwrap_or_else(|_| (Vec::new(), false, true));
+    let stdout = decode_output(&out_bytes);
+    let mut stderr = decode_output(&err_bytes);
     if timed_out {
         stderr.push_str(&format!(
             "\n[EasyCode] 命令超时（{}s），已终止。",
             timeout.as_secs()
         ));
     }
-    Ok(serde_json::json!({
+    let truncated = out_cut || err_cut || stdout.len() > MAX_STR || stderr.len() > MAX_STR;
+    let mut result = serde_json::json!({
         "code": code,
         "stdout": truncate(&stdout),
         "stderr": truncate(&stderr),
-    }))
+    });
+    if truncated { result["truncated"] = serde_json::json!(true); }
+    if timed_out { result["timedOut"] = serde_json::json!(true); }
+    if out_error || err_error { result["outputError"] = serde_json::json!(true); }
+    Ok(result)
 }
 
 #[tauri::command]
@@ -986,6 +1004,12 @@ mod process_lifecycle_tests {
 
     #[test]
     fn stop_and_exit_remove_both_registries_without_late_watcher_deletion() {
+        let mut pipe = std::io::Cursor::new(vec![b'x'; (MAX_PIPE * 3) as usize]);
+        let (saved, truncated, failed) = drain_capped_pipe(&mut pipe);
+        assert_eq!(saved.len(), MAX_PIPE as usize);
+        assert_eq!(pipe.position(), MAX_PIPE * 3, "超限之后仍须读到 EOF");
+        assert!(truncated);
+        assert!(!failed);
         let pids = PidMap::default();
         let spawns = SpawnMap::default();
         #[cfg(windows)]

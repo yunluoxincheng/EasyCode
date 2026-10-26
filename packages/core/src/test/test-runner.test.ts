@@ -28,22 +28,13 @@ test('detectTestCommand：package.json + 锁文件推断包管理器', async () 
   assert.equal((await detectTestCommand(bun, '/ws'))?.command, 'bun run test');
 });
 
-test('parseTestOutput：pytest 汇总与 FAILED 行', () => {
-  const output = [
-    'tests/test_math.py::test_add PASSED',
-    'tests/test_math.py::test_sub FAILED',
-    '',
-    '========================= 1 failed, 1 passed in 0.12s =========================',
-  ].join('\n');
-  const summary = parseTestOutput(output);
-  assert.equal(summary.failed, 1);
-  assert.equal(summary.passed, 1);
-  assert.equal(summary.total, 2);
-  assert.deepEqual(summary.failures.length > 0, true);
-});
-
-test('parseTestOutput：Node spec/TAP 汇总均剔除非失败标题、跳过和待办', () => {
+test('parseTestOutput：pytest/Node spec/TAP 共用汇总校验，剔除非失败标题、跳过和待办', () => {
   const cases = [
+    {
+      output: ['tests/test_math.py::test_add PASSED', 'tests/test_math.py::test_sub FAILED', '',
+        '========================= 1 failed, 1 passed in 0.12s ========================='],
+      total: 2, passed: 1, failed: 1,
+    },
     {
       output: [
         '✖ add(2, 3) 应等于 5 (2.0765ms)',
@@ -69,7 +60,8 @@ test('parseTestOutput：Node spec/TAP 汇总均剔除非失败标题、跳过和
     assert.equal(summary.total, item.total);
     assert.equal(summary.passed, item.passed);
     assert.equal(summary.failed, item.failed);
-    assert.deepEqual(summary.failures, item.failures);
+    if (item.failures) assert.deepEqual(summary.failures, item.failures);
+    else assert.ok(summary.failures.length > 0);
   }
 });
 

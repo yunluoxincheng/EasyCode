@@ -33,6 +33,8 @@ export interface GitDiffOptions {
 export interface GitDiffResult {
   path?: string;
   diff: string;
+  error?: string;
+  truncated?: boolean;
 }
 
 /**
@@ -312,6 +314,10 @@ export async function getGitDiff(
   const cmd = `git diff ${isStaged ? '--cached' : ''} ${targetPath ? `-- "${targetPath}"` : ''}`;
   try {
     const res = await host.process.run(cmd, { cwd: workspace, timeoutMs: 15000 });
+    if (res.timedOut) throw new Error('Git 差异查询超时，结果不完整');
+    if (res.outputError) throw new Error('Git 差异输出读取失败，结果不完整');
+    if (res.truncated) return { path: targetPath, diff: '[ ERR ] Git 差异输出已截断，不能作为完整证据；请缩小查询范围。', error: 'Git 差异输出已截断，结果不完整', truncated: true };
+    if (res.code !== 0) throw new Error(`Git 差异查询失败（退出码 ${res.code ?? 'signal'}）：${res.stderr.slice(0, 500)}`);
     const diff = res.stdout || '';
 
     // 若指定了文件但 diff 输出为空，且未暂存，尝试检测是否为未跟踪文件
@@ -350,6 +356,7 @@ export async function getGitDiff(
     return {
       path: targetPath,
       diff: `获取 Diff 失败: ${e instanceof Error ? e.message : String(e)}`,
+      error: e instanceof Error ? e.message : String(e),
     };
   }
 }
@@ -477,6 +484,7 @@ export const gitDiffTool: Tool = {
   async execute(input: unknown, ctx: ToolContext): Promise<string> {
     const raw = (input && typeof input === 'object' ? input : {}) as { path?: string; staged?: boolean };
     const res = await getGitDiff(ctx.host, ctx.workspace, raw);
+    if (res.error || res.truncated) throw new Error(res.error ?? 'Git 差异输出不完整');
     if (!res.diff.trim()) {
       return raw.path
         ? `文件 ${raw.path} 在 ${raw.staged ? '暂存区' : '工作区'} 无差异。`

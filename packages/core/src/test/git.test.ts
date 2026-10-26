@@ -2,10 +2,10 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   MemoryHost,
-  getGitStatus
+  getGitStatus, getGitDiff, gitDiffTool, type ProcessResult, type Host
 } from '../index.js';
 
-test('getGitStatus: 解析分支、增删统计与暂存/工作区/未跟踪文件', async () => {
+test('Git 查询：状态解析与差异失败/截断不能作为完整证据', async () => {
   const host = new MemoryHost();
   host.process.run = async (cmd: string) => {
     if (cmd.includes('git status --porcelain=v1 -b --ahead-behind')) {
@@ -61,4 +61,21 @@ test('getGitStatus: 解析分支、增删统计与暂存/工作区/未跟踪文�
   assert.ok(untracked);
   assert.equal(untracked.staged, false);
   assert.equal(untracked.status, '?');
+
+  const results: ProcessResult[] = [
+    { code: 1, stdout: 'partial diff', stderr: 'broken pipe' },
+    { code: 0, stdout: 'partial diff', stderr: '', truncated: true },
+    { code: 0, stdout: 'partial diff', stderr: '', timedOut: true },
+    { code: 0, stdout: 'partial diff', stderr: '', outputError: true },
+  ];
+  const queryHost: Host = host;
+  for (const result of results) {
+    queryHost.process.run = async () => result;
+    const diff = await getGitDiff(host, '/mock-ws');
+    assert.ok(diff.error, '失败/不完整的结果必须显式标记');
+    assert.notEqual(diff.diff, result.stdout, '不得返回未标记的局部差异');
+    await assert.rejects(gitDiffTool.execute({}, { host, workspace: '/mock-ws', signal: new AbortController().signal }), /失败|截断|超时|不完整/);
+  }
+  host.process.run = async () => ({ code: 0, stdout: 'complete diff', stderr: '' });
+  assert.equal((await getGitDiff(host, '/mock-ws')).diff, 'complete diff');
 });

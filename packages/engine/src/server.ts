@@ -849,7 +849,8 @@ export class AgentServer {
               if (index >= 0) records[index] = task;
               if (publish) this.emitterFor(id)({ type: 'delegated_task', task, sessionUsage: rt.data.usage ? { ...rt.data.usage, cached: rt.data.usage.cached ?? 0 } : undefined });
             },
-            persist: () => this.persistSession(rt),
+            // 即使主循环使用合并 system/rangeContext 的临时消息，也保存可回放的原文调用归属。
+            persist: () => this.persistSession(rt, true, wireMessages?.map(cleanMessage)),
             usage: (usage) => {
               if (rt.deleted || rt.controller !== turnController) return;
               const total = rt.data.usage ??= { input: 0, output: 0, steps: 0 };
@@ -1490,7 +1491,7 @@ export class AgentServer {
     return this.host.paths.join(this.host.env.dataDir(), 'settings.json');
   }
 
-  private async persistSession(rt: SessionRuntime, atomic = false): Promise<void> {
+  private async persistSession(rt: SessionRuntime, atomic = false, messages?: ChatMessage[]): Promise<void> {
     // 已删除的会话不得被仍在收尾的异步流程写回磁盘（会话「复活」防护）
     if (rt.deleted) return;
     this.syncHistory(rt);
@@ -1509,7 +1510,7 @@ export class AgentServer {
         if (rt.deleted) return;
         await this.host.fs.mkdir(this.sessionsDir(), { recursive: true });
         const file = this.sessionFile(rt.data.meta.id);
-        const content = JSON.stringify(rt.data);
+        const content = JSON.stringify(messages ? { ...rt.data, messages } : rt.data);
         if (atomic) {
           const temporary = `${file}.edit.tmp`;
           try {
