@@ -2,7 +2,7 @@ import {
   ApprovalManager, createBuiltinTools, parseDelegatedTask, resolveRealPathInWorkspace,
   runAgentLoop, ToolRegistry, validateToolInput, literalSearchFilesTool,
   type AgentEvent, type ChatMessage, type DelegatedTaskInput, type DelegatedTaskRecord,
-  type Host, type PermissionRule, type Provider, type Usage,
+  type Host, type PermissionRule, type Provider, type Usage, type SessionData, type ToolResultMessage,
 } from '@easycode/core';
 import { estimateContextTokens } from './context-capacity.js';
 
@@ -47,6 +47,46 @@ export function restoreDelegatedTasks(raw: unknown): DelegatedTaskRecord[] {
       usage: { input: number(value.usage?.input), output: number(value.usage?.output), cached: number(value.usage?.cached), steps: number(value.usage?.steps) },
     }];
   });
+}
+
+/** 检查点可能只保存了父调用。冷恢复关闭该批缺失结果，不重放任何工具。 */
+export function closeInterruptedTaskCalls(data: SessionData): boolean {
+  const recovered = new Map<string, ToolResultMessage>();
+  let changed = false;
+  for (const messages of new Set([data.messages, data.history].filter((value): value is ChatMessage[] => Array.isArray(value)))) {
+    for (let index = 0; index < messages.length; index++) {
+      const message = messages[index];
+      if (message.role !== 'assistant') continue;
+      const calls = message.blocks.filter((block) => block.type === 'tool_call');
+      if (!calls.some((call) => call.name === 'task')) continue;
+      const pending = new Map(calls.map((call) => [call.id, call]));
+      let end = index + 1;
+      while (messages[end]?.role === 'tool_result') {
+        const result = messages[end];
+        if (result.role === 'tool_result') pending.delete(result.toolCallId);
+        end++;
+      }
+      if (!pending.size) continue;
+      const parent = message.id ?? `${message.createdAt ?? ''}:${JSON.stringify(message.blocks)}`;
+      const results = [...pending.values()].map((call) => {
+        const key = JSON.stringify([parent, call.id]);
+        let result = recovered.get(key);
+        if (!result) {
+          result = { role: 'tool_result', id: `recovered_${crypto.randomUUID()}`, createdAt: new Date().toISOString(),
+            toolCallId: call.id, toolName: call.name, isError: true,
+            content: call.name === 'task' ? '子任务因应用异常退出而中断，工具结果未提交，未恢复执行。'
+              : '应用异常退出，该批次工具调用未获得完成结果，未自动重放执行。' };
+          // 执行许可保持未知，不把恢复占位结果推断为成功或未曾执行。
+          recovered.set(key, result);
+        }
+        return structuredClone(result);
+      });
+      messages.splice(end, 0, ...results);
+      changed = true;
+      index = end + results.length - 1;
+    }
+  }
+  return changed;
 }
 
 interface TaskContext {

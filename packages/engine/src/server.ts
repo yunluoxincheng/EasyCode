@@ -55,7 +55,7 @@ import {
 import { Settings, DEFAULT_SETTINGS, PROVIDER_PRESETS } from './settings.js';
 import { TerminalManager } from './terminals.js';
 import { estimateContextTokens } from './context-capacity.js';
-import { DelegatedTaskManager, retainDelegatedTasks, restoreDelegatedTasks } from './delegation.js';
+import { DelegatedTaskManager, retainDelegatedTasks, restoreDelegatedTasks, closeInterruptedTaskCalls } from './delegation.js';
 import type { ModelTestResult, ProviderEntry, ProviderModel, ProviderModelInfo } from './settings.js';
 import { loadModelDirectory, resolveModelMeta } from './model-catalog.js';
 import { buildSystemPrompt } from './prompts.js';
@@ -441,6 +441,7 @@ export class AgentServer {
           const data = JSON.parse(raw) as SessionData;
           if (data?.meta?.id) {
             data.delegatedTasks = restoreDelegatedTasks(data.delegatedTasks);
+            const repaired = closeInterruptedTaskCalls(data);
             this.sessions.set(data.meta.id, {
               data,
               approval: new ApprovalManager(
@@ -449,6 +450,7 @@ export class AgentServer {
               ),
               running: false,
             });
+            if (repaired) await this.persistSession(this.sessions.get(data.meta.id)!, true);
           }
         } catch {
           // 单个会话文件损坏不影响其余

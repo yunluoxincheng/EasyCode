@@ -5,10 +5,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { NodeHost } from '@easycode/host-node';
-import type { DelegatedTaskRecord, Provider, TurnResult } from '@easycode/core';
+import { MemoryHost, type ChatMessage, type DelegatedTaskRecord, type Provider, type TurnResult, type SessionData } from '@easycode/core';
 import { DelegatedTaskManager, restoreDelegatedTasks } from '../delegation.js';
+import { AgentServer } from '../server.js';
 
-test('子任务：真实超限 Git 失败闭合，运行过程检查点、取消和写入失败可恢复', async () => {
+test('子任务：Git/检查点/取消闭合，冷恢复补齐三协议结果且不重放', async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'easycode-delegation-review-'));
   const host = new NodeHost({ dataDir: path.join(directory, 'profile') });
   const manager = new DelegatedTaskManager(host);
@@ -124,6 +125,99 @@ test('子任务：真实超限 Git 失败闭合，运行过程检查点、取消
     assert.equal(failure.published.includes('completed'), false);
     assert.equal((JSON.parse(await fs.readFile(failure.file, 'utf8')) as DelegatedTaskRecord[])[0].status, 'error');
     assert.equal(failure.counts().maxWrites, 1);
+
+    // 使用真实运行中检查点记录模拟异常退出，不依赖 OpenAI 适配器的临时占位补全。
+    const RecoveryServer = process.env.EASYCODE_RECOVERY_SERVER_URL
+      ? (await import(process.env.EASYCODE_RECOVERY_SERVER_URL)).AgentServer as typeof AgentServer : AgentServer;
+    for (const kind of ['openai-compatible', 'anthropic', 'responses'] as const) {
+      const task = first.snapshot()[0];
+      const messages: ChatMessage[] = [
+        { role: 'user', id: task.parentUserMessageId, content: '分析项目结构' },
+        { role: 'assistant', id: task.parentMessageId, blocks: [
+          { type: 'tool_call', id: 'read-before', name: 'read_file', input: { path: 'file.txt' } },
+          { type: 'tool_call', id: task.parentCallId, name: 'task', input: { description: task.description } },
+          { type: 'tool_call', id: 'list-after', name: 'list_dir', input: {} },
+        ] },
+        { role: 'tool_result', id: 'existing-read', toolCallId: 'read-before', toolName: 'read_file', approved: true, content: 'existing result' },
+      ];
+      const checkpoint: SessionData = {
+        meta: { id: 's_cold', title: 'checkpoint recovery', workspaceRoot: '/ws', providerId: 'cold', model: 'cold-test', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
+        messages, history: structuredClone(messages), delegatedTasks: first.snapshot(),
+      };
+      const file = '/easycode-demo/sessions/s_cold.json';
+      const recoveryHost = new MemoryHost({ '/ws/file.txt': 'safe', [file]: JSON.stringify(checkpoint) });
+      const boot = new RecoveryServer(recoveryHost);
+      await boot.updateSettings({ providers: { cold: { kind, baseURL: 'https://example.invalid/v1', models: [{ name: 'cold-test', capabilities: ['system'] }] } }, defaultProvider: 'cold' });
+      await boot.listSessions();
+      const restored = await boot.getSession('s_cold');
+      const results = restored.messages.filter((message) => message.role === 'tool_result');
+      assert.equal(results.length, 3, `${kind}: 同批缺失结果也必须闭合`);
+      assert.equal(results.find((message) => message.toolCallId === 'read-before')?.content, 'existing result');
+      for (const result of results.filter((message) => message.toolCallId !== 'read-before')) {
+        assert.equal(result.isError, true);
+        assert.match(result.content, /应用异常退出/);
+        assert.equal(result.approved, undefined, '恢复结果不推断执行许可');
+        const historyResult = restored.history?.find((message) => message.id === result.id);
+        assert.deepEqual(historyResult, result, '模型视图和原文历史使用同一恢复身份');
+        assert.notEqual(historyResult, result, '两个视图不能共享可变结果对象');
+      }
+      assert.equal(restored.delegatedTasks?.[0].status, 'aborted');
+      const saved = await recoveryHost.fs.readFile(file);
+      assert.equal((JSON.parse(saved) as SessionData).messages.filter((message) => message.role === 'tool_result').length, 3);
+      const restarted = new RecoveryServer(recoveryHost);
+      await restarted.listSessions();
+      assert.equal(await recoveryHost.fs.readFile(file), saved, '重复恢复不重复补写');
+      let requests = 0, taskEvents = 0;
+      restarted.onEvent(({ event }) => { if (event.type === 'delegated_task' || (event.type === 'tool_call_start' && event.call.name === 'task')) taskEvents++; });
+      const checkPairing = (sequence: Array<{ type: 'call' | 'result' | 'user'; id?: string }>) => {
+        const waiting = new Set<string>();
+        for (const item of sequence) {
+          if (item.type === 'call') { assert.ok(item.id && !waiting.has(item.id)); waiting.add(item.id); }
+          else if (item.type === 'result') { assert.ok(item.id && waiting.delete(item.id), `${kind}: 结果必须匹配当前调用`); }
+          else assert.equal(waiting.size, 0, `${kind}: 新用户消息前不得留未闭合调用`);
+        }
+        assert.equal(waiting.size, 0);
+      };
+      t.mock.method(globalThis, 'fetch', async (_input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+        requests++;
+        const body = JSON.parse(String(init?.body));
+        type Wire = { role?: string; type?: string; id?: string; call_id?: string; tool_call_id?: string; tool_use_id?: string; content?: Wire[]; tool_calls?: Wire[] };
+        const sequence: Array<{ type: 'call' | 'result' | 'user'; id?: string }> = [];
+        for (const item of (kind === 'responses' ? body.input : body.messages) as Wire[]) {
+          if (kind === 'responses') {
+            if (item.type === 'function_call') sequence.push({ type: 'call', id: item.call_id });
+            else if (item.type === 'function_call_output') sequence.push({ type: 'result', id: item.call_id });
+            else if (item.role === 'user') sequence.push({ type: 'user' });
+          } else if (kind === 'anthropic') {
+            for (const block of item.content ?? []) {
+              if (block.type === 'tool_use') sequence.push({ type: 'call', id: block.id });
+              else if (block.type === 'tool_result') sequence.push({ type: 'result', id: block.tool_use_id });
+              else if (item.role === 'user') sequence.push({ type: 'user' });
+            }
+          } else {
+            if (item.role === 'assistant') for (const call of item.tool_calls ?? []) sequence.push({ type: 'call', id: call.id });
+            else if (item.role === 'tool') sequence.push({ type: 'result', id: item.tool_call_id });
+            else if (item.role === 'user') sequence.push({ type: 'user' });
+          }
+        }
+        checkPairing(sequence);
+        const stream = kind === 'responses'
+          ? 'data: {"type":"response.output_text.delta","delta":"recovered"}\n\ndata: {"type":"response.completed","response":{"output":[]}}\n\n'
+          : kind === 'anthropic' ? 'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"recovered"}}\n\n'
+          : 'data: {"choices":[{"delta":{"content":"recovered"}}]}\n\ndata: [DONE]\n\n';
+        return new Response(stream, { headers: { 'content-type': 'text/event-stream' } });
+      });
+      try { await restarted.sendMessage('s_cold', '继续'); }
+      finally { t.mock.restoreAll(); }
+      const resumed = await restarted.getSession('s_cold');
+      assert.equal(requests, 1, '恢复后只请求当前新回合，不请求旧子任务');
+      assert.equal(taskEvents, 0);
+      assert.equal(resumed.delegatedTasks?.length, 1);
+      assert.equal(resumed.delegatedTasks?.[0].status, 'aborted');
+      const answer = resumed.messages[resumed.messages.length - 1];
+      assert.ok(answer.role === 'assistant' && answer.blocks.some((block) => block.type === 'text' && block.text === 'recovered'));
+      await restarted.stopAllBackgroundTasks(); await boot.stopAllBackgroundTasks();
+    }
   } finally {
     await manager.dispose();
     await Promise.allSettled(pending);
