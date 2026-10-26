@@ -354,6 +354,7 @@ function patchFetch(): void {
     signal?.addEventListener('abort', onAbort, { once: true });
 
     ch.onmessage = (f) => {
+      if (closed) return;
       if (f.t === 's') status = f.c;
       else if (f.t === 'd') buffer.push(f);
       else if (f.t === 'x') failure = new Error(f.m);
@@ -397,6 +398,10 @@ function patchFetch(): void {
         }
         if (failure) controller.error(failure);
         else controller.close();
+      },
+      cancel() {
+        buffer.length = 0;
+        onAbort();
       },
     });
 

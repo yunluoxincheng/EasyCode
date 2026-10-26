@@ -126,7 +126,7 @@ export interface SessionViewState {
   checkpointRevision?: number;
   questionRevision?: number;
   pendingQuestion?: QuestionItem;
-  preparingTool?: { callId: string; name: string };
+  preparingTool?: { callId: string; name: string; startedAt: number; lastProgressAt: number; argumentChars: number; argumentsComplete: boolean };
   items: TranscriptItem[];
   currentTurn: TurnItem | null;
   currentAssistant: AssistantItem | null;
@@ -1767,8 +1767,15 @@ export class AppStore {
 
       case 'tool_call_preparing':
         if (!state.running) break;
-        state.preparingTool = { callId: event.callId, name: event.name };
-        if (isActive) this.notify(false);
+        {
+          const previous = state.preparingTool?.callId === event.callId ? state.preparingTool : undefined;
+          state.preparingTool = {
+            callId: event.callId, name: event.name, startedAt: previous?.startedAt ?? Date.now(),
+            lastProgressAt: Date.now(), argumentChars: event.argumentChars ?? previous?.argumentChars ?? 0,
+            argumentsComplete: event.argumentsComplete ?? previous?.argumentsComplete ?? false,
+          };
+        }
+        if (isActive) this.scheduleNotify();
         break;
 
       case 'tool_execution_start': {
