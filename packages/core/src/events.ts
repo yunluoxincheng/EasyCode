@@ -18,7 +18,7 @@ export type AgentEvent =
   | { type: 'text_delta'; delta: string }
   | { type: 'reasoning_delta'; delta: string }
   /** 仅提示模型正在生成调用，不含参数，不进入审批或执行。 */
-  | { type: 'tool_call_preparing'; callId: string; name: string }
+  | { type: 'tool_call_preparing'; callId: string; name: string; argumentChars?: number; argumentsComplete?: boolean }
   | { type: 'tool_call_start'; call: ToolCallBlock }
   /** 已通过守卫/审批并取得执行锁，实际工具函数即将运行。 */
   | { type: 'tool_execution_start'; callId: string }

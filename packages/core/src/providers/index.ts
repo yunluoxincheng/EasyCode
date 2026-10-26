@@ -16,7 +16,7 @@ export type ProviderEvent =
   | { type: 'text_delta'; delta: string }
   | { type: 'reasoning_delta'; delta: string }
   /** 仅生成状态；不包含参数，不能触发审批或执行。 */
-  | { type: 'tool_call_preparing'; callId: string; name: string };
+  | { type: 'tool_call_preparing'; callId: string; name: string; argumentChars?: number; argumentsComplete?: boolean };
 
 export interface TurnResult {
   blocks: AssistantBlock[];

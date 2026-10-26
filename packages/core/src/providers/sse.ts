@@ -5,10 +5,13 @@ export async function* sseData(res: Response, signal?: AbortSignal, maxBytes?: n
   const decoder = new TextDecoder();
   let buffer = '';
   let received = 0;
+  const cancel = () => { void reader.cancel().catch(() => {}); };
+  signal?.addEventListener('abort', cancel, { once: true });
   try {
     while (true) {
       if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
       const { done, value } = await reader.read();
+      if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
       if (done) break;
       received += value.byteLength;
       if (maxBytes !== undefined && received > maxBytes) throw new Error('模型流超过子任务响应字节预算');
@@ -24,8 +27,15 @@ export async function* sseData(res: Response, signal?: AbortSignal, maxBytes?: n
         // 忽略注释行/空行/event:/id: 等字段
       }
     }
+    // 部分兼容网关在最后一条 data 后直接关闭，没有补换行。
+    if (buffer.startsWith('data:')) {
+      const payload = buffer.slice(5).trim();
+      if (payload) yield payload;
+    }
   } finally {
-    if (maxBytes !== undefined) void reader.cancel().catch(() => {});
+    signal?.removeEventListener('abort', cancel);
+    // 消费者可在协议完成事件处提前结束，不再等待服务器断开连接。
+    cancel();
     reader.releaseLock();
   }
 }

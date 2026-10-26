@@ -115,6 +115,8 @@ export type TranscriptItem = UserItem | TurnItem | TurnEntry;
 /** 会话运行态：waiting 等待审批，question 等待回答，两者分别管理。 */
 export type SessionRunStatus = 'idle' | 'running' | 'waiting' | 'question' | 'error';
 
+type PreparingTool = { callId: string; name: string; startedAt: number; lastProgressAt: number; argumentChars: number; argumentsComplete: boolean };
+
 /** 会话视图状态池化项（TODOS #29）：隔离存储每个会话的时间线、运行态与任务清单 */
 export interface SessionViewState {
   delegatedTaskIds?: string[];
@@ -126,7 +128,7 @@ export interface SessionViewState {
   checkpointRevision?: number;
   questionRevision?: number;
   pendingQuestion?: QuestionItem;
-  preparingTool?: { callId: string; name: string };
+  preparingTools?: Map<string, PreparingTool>;
   items: TranscriptItem[];
   currentTurn: TurnItem | null;
   currentAssistant: AssistantItem | null;
@@ -343,9 +345,12 @@ export class AppStore {
     return null;
   }
 
-  get preparingTool(): SessionViewState['preparingTool'] {
+  get preparingTool(): PreparingTool | undefined {
     const state = this.activeId ? this.sessionStates.get(this.activeId) : undefined;
-    return state?.running ? state.preparingTool : undefined;
+    if (!state?.running || !state.preparingTools) return undefined;
+    // 稳定展示最早尚未接收完参数的调用，避免并行分片让名称和计时来回跳变。
+    const tools = [...state.preparingTools.values()];
+    return tools.find((tool) => !tool.argumentsComplete) ?? tools[0];
   }
 
   /** 获取指定会话当前的实时运行状态（用于侧栏状态指示灯） */
@@ -1160,7 +1165,7 @@ export class AppStore {
       if (state.currentTurn) state.currentTurn.items.push(errorItem);
       else state.items.push(errorItem);
       state.running = false;
-      state.preparingTool = undefined;
+      state.preparingTools = undefined;
       state.status = 'error';
       if (this.activeId === id) {
         this.syncActiveState(state);
@@ -1190,7 +1195,7 @@ export class AppStore {
     } catch (err) {
       if (state.operation !== operation) return;
       state.running = false;
-      state.preparingTool = undefined;
+      state.preparingTools = undefined;
       state.status = 'error';
       this.showToast(err instanceof Error ? err.message : String(err), 'err');
       if (this.activeId === id) {
@@ -1295,7 +1300,7 @@ export class AppStore {
     } finally {
       if (state.operation === operation) {
         state.stopping = false;
-        state.preparingTool = undefined;
+        state.preparingTools = undefined;
         if (id === this.activeId) {
           this.syncActiveState(state);
           this.turnAtBottom = true;
@@ -1712,7 +1717,7 @@ export class AppStore {
         state.items = this.itemsFromSession({ messages: event.messages, delegatedTasks: event.delegatedTasks } as SessionData);
         state.delegatedTaskIds = event.delegatedTasks?.map((task) => task.id);
         state.currentAssistant = null;
-        state.preparingTool = undefined;
+        state.preparingTools = undefined;
         state.turnItemSet = new WeakSet();
         state.activeTodos = event.todos;
         state.lastUsage = null;
@@ -1733,7 +1738,7 @@ export class AppStore {
         break;
       }
       case 'assistant_start':
-        state.preparingTool = undefined;
+        state.preparingTools = undefined;
         if (isActive) this.flushPendingNotify();
         state.running = true;
         state.status = 'running';
@@ -1767,8 +1772,16 @@ export class AppStore {
 
       case 'tool_call_preparing':
         if (!state.running) break;
-        state.preparingTool = { callId: event.callId, name: event.name };
-        if (isActive) this.notify(false);
+        {
+          const tools = state.preparingTools ??= new Map();
+          const previous = tools.get(event.callId);
+          tools.set(event.callId, {
+            callId: event.callId, name: event.name, startedAt: previous?.startedAt ?? Date.now(),
+            lastProgressAt: Date.now(), argumentChars: event.argumentChars ?? previous?.argumentChars ?? 0,
+            argumentsComplete: event.argumentsComplete ?? previous?.argumentsComplete ?? false,
+          });
+        }
+        if (isActive) this.scheduleNotify();
         break;
 
       case 'tool_execution_start': {
@@ -1805,7 +1818,7 @@ export class AppStore {
       }
 
       case 'tool_call_start': {
-        state.preparingTool = undefined;
+        state.preparingTools = undefined;
         if (isActive) this.flushPendingNotify();
         this.flushAssistantInState(state);
         this.pushToTurnInState(state, {
@@ -1918,7 +1931,7 @@ export class AppStore {
       }
 
       case 'step_end':
-        state.preparingTool = undefined;
+        state.preparingTools = undefined;
         state.lastUsage = event.usage ?? null;
         if (event.sessionUsage) {
           state.sessionUsage = {
@@ -2051,7 +2064,7 @@ export class AppStore {
       }
 
       case 'error':
-        state.preparingTool = undefined;
+        state.preparingTools = undefined;
         if (isActive) this.flushPendingNotify();
         this.flushAssistantInState(state);
         this.pushToTurnInState(state, { kind: 'error', id: this.nextId(), message: event.message });
@@ -2071,7 +2084,7 @@ export class AppStore {
           if (question.status === 'pending') { question.status = 'expired'; question.draft = undefined; }
         }
         state.stopping = false;
-        state.preparingTool = undefined;
+        state.preparingTools = undefined;
         if (isActive) this.flushPendingNotify();
         this.flushAssistantInState(state);
         if (event.reason === 'aborted' && state.currentTurn) {
@@ -2169,7 +2182,7 @@ export class AppStore {
 
   /** 折叠并关闭当前回合（测试自愈循环收敛时复用 done 的收尾语义） */
   private closeTurnInState(state: SessionViewState): void {
-    state.preparingTool = undefined;
+    state.preparingTools = undefined;
     const turn = state.currentTurn;
     if (!turn) return;
     this.flushAssistantInState(state);

@@ -615,7 +615,7 @@ function LiveTicker() {
   const pendingApproval = store.pendingApproval;
   const pendingQuestion = store.pendingQuestion;
   const preparingTool = store.preparingTool;
-  const startedAt = pendingQuestion ? undefined : activeTool?.executionStartedAt;
+  const startedAt = pendingQuestion ? undefined : activeTool?.executionStartedAt ?? preparingTool?.startedAt;
 
   useEffect(() => {
     if (!startedAt) {
@@ -668,7 +668,11 @@ function LiveTicker() {
     return <div className="live-ticker waiting">
       <span className="live-ticker-prefix">❯</span>
       <span className="live-ticker-badge wait">[{toolLabel(preparingTool.name)}]</span>
-      <span className="live-ticker-text">正在生成工具调用参数...</span>
+      <span className="live-ticker-text">
+        {preparingTool.argumentsComplete ? '参数已接收，等待响应完成...' : '正在生成工具调用参数...'}
+        {` 已接收约 ${preparingTool.argumentChars.toLocaleString()} 字符；最近参数进展 ${Math.max(0, (Date.now() - preparingTool.lastProgressAt) / 1000).toFixed(0)}s 前`}
+      </span>
+      <span className="live-ticker-time">(等待 {elapsed}s)</span>
       <span className="live-ticker-cursor">█</span>
     </div>;
   }

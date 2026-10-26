@@ -11,6 +11,55 @@ const compiled = ts.transpileModule(source, { compilerOptions: {
 } }).outputText.replace(/from ["'](@easycode\/(?:engine|core))["']/g, (_, name) => `from ${JSON.stringify(import.meta.resolve(name))}`);
 const { AppStore } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`);
 
+test('工具生成 Store：并行分片保留独立计时，稳定选中未完成调用并按回合清理', (t) => {
+  let dispatch;
+  const store = new AppStore({ onEvent: (listener) => { dispatch = listener; } });
+  t.after(() => store.flushPendingNotify());
+  let now = 1000;
+  t.mock.method(Date, 'now', () => now);
+  store.activeId = 's1';
+  const send = (event, sessionId = 's1') => dispatch({ sessionId, event });
+  const progress = (callId, argumentChars, argumentsComplete = false) =>
+    ({ type: 'tool_call_preparing', callId, name: callId, argumentChars, argumentsComplete });
+  send({ type: 'assistant_start' });
+  send(progress('A', 1));
+  now = 2000;
+  send(progress('B', 2));
+  assert.equal(store.preparingTool.callId, 'A', '后来的并行调用不抢占展示');
+  now = 3000;
+  send(progress('A', 3));
+  now = 4000;
+  send(progress('B', 4));
+  assert.equal(store.preparingTool.startedAt, 1000);
+  assert.equal(store.preparingTool.argumentChars, 3);
+  send(progress('A', 3, true));
+  assert.equal(store.preparingTool.callId, 'B');
+  assert.equal(store.preparingTool.startedAt, 2000, '切换展示仍沿用 B 的原始开始时间');
+  assert.equal(store.preparingTool.lastProgressAt, 4000);
+  assert.equal(store.preparingTool.argumentChars, 4);
+  send({ type: 'assistant_start' }, 's2');
+  send(progress('A', 99), 's2');
+  assert.equal(store.preparingTool.callId, 'B', '后台会话不能覆盖当前调用');
+  store.activeId = 's2';
+  assert.equal(store.preparingTool.argumentChars, 99);
+  store.activeId = 's1';
+  send(progress('B', 4, true));
+  assert.equal(store.preparingTool.argumentsComplete, true);
+  for (const boundary of [
+    { type: 'assistant_start' }, { type: 'step_end' },
+    { type: 'tool_call_start', call: { id: 'A', name: 'A', input: {} } },
+    { type: 'error', message: 'interrupted' }, { type: 'done', reason: 'aborted' },
+  ]) {
+    send({ type: 'assistant_start' });
+    now += 1000;
+    send(progress('A', 0));
+    assert.equal(store.preparingTool.startedAt, now, '新回合重用 ID 不沿用旧计时');
+    send(boundary);
+    assert.equal(store.preparingTool, undefined);
+    assert.equal(store.sessionStates.get('s1').preparingTools, undefined);
+  }
+});
+
 test('后台任务 Store：删除后的旧快照不复活记录，空列表继续刷新且会话隔离', async (t) => {
   let dispatch;
   let resolveSnapshot;
